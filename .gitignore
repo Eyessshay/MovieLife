@@ -1,0 +1,9 @@
+.idea/
+.codex-review/
+target/
+*.iml
+logs/
+*.log
+
+application-local.yml
+.env

@@ -1,0 +1,4 @@
+movielife:
+  auth:
+    # 仅开发环境输出模拟验证码，生产环境保持默认 false。
+    log-code-enabled: true
