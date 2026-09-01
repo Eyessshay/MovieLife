@@ -151,7 +151,7 @@ GET    /api/collections/check                      # 查询指定目标是否已
        &targetId=1001
 ```
 
-收藏统一使用 `targetType + targetId`，支持 `MOVIE`、`ACTIVITY`、`POST`、`REVIEW`，与 `tb_collection` 的多态模型一致。创建和删除接口均为幂等操作。
+收藏统一使用 `targetType + targetId`。阶段 4 已支持 `MOVIE`、`POST`、`REVIEW`，`ACTIVITY` 在活动模块落地后接入。创建和删除接口均为幂等操作，数据库唯一索引作为并发兜底。
 
 电影详情和活动详情的 VO 优先直接返回当前用户的附加状态，例如 `collected`、`liked` 等，减少详情页额外请求。`GET /api/collections/check` 保留为通用兜底接口，适用于批量预检查、非详情页场景或新目标类型接入。
 

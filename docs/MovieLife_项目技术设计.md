@@ -70,6 +70,8 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影详情和活动详情优先在 VO 中返回当前用户的收藏、点赞等附加状态，通用状态查询接口只作为兜底，避免详情页产生不必要的额外请求。
 
+阶段 4 社区链路采用以下实现边界：收藏关系和关注关系以 MySQL 为唯一事实来源；帖子点赞关系使用 Redis ZSet、计数持久化在 `tb_post.liked`；关注 Feed 使用 Redis ZSet 推模式，帖子事务提交后再推送给粉丝。Feed 查询使用 `maxTime + offset` 滚动分页，批量查询帖子和用户后按 Redis 返回顺序恢复。删除帖子不遍历所有粉丝清理 Feed，而是在读取时惰性移除失效 postId。
+
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
 详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.1 清单版，字段级契约将在 OpenAPI 版本中冻结。

@@ -18,6 +18,8 @@ public final class RedisConstants {
     public static final long MOVIE_DETAIL_TTL_RANDOM_MINUTES = 10L;
     public static final Duration MOVIE_DETAIL_NULL_TTL = Duration.ofMinutes(2);
     public static final String REVIEW_LIKE_KEY = "review:like:";
+    public static final String POST_LIKE_KEY = "post:like:";
+    public static final String FEED_KEY = "feed:";
 
     private RedisConstants() {
     }
