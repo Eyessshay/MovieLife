@@ -1,7 +1,11 @@
 package com.movielife.controller;
 
 import com.movielife.service.VenueService;
+import com.movielife.vo.VenueDetailVO;
 import com.movielife.vo.PageVO;
+import com.movielife.enums.VenueType;
+import com.movielife.exception.BusinessException;
+import com.movielife.exception.ErrorCode;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -57,5 +61,39 @@ class VenueControllerTest {
         mockMvc.perform(get("/api/venues").param("type", "ABC"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("INVALID_VENUE_TYPE"));
+    }
+
+    @Test
+    void shouldAllowPublicVenueDetailQuery() throws Exception {
+        VenueDetailVO detail = new VenueDetailVO();
+        detail.setId(1L);
+        detail.setName("MovieLife影城");
+        detail.setType(VenueType.CINEMA);
+        when(venueService.queryVenueDetail(1L)).thenReturn(detail);
+
+        mockMvc.perform(get("/api/venues/1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.id").value(1))
+                .andExpect(jsonPath("$.data.type").value("CINEMA"));
+    }
+
+    @Test
+    void shouldReturnInvalidIdForZero() throws Exception {
+        when(venueService.queryVenueDetail(0L))
+                .thenThrow(new BusinessException(ErrorCode.INVALID_ID));
+
+        mockMvc.perform(get("/api/venues/0"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_ID"));
+    }
+
+    @Test
+    void shouldReturnNotFoundForMissingVenue() throws Exception {
+        when(venueService.queryVenueDetail(999999L))
+                .thenThrow(new BusinessException(ErrorCode.VENUE_NOT_FOUND));
+
+        mockMvc.perform(get("/api/venues/999999"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("VENUE_NOT_FOUND"));
     }
 }

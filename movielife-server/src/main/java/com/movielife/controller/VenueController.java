@@ -4,9 +4,11 @@ import com.movielife.common.Result;
 import com.movielife.dto.VenueQueryDTO;
 import com.movielife.service.VenueService;
 import com.movielife.vo.PageVO;
+import com.movielife.vo.VenueDetailVO;
 import com.movielife.vo.VenueListItemVO;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -22,5 +24,10 @@ public class VenueController {
     @GetMapping
     public Result<PageVO<VenueListItemVO>> list(@Valid VenueQueryDTO queryDTO) {
         return Result.ok(venueService.queryVenues(queryDTO));
+    }
+
+    @GetMapping("/{id}")
+    public Result<VenueDetailVO> detail(@PathVariable Long id) {
+        return Result.ok(venueService.queryVenueDetail(id));
     }
 }
