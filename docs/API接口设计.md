@@ -161,7 +161,8 @@ GET    /api/collections/check                      # 查询指定目标是否已
 GET /api/venues                         # 场馆列表和筛选
 GET /api/venues/{id}                    # 场馆详情
 GET /api/venues/nearby                  # 附近场馆
-    ?type=CINEMA
+    ?city=上海
+    &type=CINEMA
     &bizType=MOVIE
     &bizId=1001
     &x=经度
@@ -171,7 +172,11 @@ GET /api/venues/{id}/halls               # 场馆影厅/场厅列表
 GET /api/venues/{id}/reviews             # 场馆评价
 ```
 
-`nearby` 以经纬度作为查询条件，服务端负责校验坐标范围和距离上限。`bizType + bizId` 为可选条件：传入后只返回该电影或活动存在未来可售场次的附近场馆。底层先通过 Redis GEO 按距离召回场馆，再查询 `tb_showtime` 过滤无排片场馆，并保持 GEO 距离顺序。
+`GET /api/venues/nearby` 是公开接口，支持 `city`、`type`、`x`、`y`、`distance`、`page`、`pageSize`，其中 `x` 为经度、`y` 为纬度，`distance` 和响应中的距离单位均为米。经度范围为 `-180～180`，纬度范围为 `-90～90`，查询距离范围为 `100～50000` 米。
+
+普通模式只传场馆和坐标条件：服务端查询 `venue:geo:{city}:{TYPE}`，按距离升序召回 `venueId + distance`，再从 MySQL 批量补齐启用的场馆信息，并按 GEO 顺序返回。GEO Key 不存在时返回空列表；Redis GEO 查询异常时返回 `INTERNAL_ERROR`，当前不使用 MySQL 经纬度计算降级。
+
+电影过滤模式额外传入 `bizType=MOVIE&bizId={movieId}`。`bizType` 和 `bizId` 必须同时存在或同时为空，当前仅支持 `MOVIE`，其他类型返回 `INVALID_BIZ_TYPE`；电影不存在返回 `MOVIE_NOT_FOUND`。服务端先进行 GEO 候选召回，再通过 `tb_showtime` 的 `biz_type=MOVIE`、`biz_id`、`start_time > NOW()`、`status=1` 条件筛选存在未来可售场次的场馆，过滤后分页，最终保持 GEO 距离顺序。同一场馆即使存在多个有效场次也只返回一次。
 
 ### 3.8 场次、座位与锁座
 

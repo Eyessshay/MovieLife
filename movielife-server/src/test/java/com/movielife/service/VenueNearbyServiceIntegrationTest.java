@@ -118,6 +118,19 @@ class VenueNearbyServiceIntegrationTest {
     }
 
     @Test
+    void geoMemberWithoutDatabaseVenueShouldBeIgnored() {
+        stringRedisTemplate.opsForGeo().add(
+                CINEMA_KEY,
+                new Point(121.000000D, 31.000000D),
+                "999999999"
+        );
+
+        assertThat(venueService.queryNearbyVenues(query(TEST_CITY, VenueType.CINEMA, 5000, 1, 10)))
+                .extracting(VenueNearbyVO::getId)
+                .containsExactly(nearest.getId(), farther.getId());
+    }
+
+    @Test
     void movieFilterShouldKeepOnlyFutureOnSaleShowtimes() {
         insertShowtime(nearest, nearestHall, 1L, LocalDateTime.now().plusDays(1), 1);
         insertShowtime(farther, fartherHall, 1L, LocalDateTime.now().minusDays(1), 1);
@@ -136,6 +149,16 @@ class VenueNearbyServiceIntegrationTest {
         assertThat(venueService.queryNearbyVenues(movieQuery(1L, 1, 10)))
                 .extracting(VenueNearbyVO::getId)
                 .containsExactly(nearest.getId(), farther.getId());
+    }
+
+    @Test
+    void multipleValidShowtimesAtSameVenueShouldReturnVenueOnce() {
+        insertShowtime(nearest, nearestHall, 1L, LocalDateTime.now().plusDays(1), 1);
+        insertShowtime(nearest, nearestHall, 1L, LocalDateTime.now().plusDays(2), 1);
+
+        assertThat(venueService.queryNearbyVenues(movieQuery(1L, 1, 10)))
+                .extracting(VenueNearbyVO::getId)
+                .containsExactly(nearest.getId());
     }
 
     @Test

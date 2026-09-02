@@ -101,6 +101,53 @@ class VenueControllerTest {
     }
 
     @Test
+    void nearbyQueryShouldRejectOutOfRangeLongitude() throws Exception {
+        mockMvc.perform(validNearbyRequest("180.1", "31.188"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PARAM"));
+    }
+
+    @Test
+    void nearbyQueryShouldRejectOutOfRangeLatitude() throws Exception {
+        mockMvc.perform(validNearbyRequest("121.437", "-90.1"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PARAM"));
+    }
+
+    @Test
+    void nearbyQueryShouldRejectDistanceOutsideSupportedRange() throws Exception {
+        mockMvc.perform(validNearbyRequest().param("distance", "99"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PARAM"));
+
+        mockMvc.perform(validNearbyRequest().param("distance", "50001"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PARAM"));
+    }
+
+    @Test
+    void nearbyQueryShouldRejectInvalidPagination() throws Exception {
+        mockMvc.perform(validNearbyRequest().param("page", "0"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PAGE"));
+
+        mockMvc.perform(validNearbyRequest().param("pageSize", "101"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("PAGE_SIZE_TOO_LARGE"));
+    }
+
+    @Test
+    void nearbyQueryShouldRequireBizTypeAndBizIdTogether() throws Exception {
+        mockMvc.perform(validNearbyRequest().param("bizType", "MOVIE"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PARAM"));
+
+        mockMvc.perform(validNearbyRequest().param("bizId", "1"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PARAM"));
+    }
+
+    @Test
     void shouldAllowPublicVenueDetailQuery() throws Exception {
         VenueDetailVO detail = new VenueDetailVO();
         detail.setId(1L);
@@ -173,5 +220,19 @@ class VenueControllerTest {
         hall.setVenueId(venueId);
         hall.setName(name);
         return hall;
+    }
+
+    private org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder validNearbyRequest() {
+        return validNearbyRequest("121.437", "31.188");
+    }
+
+    private org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder validNearbyRequest(
+            String x,
+            String y) {
+        return get("/api/venues/nearby")
+                .param("city", "上海")
+                .param("type", "CINEMA")
+                .param("x", x)
+                .param("y", y);
     }
 }

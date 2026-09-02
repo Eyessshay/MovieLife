@@ -35,7 +35,40 @@ Redis 用于提升并发性能，最终订单、座位售出结果和评价内�
 
 评价点赞在当前 MVP 中采用“Redis ZSet 保存用户关系、MySQL 保存聚合数量”的双存储方案。点赞和取消点赞先以 Redis 原子新增/移除结果判断是否需要修改计数，数据库写入失败时执行反向补偿并记录错误。该方案不等同于跨存储强一致事务：如果 Redis 被清空，`like_count` 仍在，但具体点赞用户关系会丢失。当前环境需开启可靠的 Redis 持久化；生产级演进方案是增加点赞关系持久化表，或通过可靠消息异步落库与对账修复。
 
-### 3.4 推荐与 AI
+### 3.4 场馆与 Redis GEO
+
+场馆附近查询采用“Redis 负责空间召回、MySQL 负责业务事实”的边界：
+
+```text
+MySQL tb_venue
+        ↓
+初始化 Redis GEO
+        ↓
+venue:geo:{city}:{TYPE}
+        ↓
+按经纬度召回附近 venueId + distance
+        ↓
+MySQL 批量补齐启用的 Venue
+        ↓
+可选查询 tb_showtime
+过滤指定电影未来可售场次
+        ↓
+过滤后分页并按 GEO 顺序恢复
+        ↓
+返回附近场馆
+```
+
+GEO 初始化只处理 `status=1` 且经纬度完整的场馆，按 `city + type` 分组批量写入，member 使用 `venueId`。普通 nearby 查询直接按距离分页；电影过滤模式先校验电影存在，再查询 `tb_showtime` 中 `start_time > NOW()` 且 `status=1` 的场馆，并在排片过滤后分页。同一场馆的多个有效场次通过 `DISTINCT venue_id` 去重。
+
+当前 MVP 明确保留以下边界：
+
+- GEO 初始化只新增或更新 member，不主动清理 Key 中的历史 member；读取时会忽略 MySQL 中不存在或已停用的场馆。
+- Venue 信息修改后的 GEO 自动同步留待管理端阶段处理。
+- nearby 的业务过滤目前只支持 `MOVIE`，暂不支持 `ACTIVITY`。
+- Redis GEO 故障直接返回统一服务异常，暂不使用 MySQL 经纬度计算降级。
+- 电影过滤模式的 GEO 候选窗口为 `min(page × pageSize × 5, 200)`；200 条上限是当前数据规模下控制 Redis 召回和 MySQL 查询成本的工程折中，不代表完整深分页能力。
+
+### 3.5 推荐与 AI
 
 推荐链路暂定为：行为采集 → 用户/内容标签打分 → 候选召回 → 规则排序 → AI 生成推荐理由，推荐理由随推荐结果一起返回。评价总结由评论变化触发异步生成，持久化并缓存后由只读接口提供，禁止在详情页请求中同步调用模型。AI 不直接决定座位库存、价格、支付结果或订单状态。
 
@@ -74,4 +107,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.1 清单版，字段级契约将在 OpenAPI 版本中冻结。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.2，Venue + Redis GEO 查询契约已在阶段 5 冻结，其余尚未实现模块的字段级契约将在后续阶段继续补齐。
