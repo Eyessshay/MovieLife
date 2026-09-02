@@ -1,10 +1,12 @@
 package com.movielife.service;
 
 import com.movielife.dto.VenueQueryDTO;
+import com.movielife.dto.VenueNearbyQueryDTO;
 import com.movielife.vo.HallVO;
 import com.movielife.vo.PageVO;
 import com.movielife.vo.VenueDetailVO;
 import com.movielife.vo.VenueListItemVO;
+import com.movielife.vo.VenueNearbyVO;
 
 import java.util.List;
 
@@ -15,4 +17,6 @@ public interface VenueService {
     VenueDetailVO queryVenueDetail(Long id);
 
     List<HallVO> queryVenueHalls(Long venueId);
+
+    List<VenueNearbyVO> queryNearbyVenues(VenueNearbyQueryDTO queryDTO);
 }

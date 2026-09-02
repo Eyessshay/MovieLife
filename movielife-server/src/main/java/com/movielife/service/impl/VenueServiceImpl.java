@@ -7,6 +7,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.movielife.constants.RedisConstants;
 import com.movielife.dto.VenueDetailCacheDTO;
+import com.movielife.dto.VenueNearbyQueryDTO;
 import com.movielife.dto.VenueQueryDTO;
 import com.movielife.entity.Hall;
 import com.movielife.entity.Venue;
@@ -20,13 +21,25 @@ import com.movielife.vo.HallVO;
 import com.movielife.vo.PageVO;
 import com.movielife.vo.VenueDetailVO;
 import com.movielife.vo.VenueListItemVO;
+import com.movielife.vo.VenueNearbyVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.data.geo.Circle;
+import org.springframework.data.geo.Distance;
+import org.springframework.data.geo.GeoResult;
+import org.springframework.data.geo.GeoResults;
+import org.springframework.data.geo.Metrics;
+import org.springframework.data.geo.Point;
+import org.springframework.data.redis.connection.RedisGeoCommands;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
@@ -88,6 +101,69 @@ public class VenueServiceImpl implements VenueService {
                 ).stream()
                 .map(this::toHallVO)
                 .collect(Collectors.toList());
+    }
+
+    @Override
+    public List<VenueNearbyVO> queryNearbyVenues(VenueNearbyQueryDTO queryDTO) {
+        String key = RedisConstants.VENUE_GEO_KEY
+                + queryDTO.getCity() + ":" + queryDTO.getType().name();
+        long from = (long) (queryDTO.getPage() - 1) * queryDTO.getPageSize();
+        long end = (long) queryDTO.getPage() * queryDTO.getPageSize();
+
+        GeoResults<RedisGeoCommands.GeoLocation<String>> geoResults;
+        try {
+            RedisGeoCommands.GeoRadiusCommandArgs args = RedisGeoCommands.GeoRadiusCommandArgs
+                    .newGeoRadiusArgs()
+                    .includeDistance()
+                    .sortAscending()
+                    .limit(end);
+            geoResults = stringRedisTemplate.opsForGeo().radius(
+                    key,
+                    new Circle(
+                            new Point(queryDTO.getX(), queryDTO.getY()),
+                            new Distance(queryDTO.getDistance() / 1000D, Metrics.KILOMETERS)
+                    ),
+                    args
+            );
+        } catch (RuntimeException exception) {
+            log.error("Redis GEO nearby query failed, key={}", key, exception);
+            throw new BusinessException(ErrorCode.INTERNAL_ERROR);
+        }
+
+        if (geoResults == null || geoResults.getContent().size() <= from) {
+            return Collections.emptyList();
+        }
+        int toIndex = (int) Math.min(end, geoResults.getContent().size());
+        List<GeoResult<RedisGeoCommands.GeoLocation<String>>> pageResults =
+                geoResults.getContent().subList((int) from, toIndex);
+        List<Long> venueIds = pageResults.stream()
+                .map(result -> Long.valueOf(result.getContent().getName()))
+                .collect(Collectors.toList());
+
+        Map<Long, Venue> venueMap = venueMapper.selectList(
+                        new LambdaQueryWrapper<Venue>()
+                                .in(Venue::getId, venueIds)
+                                .eq(Venue::getStatus, ENABLED_STATUS)
+                ).stream()
+                .collect(Collectors.toMap(
+                        Venue::getId,
+                        venue -> venue,
+                        (left, right) -> left,
+                        LinkedHashMap::new
+                ));
+
+        List<VenueNearbyVO> result = new ArrayList<>();
+        for (GeoResult<RedisGeoCommands.GeoLocation<String>> geoResult : pageResults) {
+            Long venueId = Long.valueOf(geoResult.getContent().getName());
+            Venue venue = venueMap.get(venueId);
+            if (venue != null) {
+                double distanceInMeters = geoResult.getDistance()
+                        .in(Metrics.KILOMETERS)
+                        .getValue() * 1000D;
+                result.add(toNearbyVO(venue, distanceInMeters));
+            }
+        }
+        return result;
     }
 
     private VenueDetailCacheDTO findPublicVenueDetail(Long id) {
@@ -197,6 +273,19 @@ public class VenueServiceImpl implements VenueService {
         vo.setId(hall.getId());
         vo.setVenueId(hall.getVenueId());
         vo.setName(hall.getName());
+        return vo;
+    }
+
+    private VenueNearbyVO toNearbyVO(Venue venue, double distance) {
+        VenueNearbyVO vo = new VenueNearbyVO();
+        vo.setId(venue.getId());
+        vo.setName(venue.getName());
+        vo.setType(VenueType.fromDbValue(venue.getType()));
+        vo.setCity(venue.getCity());
+        vo.setAddress(venue.getAddress());
+        vo.setAvgScore(venue.getAvgScore());
+        vo.setOpenTime(venue.getOpenTime());
+        vo.setDistance(distance);
         return vo;
     }
 }

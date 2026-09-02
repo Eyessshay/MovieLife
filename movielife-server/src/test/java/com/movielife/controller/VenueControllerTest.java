@@ -4,6 +4,7 @@ import com.movielife.service.VenueService;
 import com.movielife.vo.VenueDetailVO;
 import com.movielife.vo.HallVO;
 import com.movielife.vo.PageVO;
+import com.movielife.vo.VenueNearbyVO;
 import com.movielife.enums.VenueType;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
@@ -63,6 +64,27 @@ class VenueControllerTest {
         mockMvc.perform(get("/api/venues").param("type", "ABC"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("INVALID_VENUE_TYPE"));
+    }
+
+    @Test
+    void shouldAllowPublicNearbyVenueQuery() throws Exception {
+        VenueNearbyVO nearby = new VenueNearbyVO();
+        nearby.setId(1L);
+        nearby.setName("MovieLife影城");
+        nearby.setType(VenueType.CINEMA);
+        nearby.setDistance(12.5D);
+        when(venueService.queryNearbyVenues(any()))
+                .thenReturn(Collections.singletonList(nearby));
+
+        mockMvc.perform(get("/api/venues/nearby")
+                        .param("city", "上海")
+                        .param("type", "CINEMA")
+                        .param("x", "121.437")
+                        .param("y", "31.188"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].id").value(1))
+                .andExpect(jsonPath("$.data[0].type").value("CINEMA"))
+                .andExpect(jsonPath("$.data[0].distance").value(12.5));
     }
 
     @Test

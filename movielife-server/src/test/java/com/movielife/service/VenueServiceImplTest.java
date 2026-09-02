@@ -3,6 +3,7 @@ package com.movielife.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.movielife.constants.RedisConstants;
 import com.movielife.dto.VenueDetailCacheDTO;
+import com.movielife.dto.VenueNearbyQueryDTO;
 import com.movielife.entity.Venue;
 import com.movielife.enums.VenueType;
 import com.movielife.exception.BusinessException;
@@ -11,6 +12,7 @@ import com.movielife.mapper.VenueMapper;
 import com.movielife.mapper.HallMapper;
 import com.movielife.service.impl.VenueServiceImpl;
 import com.movielife.vo.VenueDetailVO;
+import com.movielife.vo.VenueNearbyVO;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -18,10 +20,21 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.GeoOperations;
 import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.data.geo.Distance;
+import org.springframework.data.geo.Circle;
+import org.springframework.data.geo.GeoResult;
+import org.springframework.data.geo.GeoResults;
+import org.springframework.data.geo.Metrics;
+import org.springframework.data.geo.Point;
+import org.springframework.data.redis.connection.RedisGeoCommands;
 
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -44,6 +57,8 @@ class VenueServiceImplTest {
     private StringRedisTemplate redisTemplate;
     @Mock
     private ValueOperations<String, String> valueOperations;
+    @Mock
+    private GeoOperations<String, String> geoOperations;
 
     private ObjectMapper objectMapper;
     private VenueServiceImpl venueService;
@@ -53,6 +68,7 @@ class VenueServiceImplTest {
         objectMapper = new ObjectMapper();
         venueService = new VenueServiceImpl(venueMapper, hallMapper, redisTemplate, objectMapper);
         lenient().when(redisTemplate.opsForValue()).thenReturn(valueOperations);
+        lenient().when(redisTemplate.opsForGeo()).thenReturn(geoOperations);
     }
 
     @Test
@@ -167,6 +183,62 @@ class VenueServiceImplTest {
                 .isEqualTo(ErrorCode.INVALID_ID);
     }
 
+    @Test
+    void nearbyQueryShouldBatchLoadVenuesAndRestoreGeoOrder() {
+        Venue first = enabledVenue();
+        Venue second = enabledVenue();
+        second.setId(2L);
+        second.setName("第二家影院");
+        when(geoOperations.radius(eq("venue:geo:上海:CINEMA"), any(Circle.class),
+                any(RedisGeoCommands.GeoRadiusCommandArgs.class)))
+                .thenReturn(geoResults(geoResult("1", 100D), geoResult("2", 300D)));
+        when(venueMapper.selectList(any())).thenReturn(Arrays.asList(second, first));
+
+        List<VenueNearbyVO> result = venueService.queryNearbyVenues(nearbyQuery(1, 10));
+
+        assertThat(result).extracting(VenueNearbyVO::getId).containsExactly(1L, 2L);
+        assertThat(result).extracting(VenueNearbyVO::getDistance).containsExactly(100D, 300D);
+        verify(venueMapper).selectList(any());
+    }
+
+    @Test
+    void nearbyQueryShouldApplyPageWindowBeforeBatchLoading() {
+        Venue second = enabledVenue();
+        second.setId(2L);
+        when(geoOperations.radius(eq("venue:geo:上海:CINEMA"), any(Circle.class),
+                any(RedisGeoCommands.GeoRadiusCommandArgs.class)))
+                .thenReturn(geoResults(geoResult("1", 100D), geoResult("2", 300D)));
+        when(venueMapper.selectList(any())).thenReturn(Collections.singletonList(second));
+
+        List<VenueNearbyVO> result = venueService.queryNearbyVenues(nearbyQuery(2, 1));
+
+        assertThat(result).extracting(VenueNearbyVO::getId).containsExactly(2L);
+    }
+
+    @Test
+    void nearbyQueryBeyondAvailableResultsShouldReturnEmptyWithoutDatabaseQuery() {
+        when(geoOperations.radius(eq("venue:geo:上海:CINEMA"), any(Circle.class),
+                any(RedisGeoCommands.GeoRadiusCommandArgs.class)))
+                .thenReturn(geoResults(geoResult("1", 100D), geoResult("2", 300D)));
+
+        List<VenueNearbyVO> result = venueService.queryNearbyVenues(nearbyQuery(3, 1));
+
+        assertThat(result).isEmpty();
+        verify(venueMapper, never()).selectList(any());
+    }
+
+    @Test
+    void redisGeoFailureShouldReturnUnifiedServiceError() {
+        when(geoOperations.radius(eq("venue:geo:上海:CINEMA"), any(Circle.class),
+                any(RedisGeoCommands.GeoRadiusCommandArgs.class)))
+                .thenThrow(new RuntimeException("redis unavailable"));
+
+        assertThatThrownBy(() -> venueService.queryNearbyVenues(nearbyQuery(1, 10)))
+                .isInstanceOf(BusinessException.class)
+                .extracting(exception -> ((BusinessException) exception).getErrorCode())
+                .isEqualTo(ErrorCode.INTERNAL_ERROR);
+    }
+
     private void assertVenueNotFound(Long id) {
         assertThatThrownBy(() -> venueService.queryVenueDetail(id))
                 .isInstanceOf(BusinessException.class)
@@ -201,5 +273,29 @@ class VenueServiceImplTest {
         dto.setPhone("021-60000001");
         dto.setAvgScore(new BigDecimal("4.50"));
         return dto;
+    }
+
+    private VenueNearbyQueryDTO nearbyQuery(int page, int pageSize) {
+        VenueNearbyQueryDTO dto = new VenueNearbyQueryDTO();
+        dto.setCity("上海");
+        dto.setType(VenueType.CINEMA);
+        dto.setX(121.437D);
+        dto.setY(31.188D);
+        dto.setDistance(5000);
+        dto.setPage(page);
+        dto.setPageSize(pageSize);
+        return dto;
+    }
+
+    private GeoResult<RedisGeoCommands.GeoLocation<String>> geoResult(String id, double meters) {
+        RedisGeoCommands.GeoLocation<String> location =
+                new RedisGeoCommands.GeoLocation<>(id, new Point(0D, 0D));
+        return new GeoResult<>(location, new Distance(meters / 1000D, Metrics.KILOMETERS));
+    }
+
+    @SafeVarargs
+    private final GeoResults<RedisGeoCommands.GeoLocation<String>> geoResults(
+            GeoResult<RedisGeoCommands.GeoLocation<String>>... results) {
+        return new GeoResults<>(Arrays.asList(results));
     }
 }
