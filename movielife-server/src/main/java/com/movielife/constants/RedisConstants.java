@@ -22,6 +22,7 @@ public final class RedisConstants {
     public static final Duration VENUE_DETAIL_TTL = Duration.ofMinutes(30);
     public static final long VENUE_DETAIL_TTL_RANDOM_MINUTES = 10L;
     public static final Duration VENUE_DETAIL_NULL_TTL = Duration.ofMinutes(2);
+    public static final String VENUE_GEO_KEY = "venue:geo:";
 
     public static final String REVIEW_LIKE_KEY = "review:like:";
     public static final String POST_LIKE_KEY = "post:like:";
