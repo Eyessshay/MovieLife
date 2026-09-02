@@ -1,6 +1,7 @@
 package com.movielife.exception;
 
 import com.movielife.common.Result;
+import com.movielife.enums.VenueType;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -47,6 +48,8 @@ public class GlobalExceptionHandler {
         ErrorCode errorCode;
         if ("status".equals(exception.getName())) {
             errorCode = ErrorCode.INVALID_MOVIE_STATUS;
+        } else if (VenueType.class.equals(exception.getRequiredType())) {
+            errorCode = ErrorCode.INVALID_VENUE_TYPE;
         } else if ("id".equals(exception.getName())) {
             errorCode = ErrorCode.INVALID_ID;
         } else {
@@ -96,6 +99,9 @@ public class GlobalExceptionHandler {
         }
         if ("status".equals(fieldError.getField())) {
             return ErrorCode.INVALID_MOVIE_STATUS;
+        }
+        if ("type".equals(fieldError.getField())) {
+            return ErrorCode.INVALID_VENUE_TYPE;
         }
         if ("targetType".equals(fieldError.getField())) {
             return ErrorCode.INVALID_TARGET_TYPE;
