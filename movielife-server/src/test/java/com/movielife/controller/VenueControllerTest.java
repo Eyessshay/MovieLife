@@ -2,6 +2,7 @@ package com.movielife.controller;
 
 import com.movielife.service.VenueService;
 import com.movielife.vo.VenueDetailVO;
+import com.movielife.vo.HallVO;
 import com.movielife.vo.PageVO;
 import com.movielife.enums.VenueType;
 import com.movielife.exception.BusinessException;
@@ -14,6 +15,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.Collections;
+import java.util.Arrays;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
@@ -95,5 +97,46 @@ class VenueControllerTest {
         mockMvc.perform(get("/api/venues/999999"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value("VENUE_NOT_FOUND"));
+    }
+
+    @Test
+    void shouldAllowPublicVenueHallQuery() throws Exception {
+        HallVO first = hall(1L, 1L, "1号厅");
+        HallVO second = hall(2L, 1L, "2号厅");
+        when(venueService.queryVenueHalls(1L)).thenReturn(Arrays.asList(first, second));
+
+        mockMvc.perform(get("/api/venues/1/halls"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].name").value("1号厅"))
+                .andExpect(jsonPath("$.data[1].name").value("2号厅"))
+                .andExpect(jsonPath("$.data[0].seatTemplateId").doesNotExist());
+    }
+
+    @Test
+    void hallQueryShouldReturnInvalidIdForZero() throws Exception {
+        when(venueService.queryVenueHalls(0L))
+                .thenThrow(new BusinessException(ErrorCode.INVALID_ID));
+
+        mockMvc.perform(get("/api/venues/0/halls"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_ID"));
+    }
+
+    @Test
+    void hallQueryShouldReturnNotFoundForMissingVenue() throws Exception {
+        when(venueService.queryVenueHalls(999999L))
+                .thenThrow(new BusinessException(ErrorCode.VENUE_NOT_FOUND));
+
+        mockMvc.perform(get("/api/venues/999999/halls"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("VENUE_NOT_FOUND"));
+    }
+
+    private HallVO hall(Long id, Long venueId, String name) {
+        HallVO hall = new HallVO();
+        hall.setId(id);
+        hall.setVenueId(venueId);
+        hall.setName(name);
+        return hall;
     }
 }

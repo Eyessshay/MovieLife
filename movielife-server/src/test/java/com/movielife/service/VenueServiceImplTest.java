@@ -8,6 +8,7 @@ import com.movielife.enums.VenueType;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.mapper.VenueMapper;
+import com.movielife.mapper.HallMapper;
 import com.movielife.service.impl.VenueServiceImpl;
 import com.movielife.vo.VenueDetailVO;
 import org.junit.jupiter.api.BeforeEach;
@@ -38,6 +39,8 @@ class VenueServiceImplTest {
     @Mock
     private VenueMapper venueMapper;
     @Mock
+    private HallMapper hallMapper;
+    @Mock
     private StringRedisTemplate redisTemplate;
     @Mock
     private ValueOperations<String, String> valueOperations;
@@ -48,7 +51,7 @@ class VenueServiceImplTest {
     @BeforeEach
     void setUp() {
         objectMapper = new ObjectMapper();
-        venueService = new VenueServiceImpl(venueMapper, redisTemplate, objectMapper);
+        venueService = new VenueServiceImpl(venueMapper, hallMapper, redisTemplate, objectMapper);
         lenient().when(redisTemplate.opsForValue()).thenReturn(valueOperations);
     }
 

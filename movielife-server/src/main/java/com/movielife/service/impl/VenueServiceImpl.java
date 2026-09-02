@@ -8,12 +8,15 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.movielife.constants.RedisConstants;
 import com.movielife.dto.VenueDetailCacheDTO;
 import com.movielife.dto.VenueQueryDTO;
+import com.movielife.entity.Hall;
 import com.movielife.entity.Venue;
 import com.movielife.enums.VenueType;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
+import com.movielife.mapper.HallMapper;
 import com.movielife.mapper.VenueMapper;
 import com.movielife.service.VenueService;
+import com.movielife.vo.HallVO;
 import com.movielife.vo.PageVO;
 import com.movielife.vo.VenueDetailVO;
 import com.movielife.vo.VenueListItemVO;
@@ -35,6 +38,7 @@ public class VenueServiceImpl implements VenueService {
     private static final int ENABLED_STATUS = 1;
 
     private final VenueMapper venueMapper;
+    private final HallMapper hallMapper;
     private final StringRedisTemplate stringRedisTemplate;
     private final ObjectMapper objectMapper;
 
@@ -65,6 +69,25 @@ public class VenueServiceImpl implements VenueService {
             throw new BusinessException(ErrorCode.INVALID_ID);
         }
         return toDetailVO(findPublicVenueDetail(id));
+    }
+
+    @Override
+    public List<HallVO> queryVenueHalls(Long venueId) {
+        if (venueId == null || venueId <= 0) {
+            throw new BusinessException(ErrorCode.INVALID_ID);
+        }
+        Venue venue = venueMapper.selectById(venueId);
+        if (venue == null || !Integer.valueOf(ENABLED_STATUS).equals(venue.getStatus())) {
+            throw new BusinessException(ErrorCode.VENUE_NOT_FOUND);
+        }
+
+        return hallMapper.selectList(
+                        new LambdaQueryWrapper<Hall>()
+                                .eq(Hall::getVenueId, venueId)
+                                .orderByAsc(Hall::getId)
+                ).stream()
+                .map(this::toHallVO)
+                .collect(Collectors.toList());
     }
 
     private VenueDetailCacheDTO findPublicVenueDetail(Long id) {
@@ -166,6 +189,14 @@ public class VenueServiceImpl implements VenueService {
         vo.setPhone(venue.getPhone());
         vo.setOpenTime(venue.getOpenTime());
         vo.setAvgScore(venue.getAvgScore());
+        return vo;
+    }
+
+    private HallVO toHallVO(Hall hall) {
+        HallVO vo = new HallVO();
+        vo.setId(hall.getId());
+        vo.setVenueId(hall.getVenueId());
+        vo.setName(hall.getName());
         return vo;
     }
 }

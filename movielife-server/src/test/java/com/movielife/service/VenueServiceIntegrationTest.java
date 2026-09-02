@@ -3,7 +3,10 @@ package com.movielife.service;
 import com.movielife.dto.VenueQueryDTO;
 import com.movielife.entity.Venue;
 import com.movielife.enums.VenueType;
+import com.movielife.exception.BusinessException;
+import com.movielife.exception.ErrorCode;
 import com.movielife.mapper.VenueMapper;
+import com.movielife.vo.HallVO;
 import com.movielife.vo.PageVO;
 import com.movielife.vo.VenueListItemVO;
 import org.junit.jupiter.api.Test;
@@ -16,6 +19,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.math.BigDecimal;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.NONE,
@@ -76,18 +80,64 @@ class VenueServiceIntegrationTest {
         assertThat(secondPage.getPageSize()).isEqualTo(1);
     }
 
+    @Test
+    void shouldReturnVenueHallsInAscendingIdOrder() {
+        assertThat(venueService.queryVenueHalls(1L))
+                .extracting(HallVO::getName)
+                .containsExactly("1号厅", "2号厅");
+    }
+
+    @Test
+    void existingVenueWithoutHallsShouldReturnEmptyList() {
+        Venue venue = venue(1);
+        venue.setName("无影厅测试场馆");
+        venueMapper.insert(venue);
+
+        assertThat(venueService.queryVenueHalls(venue.getId())).isEmpty();
+    }
+
+    @Test
+    void missingVenueShouldRejectHallQuery() {
+        assertHallQueryError(999999L, ErrorCode.VENUE_NOT_FOUND);
+    }
+
+    @Test
+    void disabledVenueShouldRejectHallQuery() {
+        Venue venue = venue(0);
+        venue.setName("停用测试场馆");
+        venueMapper.insert(venue);
+
+        assertHallQueryError(venue.getId(), ErrorCode.VENUE_NOT_FOUND);
+    }
+
+    @Test
+    void invalidVenueIdShouldRejectHallQuery() {
+        assertHallQueryError(0L, ErrorCode.INVALID_ID);
+    }
+
     private VenueQueryDTO query() {
         return new VenueQueryDTO();
     }
 
     private Venue disabledVenue() {
+        return venue(0);
+    }
+
+    private Venue venue(int status) {
         Venue venue = new Venue();
-        venue.setName("停用测试场馆");
+        venue.setName("测试场馆");
         venue.setType("cinema");
         venue.setCity("上海");
         venue.setAddress("测试地址");
         venue.setAvgScore(BigDecimal.ZERO);
-        venue.setStatus(0);
+        venue.setStatus(status);
         return venue;
+    }
+
+    private void assertHallQueryError(Long venueId, ErrorCode errorCode) {
+        assertThatThrownBy(() -> venueService.queryVenueHalls(venueId))
+                .isInstanceOf(BusinessException.class)
+                .extracting(exception -> ((BusinessException) exception).getErrorCode())
+                .isEqualTo(errorCode);
     }
 }
