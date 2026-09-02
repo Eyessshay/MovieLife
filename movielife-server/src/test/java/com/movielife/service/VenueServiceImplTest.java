@@ -4,12 +4,15 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.movielife.constants.RedisConstants;
 import com.movielife.dto.VenueDetailCacheDTO;
 import com.movielife.dto.VenueNearbyQueryDTO;
+import com.movielife.entity.Movie;
 import com.movielife.entity.Venue;
 import com.movielife.enums.VenueType;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.mapper.VenueMapper;
 import com.movielife.mapper.HallMapper;
+import com.movielife.mapper.MovieMapper;
+import com.movielife.mapper.ShowtimeMapper;
 import com.movielife.service.impl.VenueServiceImpl;
 import com.movielife.vo.VenueDetailVO;
 import com.movielife.vo.VenueNearbyVO;
@@ -54,6 +57,10 @@ class VenueServiceImplTest {
     @Mock
     private HallMapper hallMapper;
     @Mock
+    private MovieMapper movieMapper;
+    @Mock
+    private ShowtimeMapper showtimeMapper;
+    @Mock
     private StringRedisTemplate redisTemplate;
     @Mock
     private ValueOperations<String, String> valueOperations;
@@ -66,7 +73,14 @@ class VenueServiceImplTest {
     @BeforeEach
     void setUp() {
         objectMapper = new ObjectMapper();
-        venueService = new VenueServiceImpl(venueMapper, hallMapper, redisTemplate, objectMapper);
+        venueService = new VenueServiceImpl(
+                venueMapper,
+                hallMapper,
+                movieMapper,
+                showtimeMapper,
+                redisTemplate,
+                objectMapper
+        );
         lenient().when(redisTemplate.opsForValue()).thenReturn(valueOperations);
         lenient().when(redisTemplate.opsForGeo()).thenReturn(geoOperations);
     }
@@ -237,6 +251,81 @@ class VenueServiceImplTest {
                 .isInstanceOf(BusinessException.class)
                 .extracting(exception -> ((BusinessException) exception).getErrorCode())
                 .isEqualTo(ErrorCode.INTERNAL_ERROR);
+    }
+
+    @Test
+    void movieFilterShouldKeepOnlyFutureShowtimeVenuesInGeoOrder() {
+        Venue first = enabledVenue();
+        Venue second = enabledVenue();
+        second.setId(2L);
+        Venue third = enabledVenue();
+        third.setId(3L);
+        VenueNearbyQueryDTO dto = nearbyQuery(1, 10);
+        dto.setBizType("MOVIE");
+        dto.setBizId(9L);
+        when(movieMapper.selectById(9L)).thenReturn(new Movie());
+        when(geoOperations.radius(eq("venue:geo:上海:CINEMA"), any(Circle.class),
+                any(RedisGeoCommands.GeoRadiusCommandArgs.class)))
+                .thenReturn(geoResults(
+                        geoResult("1", 100D),
+                        geoResult("2", 200D),
+                        geoResult("3", 300D)
+                ));
+        when(venueMapper.selectList(any())).thenReturn(Arrays.asList(third, second, first));
+        when(showtimeMapper.selectVenueIdsWithFutureMovieShowtimes(eq(9L), any()))
+                .thenReturn(Arrays.asList(3L, 1L));
+
+        List<VenueNearbyVO> result = venueService.queryNearbyVenues(dto);
+
+        assertThat(result).extracting(VenueNearbyVO::getId).containsExactly(1L, 3L);
+    }
+
+    @Test
+    void movieFilterShouldFilterBeforePagination() {
+        Venue first = enabledVenue();
+        Venue second = enabledVenue();
+        second.setId(2L);
+        VenueNearbyQueryDTO dto = nearbyQuery(1, 1);
+        dto.setBizType("MOVIE");
+        dto.setBizId(9L);
+        when(movieMapper.selectById(9L)).thenReturn(new Movie());
+        when(geoOperations.radius(eq("venue:geo:上海:CINEMA"), any(Circle.class),
+                any(RedisGeoCommands.GeoRadiusCommandArgs.class)))
+                .thenReturn(geoResults(geoResult("1", 100D), geoResult("2", 200D)));
+        when(venueMapper.selectList(any())).thenReturn(Arrays.asList(first, second));
+        when(showtimeMapper.selectVenueIdsWithFutureMovieShowtimes(eq(9L), any()))
+                .thenReturn(Collections.singletonList(2L));
+
+        List<VenueNearbyVO> result = venueService.queryNearbyVenues(dto);
+
+        assertThat(result).extracting(VenueNearbyVO::getId).containsExactly(2L);
+    }
+
+    @Test
+    void missingMovieShouldFailBeforeGeoQuery() {
+        VenueNearbyQueryDTO dto = nearbyQuery(1, 10);
+        dto.setBizType("MOVIE");
+        dto.setBizId(999L);
+        when(movieMapper.selectById(999L)).thenReturn(null);
+
+        assertThatThrownBy(() -> venueService.queryNearbyVenues(dto))
+                .isInstanceOf(BusinessException.class)
+                .extracting(exception -> ((BusinessException) exception).getErrorCode())
+                .isEqualTo(ErrorCode.MOVIE_NOT_FOUND);
+        verify(geoOperations, never()).radius(eq("venue:geo:上海:CINEMA"), any(Circle.class),
+                any(RedisGeoCommands.GeoRadiusCommandArgs.class));
+    }
+
+    @Test
+    void unsupportedBusinessTypeShouldBeRejected() {
+        VenueNearbyQueryDTO dto = nearbyQuery(1, 10);
+        dto.setBizType("ACTIVITY");
+        dto.setBizId(1L);
+
+        assertThatThrownBy(() -> venueService.queryNearbyVenues(dto))
+                .isInstanceOf(BusinessException.class)
+                .extracting(exception -> ((BusinessException) exception).getErrorCode())
+                .isEqualTo(ErrorCode.INVALID_BIZ_TYPE);
     }
 
     private void assertVenueNotFound(Long id) {

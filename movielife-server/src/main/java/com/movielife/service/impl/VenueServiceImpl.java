@@ -15,6 +15,8 @@ import com.movielife.enums.VenueType;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.mapper.HallMapper;
+import com.movielife.mapper.MovieMapper;
+import com.movielife.mapper.ShowtimeMapper;
 import com.movielife.mapper.VenueMapper;
 import com.movielife.service.VenueService;
 import com.movielife.vo.HallVO;
@@ -40,6 +42,7 @@ import java.util.List;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
@@ -49,9 +52,14 @@ import java.util.stream.Collectors;
 public class VenueServiceImpl implements VenueService {
 
     private static final int ENABLED_STATUS = 1;
+    private static final String MOVIE_BIZ_TYPE = "MOVIE";
+    private static final int MOVIE_CANDIDATE_MULTIPLIER = 5;
+    private static final int MAX_MOVIE_CANDIDATES = 200;
 
     private final VenueMapper venueMapper;
     private final HallMapper hallMapper;
+    private final MovieMapper movieMapper;
+    private final ShowtimeMapper showtimeMapper;
     private final StringRedisTemplate stringRedisTemplate;
     private final ObjectMapper objectMapper;
 
@@ -105,10 +113,18 @@ public class VenueServiceImpl implements VenueService {
 
     @Override
     public List<VenueNearbyVO> queryNearbyVenues(VenueNearbyQueryDTO queryDTO) {
+        boolean movieFilterEnabled = validateMovieFilter(queryDTO);
+        if (movieFilterEnabled && movieMapper.selectById(queryDTO.getBizId()) == null) {
+            throw new BusinessException(ErrorCode.MOVIE_NOT_FOUND);
+        }
+
         String key = RedisConstants.VENUE_GEO_KEY
                 + queryDTO.getCity() + ":" + queryDTO.getType().name();
         long from = (long) (queryDTO.getPage() - 1) * queryDTO.getPageSize();
         long end = (long) queryDTO.getPage() * queryDTO.getPageSize();
+        long candidateLimit = movieFilterEnabled
+                ? Math.min(end * MOVIE_CANDIDATE_MULTIPLIER, MAX_MOVIE_CANDIDATES)
+                : end;
 
         GeoResults<RedisGeoCommands.GeoLocation<String>> geoResults;
         try {
@@ -116,7 +132,7 @@ public class VenueServiceImpl implements VenueService {
                     .newGeoRadiusArgs()
                     .includeDistance()
                     .sortAscending()
-                    .limit(end);
+                    .limit(candidateLimit);
             geoResults = stringRedisTemplate.opsForGeo().radius(
                     key,
                     new Circle(
@@ -130,17 +146,88 @@ public class VenueServiceImpl implements VenueService {
             throw new BusinessException(ErrorCode.INTERNAL_ERROR);
         }
 
-        if (geoResults == null || geoResults.getContent().size() <= from) {
+        if (geoResults == null || geoResults.getContent().isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        if (movieFilterEnabled) {
+            return queryMovieFilteredNearbyVenues(
+                    geoResults.getContent(),
+                    queryDTO.getBizId(),
+                    from,
+                    queryDTO.getPageSize()
+            );
+        }
+
+        if (geoResults.getContent().size() <= from) {
             return Collections.emptyList();
         }
         int toIndex = (int) Math.min(end, geoResults.getContent().size());
-        List<GeoResult<RedisGeoCommands.GeoLocation<String>>> pageResults =
-                geoResults.getContent().subList((int) from, toIndex);
-        List<Long> venueIds = pageResults.stream()
-                .map(result -> Long.valueOf(result.getContent().getName()))
-                .collect(Collectors.toList());
+        return assembleNearbyVenues(
+                geoResults.getContent().subList((int) from, toIndex),
+                null
+        );
+    }
 
-        Map<Long, Venue> venueMap = venueMapper.selectList(
+    private List<VenueNearbyVO> queryMovieFilteredNearbyVenues(
+            List<GeoResult<RedisGeoCommands.GeoLocation<String>>> geoCandidates,
+            Long movieId,
+            long from,
+            int pageSize) {
+        List<Long> candidateIds = extractVenueIds(geoCandidates);
+        Map<Long, Venue> venueMap = loadEnabledVenues(candidateIds);
+        List<GeoResult<RedisGeoCommands.GeoLocation<String>>> enabledCandidates = geoCandidates.stream()
+                .filter(result -> venueMap.containsKey(parseVenueId(result)))
+                .collect(Collectors.toList());
+        if (enabledCandidates.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        List<Long> enabledVenueIds = extractVenueIds(enabledCandidates);
+        Set<Long> validVenueIds = showtimeMapper
+                .selectVenueIdsWithFutureMovieShowtimes(movieId, enabledVenueIds)
+                .stream()
+                .collect(Collectors.toSet());
+        List<GeoResult<RedisGeoCommands.GeoLocation<String>>> filteredCandidates = enabledCandidates.stream()
+                .filter(result -> validVenueIds.contains(parseVenueId(result)))
+                .collect(Collectors.toList());
+        if (filteredCandidates.size() <= from) {
+            return Collections.emptyList();
+        }
+
+        int toIndex = (int) Math.min(from + pageSize, filteredCandidates.size());
+        return assembleNearbyVenues(
+                filteredCandidates.subList((int) from, toIndex),
+                venueMap
+        );
+    }
+
+    private List<VenueNearbyVO> assembleNearbyVenues(
+            List<GeoResult<RedisGeoCommands.GeoLocation<String>>> pageResults,
+            Map<Long, Venue> loadedVenueMap) {
+        List<Long> venueIds = pageResults.stream()
+                .map(this::parseVenueId)
+                .collect(Collectors.toList());
+        Map<Long, Venue> venueMap = loadedVenueMap == null
+                ? loadEnabledVenues(venueIds)
+                : loadedVenueMap;
+
+        List<VenueNearbyVO> result = new ArrayList<>();
+        for (GeoResult<RedisGeoCommands.GeoLocation<String>> geoResult : pageResults) {
+            Long venueId = parseVenueId(geoResult);
+            Venue venue = venueMap.get(venueId);
+            if (venue != null) {
+                double distanceInMeters = geoResult.getDistance()
+                        .in(Metrics.KILOMETERS)
+                        .getValue() * 1000D;
+                result.add(toNearbyVO(venue, distanceInMeters));
+            }
+        }
+        return result;
+    }
+
+    private Map<Long, Venue> loadEnabledVenues(List<Long> venueIds) {
+        return venueMapper.selectList(
                         new LambdaQueryWrapper<Venue>()
                                 .in(Venue::getId, venueIds)
                                 .eq(Venue::getStatus, ENABLED_STATUS)
@@ -151,19 +238,32 @@ public class VenueServiceImpl implements VenueService {
                         (left, right) -> left,
                         LinkedHashMap::new
                 ));
+    }
 
-        List<VenueNearbyVO> result = new ArrayList<>();
-        for (GeoResult<RedisGeoCommands.GeoLocation<String>> geoResult : pageResults) {
-            Long venueId = Long.valueOf(geoResult.getContent().getName());
-            Venue venue = venueMap.get(venueId);
-            if (venue != null) {
-                double distanceInMeters = geoResult.getDistance()
-                        .in(Metrics.KILOMETERS)
-                        .getValue() * 1000D;
-                result.add(toNearbyVO(venue, distanceInMeters));
-            }
+    private List<Long> extractVenueIds(
+            List<GeoResult<RedisGeoCommands.GeoLocation<String>>> geoResults) {
+        return geoResults.stream()
+                .map(this::parseVenueId)
+                .collect(Collectors.toList());
+    }
+
+    private Long parseVenueId(GeoResult<RedisGeoCommands.GeoLocation<String>> result) {
+        return Long.valueOf(result.getContent().getName());
+    }
+
+    private boolean validateMovieFilter(VenueNearbyQueryDTO queryDTO) {
+        boolean hasBizType = StrUtil.isNotBlank(queryDTO.getBizType());
+        boolean hasBizId = queryDTO.getBizId() != null;
+        if (hasBizType != hasBizId) {
+            throw new BusinessException(ErrorCode.INVALID_PARAM);
         }
-        return result;
+        if (!hasBizType) {
+            return false;
+        }
+        if (!MOVIE_BIZ_TYPE.equals(queryDTO.getBizType())) {
+            throw new BusinessException(ErrorCode.INVALID_BIZ_TYPE);
+        }
+        return true;
     }
 
     private VenueDetailCacheDTO findPublicVenueDetail(Long id) {

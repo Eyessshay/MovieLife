@@ -2,9 +2,15 @@ package com.movielife.service;
 
 import com.movielife.constants.RedisConstants;
 import com.movielife.dto.VenueNearbyQueryDTO;
+import com.movielife.entity.Hall;
+import com.movielife.entity.Showtime;
 import com.movielife.entity.Venue;
 import com.movielife.enums.VenueType;
+import com.movielife.mapper.HallMapper;
+import com.movielife.mapper.ShowtimeMapper;
 import com.movielife.mapper.VenueMapper;
+import com.movielife.exception.BusinessException;
+import com.movielife.exception.ErrorCode;
 import com.movielife.vo.VenueNearbyVO;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,11 +23,13 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @SpringBootTest(properties = "movielife.startup-check.enabled=false")
 @Transactional
@@ -38,10 +46,16 @@ class VenueNearbyServiceIntegrationTest {
     @Autowired
     private VenueMapper venueMapper;
     @Autowired
+    private HallMapper hallMapper;
+    @Autowired
+    private ShowtimeMapper showtimeMapper;
+    @Autowired
     private StringRedisTemplate stringRedisTemplate;
 
     private Venue nearest;
     private Venue farther;
+    private Hall nearestHall;
+    private Hall fartherHall;
 
     @BeforeEach
     void setUp() {
@@ -49,6 +63,8 @@ class VenueNearbyServiceIntegrationTest {
         nearest = insertVenue("附近影院A", "cinema", 1, "121.000000", "31.000000");
         farther = insertVenue("附近影院B", "cinema", 1, "121.010000", "31.000000");
         Venue disabled = insertVenue("停用剧场", "theater", 0, "121.000000", "31.000000");
+        nearestHall = insertHall(nearest, "测试厅A");
+        fartherHall = insertHall(farther, "测试厅B");
 
         stringRedisTemplate.opsForGeo().add(CINEMA_KEY, Arrays.asList(
                 geoLocation(nearest),
@@ -101,6 +117,49 @@ class VenueNearbyServiceIntegrationTest {
                 .isEmpty();
     }
 
+    @Test
+    void movieFilterShouldKeepOnlyFutureOnSaleShowtimes() {
+        insertShowtime(nearest, nearestHall, 1L, LocalDateTime.now().plusDays(1), 1);
+        insertShowtime(farther, fartherHall, 1L, LocalDateTime.now().minusDays(1), 1);
+        insertShowtime(farther, fartherHall, 1L, LocalDateTime.now().plusDays(2), 0);
+
+        assertThat(venueService.queryNearbyVenues(movieQuery(1L, 1, 10)))
+                .extracting(VenueNearbyVO::getId)
+                .containsExactly(nearest.getId());
+    }
+
+    @Test
+    void movieFilterShouldPreserveGeoDistanceOrder() {
+        insertShowtime(nearest, nearestHall, 1L, LocalDateTime.now().plusDays(1), 1);
+        insertShowtime(farther, fartherHall, 1L, LocalDateTime.now().plusDays(1), 1);
+
+        assertThat(venueService.queryNearbyVenues(movieQuery(1L, 1, 10)))
+                .extracting(VenueNearbyVO::getId)
+                .containsExactly(nearest.getId(), farther.getId());
+    }
+
+    @Test
+    void movieFilterShouldPaginateAfterShowtimeFiltering() {
+        insertShowtime(farther, fartherHall, 1L, LocalDateTime.now().plusDays(1), 1);
+
+        assertThat(venueService.queryNearbyVenues(movieQuery(1L, 1, 1)))
+                .extracting(VenueNearbyVO::getId)
+                .containsExactly(farther.getId());
+    }
+
+    @Test
+    void existingMovieWithoutNearbyShowtimeShouldReturnEmptyList() {
+        assertThat(venueService.queryNearbyVenues(movieQuery(1L, 1, 10))).isEmpty();
+    }
+
+    @Test
+    void missingMovieShouldReturnMovieNotFound() {
+        assertThatThrownBy(() -> venueService.queryNearbyVenues(movieQuery(999999999L, 1, 10)))
+                .isInstanceOf(BusinessException.class)
+                .extracting(exception -> ((BusinessException) exception).getErrorCode())
+                .isEqualTo(ErrorCode.MOVIE_NOT_FOUND);
+    }
+
     private VenueNearbyQueryDTO query(String city,
                                       VenueType type,
                                       int distance,
@@ -114,6 +173,13 @@ class VenueNearbyServiceIntegrationTest {
         dto.setDistance(distance);
         dto.setPage(page);
         dto.setPageSize(pageSize);
+        return dto;
+    }
+
+    private VenueNearbyQueryDTO movieQuery(Long movieId, int page, int pageSize) {
+        VenueNearbyQueryDTO dto = query(TEST_CITY, VenueType.CINEMA, 5000, page, pageSize);
+        dto.setBizType("MOVIE");
+        dto.setBizId(movieId);
         return dto;
     }
 
@@ -140,6 +206,34 @@ class VenueNearbyServiceIntegrationTest {
         venue.setStatus(status);
         venueMapper.insert(venue);
         return venue;
+    }
+
+    private Hall insertHall(Venue venue, String name) {
+        Hall hall = new Hall();
+        hall.setVenueId(venue.getId());
+        hall.setName(name);
+        hallMapper.insert(hall);
+        return hall;
+    }
+
+    private Showtime insertShowtime(Venue venue,
+                                    Hall hall,
+                                    Long movieId,
+                                    LocalDateTime startTime,
+                                    int status) {
+        Showtime showtime = new Showtime();
+        showtime.setBizType("MOVIE");
+        showtime.setBizId(movieId);
+        showtime.setVenueId(venue.getId());
+        showtime.setHallId(hall.getId());
+        showtime.setStartTime(startTime);
+        showtime.setEndTime(startTime.plusHours(2));
+        showtime.setBasePrice(new BigDecimal("45.00"));
+        showtime.setTotalSeats(100);
+        showtime.setAvailableSeats(100);
+        showtime.setStatus(status);
+        showtimeMapper.insert(showtime);
+        return showtime;
     }
 
     private void clearKeys() {

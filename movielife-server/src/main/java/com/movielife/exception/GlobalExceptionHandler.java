@@ -103,6 +103,9 @@ public class GlobalExceptionHandler {
         if ("type".equals(fieldError.getField())) {
             return ErrorCode.INVALID_VENUE_TYPE;
         }
+        if ("bizTypeValid".equals(fieldError.getField())) {
+            return ErrorCode.INVALID_BIZ_TYPE;
+        }
         if ("targetType".equals(fieldError.getField())) {
             return ErrorCode.INVALID_TARGET_TYPE;
         }

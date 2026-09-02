@@ -88,6 +88,19 @@ class VenueControllerTest {
     }
 
     @Test
+    void nearbyQueryShouldRejectUnsupportedBusinessType() throws Exception {
+        mockMvc.perform(get("/api/venues/nearby")
+                        .param("city", "上海")
+                        .param("type", "CINEMA")
+                        .param("x", "121.437")
+                        .param("y", "31.188")
+                        .param("bizType", "ACTIVITY")
+                        .param("bizId", "1"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_BIZ_TYPE"));
+    }
+
+    @Test
     void shouldAllowPublicVenueDetailQuery() throws Exception {
         VenueDetailVO detail = new VenueDetailVO();
         detail.setId(1L);
