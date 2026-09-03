@@ -204,6 +204,8 @@ POST /api/showtimes/{id}/seats/release   # 主动释放未转订单的锁座
 
 座位按 `row_no ASC, col_no ASC` 稳定排序。服务端先批量查询 Hall 的有效 `tb_seat`，再一次查询对应 `tb_showtime_seat` 并通过 `seatId` 映射；Hall 没有有效座位时返回 `seats: []`。只要存在有效 Seat 却缺少对应 ShowtimeSeat，就按内部数据不完整返回 `INTERNAL_ERROR`，不会把缺失状态默认为可售。当前座位图直接读取 MySQL，不缓存。
 
+阶段 6 的只读查询链路已经冻结为：`Movie Detail → Nearby Venue → Venue Movie Showtimes → Showtime Detail → Showtime Seat Map`。三个场次相关接口统一采用 `biz_type=MOVIE`、`status=1`、`start_time > NOW()` 的有效场次定义；Venue Showtimes 无匹配数据返回 `[]`，有效 Hall 没有启用物理座位时返回 `seats: []`。本阶段不缓存 Showtime 或 Seat Map，不修改任何座位状态，也不实现 Redis 临时锁、`lockToken`、订单或支付。
+
 锁座请求：
 
 ```json

@@ -130,7 +130,31 @@ showtimeId
 
 Hall 没有有效 Seat 时正常返回空列表；Hall 有有效 Seat 但缺少对应 ShowtimeSeat 时视为初始化或数据一致性异常，不默认成可售，也不在 GET 请求中自动补数据。当前座位图只读取 MySQL，不合并 Redis 锁座状态、不增加缓存；实时 `AVAILABLE / LOCKED / SOLD` 合并留待后续锁座阶段。
 
-### 3.8 推荐与 AI
+### 3.8 阶段 6 查询链路冻结
+
+阶段 6 最终形成以下只读链路：
+
+```text
+Movie
+  ↓
+Redis GEO Nearby Venue + MOVIE Showtime 过滤
+  ↓
+Venue Movie Showtime List
+  ↓
+Showtime Detail
+  ↓
+Hall Seat Template
+  ↓
+ShowtimeSeat Status + Price
+  ↓
+Seat Map
+```
+
+三层数据职责固定为：`Showtime` 保存场次基础信息和 `basePrice`；`Seat` 保存 Hall 的物理座位、行列位置、类型和基础启用状态；`ShowtimeSeat` 保存特定场次下的销售状态和座位级 `price`。场次开始后不再作为可售场次公开，统一以 `start_time > NOW()` 判断，不改为 `end_time > NOW()`。
+
+本阶段所有能力均为查询：不缓存 Showtime 列表、详情或 Seat Map，不在 GET 请求中插入或更新 ShowtimeSeat，不写入座位锁 Redis Key。文档中保留的 `SeatLockService`、`lockToken`、Redis Lua 和 TicketOrder 内容仅是后续阶段设计，不代表阶段 6 已实现。
+
+### 3.9 推荐与 AI
 
 推荐链路暂定为：行为采集 → 用户/内容标签打分 → 候选召回 → 规则排序 → AI 生成推荐理由，推荐理由随推荐结果一起返回。评价总结由评论变化触发异步生成，持久化并缓存后由只读接口提供，禁止在详情页请求中同步调用模型。AI 不直接决定座位库存、价格、支付结果或订单状态。
 
