@@ -204,7 +204,7 @@ POST /api/showtimes/{id}/seats/release   # 主动释放未转订单的锁座
 
 座位按 `row_no ASC, col_no ASC` 稳定排序。服务端先批量查询 Hall 的有效 `tb_seat`，再一次查询对应 `tb_showtime_seat` 并通过 `seatId` 映射；Hall 没有有效座位时返回 `seats: []`。只要存在有效 Seat 却缺少对应 ShowtimeSeat，就按内部数据不完整返回 `INTERNAL_ERROR`，不会把缺失状态默认为可售。当前座位图直接读取 MySQL，不缓存。
 
-阶段 6 的只读查询链路已经冻结为：`Movie Detail → Nearby Venue → Venue Movie Showtimes → Showtime Detail → Showtime Seat Map`。三个场次相关接口统一采用 `biz_type=MOVIE`、`status=1`、`start_time > NOW()` 的有效场次定义；Venue Showtimes 无匹配数据返回 `[]`，有效 Hall 没有启用物理座位时返回 `seats: []`。本阶段不缓存 Showtime 或 Seat Map，不修改任何座位状态，也不实现 Redis 临时锁、`lockToken`、订单或支付。
+阶段 6 的只读查询链路已经冻结为：`Movie Detail → Nearby Venue → Venue Movie Showtimes → Showtime Detail → Showtime Seat Map`。三个场次相关接口统一采用 `biz_type=MOVIE`、`status=1`、`start_time > NOW()` 的有效场次定义；Venue Showtimes 无匹配数据返回 `[]`，有效 Hall 没有启用物理座位时返回 `seats: []`。Showtime 和 Seat Map 仍不缓存，Seat Map 当前只展示 MySQL 状态，不合并 Redis `TEMP_LOCKED`；这是阶段 7 完成后的既定行为，不代表锁座遗漏。
 
 锁座请求：
 
@@ -222,13 +222,15 @@ POST /api/showtimes/{id}/seats/release   # 主动释放未转订单的锁座
   "message": "ok",
   "data": {
     "lockToken": "xxx",
-    "expireTime": "2026-09-01T16:20:00+08:00"
+    "expireTime": "2026-09-03T14:30:00"
   },
   "requestId": "..."
 }
 ```
 
-`SeatLockService` 只负责在 Redis 中原子校验并占用 `showtimeId + seatIds`，锁记录必须绑定当前用户并设置有效期。释放接口通过 `lockToken` 释放当前用户尚未转为订单的锁。
+该接口要求登录。`seatIds` 必须包含 1～6 个正整数且不允许重复，服务端按 Long 升序规范化。Seat 与 ShowtimeSeat 均采用批量查询完成完整性和可用性校验；任意一个座位不满足条件时整次请求失败。多座位锁由单次 Lua 原子执行，全部成功或全部失败，不允许遗留部分锁。
+
+`SeatLockService` 只负责在 Redis 中原子校验并占用 `showtimeId + seatIds`，锁记录绑定当前用户并使用 5 分钟 TTL。当前用户对同一 Showtime、同一规范化座位集合的有效锁重复提交时，直接返回原 `lockToken + expireTime`，不重新写 Redis、不刷新 TTL。Redis 临时锁冲突返回 `409 SEAT_ALREADY_LOCKED`；MySQL 中任一 ShowtimeSeat 已被待支付订单占用或售出时返回 `409 SEAT_NOT_AVAILABLE`。
 
 释放锁座请求体固定为：
 
@@ -238,9 +240,11 @@ POST /api/showtimes/{id}/seats/release   # 主动释放未转订单的锁座
 }
 ```
 
-客户端不得提交任意 `seatIds` 作为释放依据。服务端必须从 `lockToken` 中解析并校验用户、场次和完整座位集合，只允许锁的持有者释放自己的有效锁；锁已转换为订单或已过期时，接口应保持幂等，不得影响其他用户的锁或已售座位。
+释放接口要求登录且请求体只接受 `lockToken`，不接受 `seatIds`。服务端必须从 token 元数据读取用户、场次和完整座位集合，只允许锁持有者释放；非持有者返回 `403 LOCK_NOT_OWNED`，URL showtimeId 与 token 元数据不匹配时返回 `400 INVALID_LOCK_TOKEN`。释放 Lua 只删除 `seatKey.value == lockToken` 的键，不能误删后来产生的新锁。
 
-核心规则：座位状态必须绑定 `showtimeId`，不能只锁定影厅物理座位；任意一个座位不可用时整次锁座失败；锁过期自动释放。客户端展示的座位状态允许短暂缓存，但创建订单和支付时必须再次校验服务端状态。
+Token 已过期、已释放或重复 release 时均按幂等成功处理，不返回 404。普通 release 只清理 Redis 临时状态，不修改 `tb_showtime_seat.status`，也不承担订单取消职责。
+
+核心规则：座位状态必须绑定 `showtimeId`，不能只锁定影厅物理座位；任意一个座位不可用时整次锁座失败；锁过期由 Redis TTL 自动释放。阶段 7 的 lock/release 均不修改 `tb_showtime_seat.status`。当前 Seat Map 仍直接读取 MySQL，锁座期间可能继续展示 `AVAILABLE`；后续创建订单和支付时必须再次校验服务端锁与数据库状态。
 
 ### 3.9 订单与支付
 

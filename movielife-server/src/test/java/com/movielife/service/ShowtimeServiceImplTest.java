@@ -86,6 +86,31 @@ class ShowtimeServiceImplTest {
     }
 
     @Test
+    void missingShowtimeShouldNotBeAvailable() {
+        when(showtimeMapper.selectById(1L)).thenReturn(null);
+
+        assertShowtimeNotFound(() -> showtimeService.queryShowtimeDetail(1L));
+    }
+
+    @Test
+    void expiredShowtimeShouldNotBeAvailable() {
+        Showtime showtime = validShowtime();
+        showtime.setStartTime(LocalDateTime.now().minusMinutes(1));
+        when(showtimeMapper.selectById(1L)).thenReturn(showtime);
+
+        assertShowtimeNotFound(() -> showtimeService.queryShowtimeDetail(1L));
+    }
+
+    @Test
+    void disabledShowtimeShouldNotBeAvailable() {
+        Showtime showtime = validShowtime();
+        showtime.setStatus(0);
+        when(showtimeMapper.selectById(1L)).thenReturn(showtime);
+
+        assertShowtimeNotFound(() -> showtimeService.queryShowtimeDetail(1L));
+    }
+
+    @Test
     void seatMapShouldBatchLoadSeatTemplateAndShowtimeStatesOnce() {
         Showtime showtime = validShowtime();
         Seat first = seat(1L, 1, 1);
@@ -159,5 +184,12 @@ class ShowtimeServiceImplTest {
                 .isInstanceOf(BusinessException.class)
                 .extracting(exception -> ((BusinessException) exception).getErrorCode())
                 .isEqualTo(ErrorCode.INTERNAL_ERROR);
+    }
+
+    private void assertShowtimeNotFound(Runnable action) {
+        assertThatThrownBy(action::run)
+                .isInstanceOf(BusinessException.class)
+                .extracting(exception -> ((BusinessException) exception).getErrorCode())
+                .isEqualTo(ErrorCode.SHOWTIME_NOT_FOUND);
     }
 }

@@ -17,7 +17,7 @@ MovieLife 是一个以电影为核心、扩展本地文娱活动发现的社区�
 
 ### 3.1 真实的场次与座位模型
 
-物理座位属于影厅，但可售状态属于具体场次。`tb_showtime_seat` 负责记录某场次下的可用、锁定和已售状态，避免把“锁座”错误地设计成影厅级别。
+物理座位属于影厅，但销售状态属于具体场次。`tb_showtime_seat` 负责记录某场次下的可售、待支付订单占用和已售状态；用户选座期间的临时锁单独保存在 Redis，避免把临时锁混入数据库业务事实，也避免把座位状态错误地设计成影厅级别。
 
 ### 3.2 订单状态机
 
@@ -128,7 +128,7 @@ showtimeId
 
 响应保持扁平列表，同时返回数据库已有的 `colNo` 和场次座位 `price`：`colNo` 用于可靠表达物理列位置，避免按字符串 `seatNo` 排序产生 `1、10、2` 的问题；`price` 表达座位在当前场次中的实际价格，场次 `basePrice` 仍作为基础价保留。
 
-Hall 没有有效 Seat 时正常返回空列表；Hall 有有效 Seat 但缺少对应 ShowtimeSeat 时视为初始化或数据一致性异常，不默认成可售，也不在 GET 请求中自动补数据。当前座位图只读取 MySQL，不合并 Redis 锁座状态、不增加缓存；实时 `AVAILABLE / LOCKED / SOLD` 合并留待后续锁座阶段。
+Hall 没有有效 Seat 时正常返回空列表；Hall 有有效 Seat 但缺少对应 ShowtimeSeat 时视为初始化或数据一致性异常，不默认成可售，也不在 GET 请求中自动补数据。当前座位图只读取 MySQL，不合并 Redis 临时锁状态、不增加缓存；数据库状态与 Redis 临时锁的合并展示留待后续锁座阶段。
 
 ### 3.8 阶段 6 查询链路冻结
 
@@ -158,7 +158,1172 @@ Seat Map
 
 推荐链路暂定为：行为采集 → 用户/内容标签打分 → 候选召回 → 规则排序 → AI 生成推荐理由，推荐理由随推荐结果一起返回。评价总结由评论变化触发异步生成，持久化并缓存后由只读接口提供，禁止在详情页请求中同步调用模型。AI 不直接决定座位库存、价格、支付结果或订单状态。
 
-## 4. 服务端模块建议
+## 4. 阶段 7：锁座设计
+
+### 4.1 Step 7.1：锁座职责边界
+
+锁座采用 Redis 临时锁与 MySQL 最终业务事实分层的设计。Redis 临时锁表示“用户正在选座，座位被短暂占用”，具有 TTL，可以自动过期，不属于最终业务事实。`tb_showtime_seat.status` 只保存数据库中的销售状态：
+
+```text
+0 = AVAILABLE
+1 = HELD_BY_UNPAID_ORDER
+2 = SOLD
+```
+
+必须明确：
+
+```text
+Redis 锁成功
+≠
+tb_showtime_seat.status = 1
+```
+
+`status=1` 只允许在后续创建待支付订单成功时写入。`TEMP_LOCKED` 是 Redis 临时锁存在时的逻辑状态，不是 `tb_showtime_seat.status` 的新增取值。当前暂定的完整状态转换为：
+
+```text
+AVAILABLE
+   ↓ Redis 临时锁
+TEMP_LOCKED
+   ↓ 创建订单成功
+HELD_BY_UNPAID_ORDER
+   ↓ 支付成功
+SOLD
+```
+
+在未创建订单的前提下，Redis 临时锁超时后的状态恢复为：
+
+```text
+TEMP_LOCKED
+   ↓ TTL 到期
+AVAILABLE
+```
+
+因此，锁座成功时禁止执行以下操作：
+
+- 不修改 `tb_showtime_seat.status`。
+- 不创建 `TicketOrder`。
+- 不扣减库存。
+- 不执行支付逻辑。
+
+`SeatLockService` 的职责严格限定为：接收 `showtimeId + seatIds + 当前 userId`，在 Redis 中完成原子锁定，并返回 `lockToken + expireTime`。Redis Key、`lockToken` 数据结构、重复请求幂等、过期释放和异常恢复将在后续 Step 单独设计，本 Step 不实现 Lua。
+
+锁座 API 冻结为：
+
+```http
+POST /api/showtimes/{id}/seats/lock
+```
+
+请求体：
+
+```json
+{
+  "seatIds": [101, 102]
+}
+```
+
+成功响应的核心字段：
+
+```json
+{
+  "lockToken": "xxx",
+  "expireTime": "..."
+}
+```
+
+这一职责边界延续阶段 6 的冻结结论：阶段 6 已存在的 `status=1` 只是数据库既有状态及查询展示语义，不表示 Redis 锁座流程已经实现。Redis 负责临时状态和并发协调，MySQL 负责订单占用、售出等最终业务事实。
+
+### 4.2 Step 7.2：Redis 锁座数据结构
+
+每个场次座位使用独立的临时锁 Key：
+
+```text
+seat:lock:{showtimeId}:{seatId}
+```
+
+座位锁的 Value 统一保存服务端签发的 `lockToken`，不只保存 `userId`。同一次多座位锁定中的所有座位必须绑定同一个 `lockToken`。例如：
+
+```text
+seat:lock:1001:101 = 8f3a...
+seat:lock:1001:102 = 8f3a...
+```
+
+座位锁必须设置 TTL，阶段 7 暂定为 5 分钟。该 TTL 只表达用户选座期间的临时占用期限，不改变 `tb_showtime_seat.status`，也不形成订单事实。
+
+每次锁座还必须写入对应的 `lockToken` 元数据 Key：
+
+```text
+seat:lock:token:{lockToken}
+```
+
+其 Value 保存本次完整锁座上下文，至少包含：
+
+```json
+{
+  "userId": 1,
+  "showtimeId": 1001,
+  "seatIds": [101, 102],
+  "expireTime": "..."
+}
+```
+
+`expireTime` 是服务端计算的锁座绝对过期时间，必须与 Redis 实际过期时刻一致。通过元数据 Key，可以由 `lockToken` 找回锁的用户、场次和完整座位集合：
+
+```text
+lockToken
+  ↓
+userId
+showtimeId
+完整 seatIds
+```
+
+后续释放锁时，客户端只提交 `lockToken`，禁止重新提交 `seatIds`。服务端必须通过 `seat:lock:token:{lockToken}` 找回完整锁座上下文，再校验锁的用户归属以及各 seatKey 当前绑定的 token，不能依据客户端提供的任意座位集合释放资源。
+
+当前阶段不增加以下用户维度索引 Key：
+
+```text
+seat:lock:user:{userId}:{showtimeId}
+```
+
+现有 `lockToken` 元数据已经能够反向定位完整锁座信息，无需同时维护“座位锁 + 用户锁集合 + token 元数据”三份状态，从而降低多份 Redis 状态同步和异常清理的复杂度。
+
+`lockToken` 必须由服务端生成随机、不可预测的 Token。阶段 7 可采用：
+
+```java
+UUID.randomUUID().toString().replace("-", "")
+```
+
+生成规则冻结为：
+
+- 客户端不能自行生成 `lockToken`。
+- 一次成功锁座只对应一个 `lockToken`。
+- 同一次锁定的所有 seatKey 必须绑定同一个 `lockToken`。
+- `lockToken` 不能直接使用 `userId`、`showtimeId` 或二者拼接生成。
+
+一次锁座成功后的 Redis 状态示例为：
+
+```text
+seat:lock:1001:101
+    → lockToken=A
+
+seat:lock:1001:102
+    → lockToken=A
+
+seat:lock:token:A
+    → userId=1
+    → showtimeId=1001
+    → seatIds=[101,102]
+    → expireTime=...
+```
+
+所有 `seat:lock:{showtimeId}:{seatId}` Key 与 `seat:lock:token:{lockToken}` Key 必须具有相同的锁座生命周期。一次锁座应以同一个服务端过期时刻为基准设置全部 Key，不能让某个 seatKey 或 token 元数据单独续期；如何保证多 Key 原子写入与并发冲突处理留待 Step 7.3 设计。
+
+本 Step 只冻结 Redis 数据结构，不实现以下内容：
+
+- Lua。
+- 重复锁座请求处理。
+- 主动 release。
+- `TicketOrder`。
+- `tb_showtime_seat.status` 修改。
+
+### 4.3 Step 7.3：锁座前置校验与原子性规则
+
+锁座请求以 `showtimeId + seatIds + 当前 userId` 为输入。在进入 Redis 锁定逻辑之前，必须按以下顺序完成前置校验：
+
+1. 当前用户已登录。
+2. `showtimeId` 是合法正整数。
+3. `seatIds` 非空。
+4. `seatIds` 中不存在重复值。
+5. 单次锁座数量不超过 6 个。
+6. Showtime 是未来、启用的 `MOVIE` 场次。
+7. Showtime 关联的 Venue、Hall、Movie 均有效，并满足既有归属关系。
+8. `seatIds` 全部属于该 Showtime 对应的 Hall。
+9. 对应 `tb_seat.base_status` 全部为 `1`。
+10. 对应 `tb_showtime_seat` 记录全部存在，且查询结果数量与 `seatIds` 数量一致。
+11. 所有 `tb_showtime_seat.status` 均为 `AVAILABLE`。
+
+第 6～7 项直接复用阶段 6 已冻结的 Showtime 有效性规则：`biz_type=MOVIE`、`status=1`、`start_time > NOW()`，并校验 Venue、Hall、Movie 关联有效，不为锁座重新定义另一套场次有效口径。
+
+第 8～11 项必须使用批量查询完成，禁止对 `seatIds` 逐个循环查询数据库。数据库校验流程冻结为：
+
+```text
+seatIds 去重校验
+      ↓
+一次查询 Hall 下且 id IN seatIds 的 Seat
+      ↓
+确认查询数量 == seatIds 数量
+      ↓
+确认全部 tb_seat.base_status = 1
+      ↓
+一次查询 showtimeId + seatIds 对应的 ShowtimeSeat
+      ↓
+确认查询数量 == seatIds 数量
+      ↓
+确认全部 status = AVAILABLE
+```
+
+任意一个座位缺失、不属于目标 Hall、物理座位未启用、缺少 ShowtimeSeat 或数据库状态不可售时，整次锁座请求失败，不能跳过失败座位后继续锁定其余座位。
+
+数据库前置校验通过后，多座位 Redis 锁定必须保证“要么全部成功，要么全部失败”。例如本次请求为：
+
+```text
+seatIds = [101, 102, 103]
+```
+
+对应的 Redis Key 为：
+
+```text
+seat:lock:1001:101
+seat:lock:1001:102
+seat:lock:1001:103
+```
+
+禁止出现以下部分成功状态：
+
+```text
+101 锁成功
+102 已被其他用户锁定
+103 未执行
+
+最终 Redis 遗留 seat:lock:1001:101
+```
+
+多座位锁定必须由一次 Lua 执行完成。Lua 的处理逻辑冻结为两轮：
+
+```text
+第一轮：只校验
+遍历全部 seatKey
+若任意 seatKey 已存在
+  → 整次失败
+  → 不修改任何 Redis 数据
+
+第二轮：统一写入
+确认全部 seatKey 均不存在后
+  → 写入所有 seatKey = lockToken
+  → 按同一过期时刻设置全部 seatKey 的 TTL
+  → 写入 seat:lock:token:{lockToken} 元数据
+  → 为 token 元数据设置同一生命周期
+  → 返回成功
+```
+
+第一轮不得写入任何 Key；只有全部 seatKey 检查通过后才能进入第二轮。座位锁 Key 和 token 元数据 Key 必须在同一次 Lua 执行中完成写入，确保不会产生部分座位锁或缺失 token 元数据的中间状态。本 Step 只冻结 Lua 必须满足的行为，不提交 Lua 脚本实现。
+
+必须明确：
+
+```text
+MySQL AVAILABLE
+≠
+当前一定可锁
+```
+
+MySQL 只记录订单占用和售出等最终业务事实，真正获取临时锁时还必须检查 Redis。一个座位只有同时满足以下两个条件才可以成功获得临时锁：
+
+```text
+MySQL:
+tb_showtime_seat.status = AVAILABLE
+
+并且
+
+Redis:
+seat:lock:{showtimeId}:{seatId} 不存在
+
+两者同时满足
+  → 才能成功获得临时锁
+```
+
+并发冲突结果冻结为：Lua 检查时只要发现任意 seatKey 已存在，整次锁座失败，不写入任何新锁，并返回：
+
+```text
+HTTP 409 Conflict
+code = SEAT_ALREADY_LOCKED
+```
+
+如果数据库批量校验发现任意 `tb_showtime_seat.status != AVAILABLE`，则在执行 Lua 之前直接终止整次请求。两类座位不可锁定原因在设计上区分为：
+
+```text
+Redis 临时锁冲突
+  → SEAT_ALREADY_LOCKED
+
+MySQL 已被待支付订单占用或已经售出
+  → SEAT_NOT_AVAILABLE
+```
+
+`SEAT_ALREADY_LOCKED` 沿用 API 文档已冻结的 `409 Conflict` 契约。`SEAT_NOT_AVAILABLE` 当前作为设计预留错误码记录，本 Step 不修改全局错误码实现；其正式 HTTP 映射在进入实现步骤时随接口错误契约一并冻结。
+
+本 Step 暂不设计以下内容，统一留待 Step 7.4：重复请求与锁座幂等策略：
+
+- 相同请求重复提交的幂等。
+- 用户自己重复锁同一批座位。
+- `lockToken` 重用。
+- release Lua。
+- TTL 到期后的恢复流程。
+- `TicketOrder`。
+
+### 4.4 Step 7.4：锁座幂等与重复请求处理
+
+锁座幂等判断的核心对象不是“用户是否已经锁过座位”，而是“本次请求是否与当前仍然有效的锁座完全一致”。同一用户可以持有多次彼此独立的有效锁座，例如先锁定 `[101,102]`，之后再锁定 `[103,104]`；当前阶段不采用“一人一锁”或“一人一单”的限制。
+
+#### 4.4.1 相同用户、相同 Showtime、完全相同 seatIds
+
+如果本次请求对应的全部 `seat:lock:{showtimeId}:{seatId}` 均存在，并且全部绑定同一个 `lockToken`，则继续读取 `seat:lock:token:{lockToken}`，校验以下条件：
+
+```text
+userId == 当前用户
+showtimeId == 当前 showtimeId
+seatIds 集合完全一致
+锁仍未过期
+```
+
+只有以上条件全部满足时，才将请求视为同一次有效锁座的重复提交。此时处理规则为：
+
+```text
+不生成新的 lockToken
+不重新写入 Redis
+不刷新任何 Key 的 TTL
+不延长 expireTime
+直接返回原 lockToken + 原 expireTime
+```
+
+重复请求不能导致锁座时间不断续期，否则客户端可以通过持续重试永久占用座位。
+
+#### 4.4.2 当前用户已锁定部分或全部座位，但请求集合不同
+
+假设当前已有锁座：
+
+```text
+lockToken=A
+seatIds=[101,102]
+```
+
+当前用户再次请求 `[101,102,103]` 或 `[101]` 时，因为座位集合不完全一致，不能视为同一次请求，统一按新锁座请求处理。只要新请求的 `seatIds` 中存在任意已经被锁定的 seatKey，即使该锁也属于当前用户，整次请求仍然失败，暂定返回：
+
+```text
+HTTP 409 Conflict
+code = SEAT_ALREADY_LOCKED
+```
+
+本阶段不支持扩展已有锁、减少已有锁、合并两个 `lockToken` 或修改既有锁座集合。
+
+#### 4.4.3 座位被其他用户锁定
+
+只要本次请求中的任意 seatKey 已被其他用户的有效锁占用，整次请求直接失败：
+
+```text
+HTTP 409 Conflict
+code = SEAT_ALREADY_LOCKED
+```
+
+响应不得返回其他用户的 `userId`、`lockToken` 或剩余 TTL，避免泄露内部锁信息。
+
+#### 4.4.4 seatIds 规范化与集合比较
+
+`seatIds` 按座位集合比较，请求 `[101,102]` 与 `[102,101]` 必须视为相同集合。在进入幂等判断和最终锁定逻辑之前，统一执行：
+
+```text
+seatIds
+  → 校验重复值
+  → 按 Long 升序排序
+  → 使用规范化后的 seatIds
+```
+
+例如：
+
+```text
+[102,101]
+  ↓
+[101,102]
+```
+
+`seat:lock:token:{lockToken}` 元数据中的 `seatIds` 也必须按相同的 Long 升序保存。幂等校验比较规范化后的完整列表，从而实现与客户端传入顺序无关的集合一致性判断；原始请求中存在重复值时仍按参数错误处理，不能通过去重后继续锁座。
+
+#### 4.4.5 锁座主流程
+
+锁座主流程的业务语义冻结为：
+
+```text
+请求进入
+  ↓
+参数 / Showtime / Seat / ShowtimeSeat 前置校验
+  ↓
+seatIds 规范化
+  ↓
+检查 Redis 当前锁状态
+  ↓
+若完全匹配当前用户已有有效锁
+  → 返回原 lockToken + 原 expireTime
+
+否则
+  ↓
+生成新 lockToken
+  ↓
+执行多座位原子锁定 Lua
+  ↓
+成功 → 返回新 lockToken + expireTime
+失败 → SEAT_ALREADY_LOCKED
+```
+
+“查询已有锁 → 判断幂等 → 新建锁”之间存在并发窗口，因此当前 Step 只冻结业务语义。真正实现时，不能仅依靠 Java 中的以下流程保证幂等和并发安全：
+
+```text
+先 GET
+再判断
+再 SET
+```
+
+哪些幂等判断和状态校验必须放入 Lua，将在后续实现 Step 中结合原子锁定脚本继续冻结。
+
+#### 4.4.6 lockToken 含义不可变
+
+`lockToken` 一旦签发，不允许复用于另一批座位。一个 token 在整个生命周期内只能对应：
+
+```text
+一个 userId
+一个 showtimeId
+一组固定且规范化的 seatIds
+一个固定 expireTime
+```
+
+上述任一字段均不得在 token 生命周期内被修改。后续业务必须通过 `lockToken` 找回并校验用户、场次和完整座位集合，不能信任客户端重新提交的座位信息。
+
+本 Step 仍然不实现或设计以下内容，统一留待 Step 7.5：主动释放、TTL 过期与异常恢复规则：
+
+- Lua 脚本。
+- release 接口逻辑。
+- 主动释放规则。
+- TTL 到期清理。
+- Redis 异常恢复。
+- `TicketOrder`。
+- `tb_showtime_seat.status` 修改。
+
+### 4.5 Step 7.5：锁座释放与过期恢复规则
+
+主动释放接口冻结为：
+
+```http
+POST /api/showtimes/{id}/seats/release
+```
+
+请求体只允许提交 `lockToken`：
+
+```json
+{
+  "lockToken": "xxx"
+}
+```
+
+禁止客户端提交 `seatIds`；释放范围只能由服务端根据 token 元数据恢复。
+
+#### 4.5.1 主动释放前校验
+
+服务端根据 `seat:lock:token:{lockToken}` 读取完整锁座上下文：
+
+```text
+userId
+showtimeId
+seatIds
+expireTime
+```
+
+主动释放按以下规则校验：
+
+1. `lockToken` 非空。
+2. 查询 token 元数据是否存在；不存在时直接进入幂等完成分支。
+3. token 存在时，校验 `token.userId == 当前用户`。
+4. 校验 `token.showtimeId == URL 中的 showtimeId`。
+5. 校验 token 尚未过期；已过期时按锁已自然释放处理，进入幂等完成分支。
+
+有效 token 的用户不匹配时返回：
+
+```text
+HTTP 403 Forbidden
+code = LOCK_NOT_OWNED
+```
+
+有效 token 的 `showtimeId` 与 URL 不匹配时返回：
+
+```text
+HTTP 400 Bad Request
+code = INVALID_LOCK_TOKEN
+```
+
+`LOCK_NOT_OWNED` 和 `INVALID_LOCK_TOKEN` 在本 Step 中只作为设计错误码冻结，是否加入全局错误码及其最终响应文案留待实现 Step 统一处理。
+
+#### 4.5.2 释放范围必须来自 token 元数据
+
+释放链路固定为：
+
+```text
+lockToken
+   ↓
+token 元数据
+   ↓
+取得完整 seatIds
+   ↓
+校验每个 seatKey 当前 Value
+```
+
+禁止采用以下不可信流程：
+
+```text
+客户端提交 seatIds
+   ↓
+服务端直接 DEL
+```
+
+每个座位锁只有在以下条件成立时才能删除：
+
+```text
+seat:lock:{showtimeId}:{seatId} 的 Value == 当前 lockToken
+```
+
+如果 seatKey 的 Value 已变成其他 token，绝对不能删除，避免旧 token 误删后来获得的有效锁。
+
+#### 4.5.3 主动释放的原子性
+
+释放一组座位时，以下操作必须在同一次 Lua 中完成：
+
+```text
+读取并校验 token 元数据
+校验全部 seatKey 当前 Value
+删除 Value == 当前 lockToken 的全部 seatKey
+删除 seat:lock:token:{lockToken}
+```
+
+禁止在 Java 中逐个执行以下操作：
+
+```text
+GET
+DEL
+GET
+DEL
+```
+
+Lua 对全部 Key 的检查与删除必须是一个不可分割的操作，避免释放过程中发生并发覆盖或只释放部分仍属于当前 token 的座位。本 Step 仅冻结 release Lua 必须满足的行为，不提交 Lua 脚本。
+
+#### 4.5.4 主动释放的幂等规则
+
+如果 `seat:lock:token:{lockToken}` 已不存在，可能表示锁已因 TTL 过期、已经主动释放，或后续已经成功转换为订单。此时 release 必须保持幂等：
+
+```text
+直接视为释放完成
+不报错
+不创建任何新状态
+不修改 MySQL
+```
+
+因此：
+
+```text
+第一次 release → 成功
+第二次 release → 仍然成功
+```
+
+token 已超过 `expireTime` 时同样视为临时锁生命周期已经结束，不续期、不重建锁，按幂等完成处理。
+
+#### 4.5.5 TTL 自动过期规则
+
+正常未创建订单的锁座状态变化为：
+
+```text
+TEMP_LOCKED
+   ↓ 5 分钟 TTL
+Redis Key 自动过期
+   ↓
+逻辑恢复 AVAILABLE
+```
+
+这里的 `AVAILABLE` 是“数据库状态仍为 AVAILABLE 且 Redis 临时锁已不存在”时的逻辑可锁状态，不执行以下数据库操作：
+
+```sql
+UPDATE tb_showtime_seat
+```
+
+锁座阶段从未将 `tb_showtime_seat.status` 修改为 `1`，因此普通临时锁超时不需要定时任务恢复 ShowtimeSeat，不需要消息队列恢复数据库，也不需要主动扫描 Redis。Redis TTL 本身就是普通未下单锁座的释放机制。
+
+#### 4.5.6 多 Key 过期时间差异的容错
+
+虽然同一次锁座的所有 seatKey 和 token 元数据使用同一绝对过期时刻，但不能假设以下条件永远成立：
+
+```text
+token Key 存在
+⇔
+全部 seatKey 一定存在
+```
+
+Redis 对过期 Key 的实际清理时机可能存在轻微差异，异常情况下也可能出现 token 元数据存在但部分 seatKey 已不存在。release 和幂等逻辑必须按以下原则容错：
+
+```text
+seatKey 不存在
+  → 视为该座位已经释放
+  → 不重新创建
+
+seatKey Value == 当前 lockToken
+  → 删除
+
+seatKey Value != 当前 lockToken
+  → 不删除
+
+完成座位处理后
+  → 删除当前 token 元数据
+```
+
+以上判断和删除必须在 release Lua 中原子完成，不能因为部分 seatKey 缺失而恢复旧锁，也不能删除已经属于其他 token 的锁。
+
+#### 4.5.7 Redis 异常恢复边界
+
+异常恢复继续遵循以下事实边界：
+
+```text
+Redis 临时锁不是最终业务事实
+MySQL 才是最终订单和售出状态来源
+```
+
+Redis 重启或临时锁数据丢失后，不能根据 `tb_showtime_seat.status=AVAILABLE` 自动重新生成旧锁。丢失的 `TEMP_LOCKED` 直接视为失效，旧 `lockToken` 不允许继续创建订单。
+
+后续创建订单时必须再次同时校验：
+
+```text
+lockToken 元数据存在且未过期
+全部 Redis seatKey 仍绑定该 lockToken
+MySQL ShowtimeSeat 状态仍可转换
+```
+
+任一条件不满足均不得创建订单。Redis 暂时不可用时，锁座、释放及后续订单转换不能通过读取 MySQL 冒充 Redis 校验成功，也不能重建旧锁；无法确认锁状态的操作应失败并允许客户端重试，未下单的临时锁最终仍由其既有 TTL 释放。
+
+#### 4.5.8 当前阶段不做锁恢复
+
+本阶段禁止实现：
+
+- 将 Redis 临时锁持久化到 MySQL。
+- Redis 重启后恢复 `TEMP_LOCKED`。
+- 定时扫描并重建 `seat:lock`。
+- 使用 Redis Stream 记录每次普通锁座以供恢复。
+
+临时锁不能被设计成第二套数据库。
+
+#### 4.5.9 冻结状态变化
+
+未创建订单时的完整状态变化为：
+
+```text
+AVAILABLE
+   ↓ 锁座成功
+TEMP_LOCKED
+   ↓ release / TTL
+AVAILABLE
+```
+
+主动释放和 TTL 过期都只删除或等待过期 Redis 临时状态，不修改 `tb_showtime_seat`。
+
+本 Step 仍然不实现以下内容：
+
+- Lua。
+- Controller / Service。
+- `TicketOrder`。
+- 创建订单后的锁转换。
+- `status=1` 写入。
+- 支付。
+- 订单超时取消。
+
+上述订单转换边界留待 Step 7.6：lockToken 与 TicketOrder 的生命周期边界设计。
+
+### 4.6 Step 7.6：lockToken 与 TicketOrder 生命周期边界
+
+`lockToken` 与 `TicketOrder` 分属两个不同阶段的业务凭证，职责冻结为：
+
+```text
+lockToken
+  → 只表示一份仍有效的 Redis 临时锁座资格
+
+TicketOrder
+  → 表示已经持久化到 MySQL 的待支付订单事实
+```
+
+二者不能混用。`SeatLockService` 只负责先在 Redis 中锁座并签发 `lockToken`；`TicketOrderService` 后续校验锁的用户归属、场次、座位集合、完整性和有效期，再创建 `UNPAID` 订单。
+
+#### 4.6.1 创建订单必须携带 lockToken
+
+后续订单创建接口冻结为：
+
+```http
+POST /api/orders
+```
+
+请求体：
+
+```json
+{
+  "showtimeId": 1001,
+  "seatIds": [101, 102],
+  "lockToken": "xxx"
+}
+```
+
+服务端不能直接信任客户端提交的 `seatIds`：
+
+```text
+客户端 seatIds
+  → 只用于与服务端锁座上下文做一致性校验
+
+真正锁定的座位集合
+  → 以 lockToken 元数据中的规范化 seatIds 为准
+```
+
+订单创建时必须校验 `lockToken` 的用户归属、场次、座位集合和有效期，不能根据客户端请求体自行扩大、缩小或替换锁座范围。
+
+#### 4.6.2 创建订单前重新校验完整锁状态
+
+对于尚未消费、准备首次创建订单的 `lockToken`，创建订单前必须同时满足：
+
+1. `seat:lock:token:{lockToken}` 存在。
+2. token 未过期。
+3. `token.userId == 当前用户`。
+4. `token.showtimeId == 请求 showtimeId`。
+5. `token.seatIds == 请求 seatIds`，两者均规范化后比较。
+6. 每个 `seat:lock:{showtimeId}:{seatId}` 均存在。
+7. 每个 seatKey 的 Value 均等于当前 `lockToken`。
+8. Showtime 仍满足阶段 6 冻结的有效性规则。
+9. 对应的 ShowtimeSeat 全部存在且数量完整。
+10. 所有 `ShowtimeSeat.status == AVAILABLE`。
+
+任意条件失败都不得创建新订单。特别是：
+
+```text
+token 元数据存在
+但任意一个 seatKey 已丢失或不再绑定当前 lockToken
+  → 锁已经不完整
+  → 不得创建订单
+```
+
+为兼容同一 token 的订单重试，请求进入 `TicketOrderService` 后必须先查询持久化的 `lockToken → TicketOrder` 消费关系：如果该 token 已经成功创建订单，并且订单记录的用户、场次和规范化座位集合与本次请求一致，则直接返回原订单；只有确认 token 尚未消费时，才执行上述十项“首次创建订单”校验。否则，订单已创建后的重试会因为 MySQL 座位已经变成 `HELD_BY_UNPAID_ORDER` 而被错误拒绝。
+
+#### 4.6.3 订单成功时才转换数据库状态
+
+只有订单数据库事务成功时，临时锁才转换为待支付订单占用：
+
+```text
+Redis:
+TEMP_LOCKED
+
+        ↓ 创建订单事务成功
+
+MySQL:
+TicketOrder = UNPAID
+ShowtimeSeat.status = HELD_BY_UNPAID_ORDER
+```
+
+完整状态变化为：
+
+```text
+AVAILABLE
+  → TEMP_LOCKED
+  → HELD_BY_UNPAID_ORDER
+```
+
+只有第二个箭头会修改 MySQL。Redis 锁座成功本身仍不得写入 `tb_showtime_seat.status=1`。
+
+#### 4.6.4 多座位数据库转换的事务原子性
+
+一个订单包含 `[101,102,103]` 等多个座位时，以下操作必须在同一个 MySQL 事务中完成：
+
+```text
+创建 TicketOrder
++
+创建全部订单座位明细
++
+将全部对应 ShowtimeSeat
+AVAILABLE → HELD_BY_UNPAID_ORDER
++
+持久化 lockToken → TicketOrder 的一次性消费关系
+```
+
+禁止出现以下部分成功状态：
+
+```text
+订单创建成功
+101 status=1
+102 status=1
+103 更新失败
+```
+
+任意订单记录、座位明细、状态转换或 token 消费关系写入失败，整个数据库事务必须回滚。
+
+#### 4.6.5 ShowtimeSeat 条件更新与数量校验
+
+后续实现不能使用不带原状态约束的更新：
+
+```sql
+UPDATE tb_showtime_seat
+SET status = 1
+WHERE showtime_id = ?
+  AND seat_id IN (...)
+```
+
+更新条件必须包含原状态 `AVAILABLE`：
+
+```text
+WHERE showtime_id = ?
+  AND seat_id IN (...)
+  AND status = AVAILABLE
+```
+
+执行后必须校验：
+
+```text
+实际更新数量 == seatIds 数量
+```
+
+数量不一致说明某些数据库座位不存在或状态已经变化，整个订单事务必须失败并回滚。这是 Redis 临时锁之外，由 MySQL 最终事实层提供的并发兜底。
+
+#### 4.6.6 Redis 锁的结束时机
+
+Redis 临时锁不能在数据库事务提交前删除，禁止：
+
+```text
+先删除 Redis 临时锁
+  → 再创建订单
+```
+
+否则数据库事务失败时，座位会提前重新暴露为可锁。生命周期顺序固定为：
+
+```text
+Redis 临时锁保持有效
+  ↓
+执行订单数据库事务
+  ↓
+事务成功提交
+  ↓
+TicketOrder = UNPAID
+ShowtimeSeat = HELD_BY_UNPAID_ORDER
+lockToken → TicketOrder 消费关系已持久化
+  ↓
+再以 lockToken 为条件结束 Redis 临时锁生命周期
+```
+
+MySQL 与 Redis 之间不构成一个本地原子事务。数据库提交后的 Redis 锁消费必须是条件化、幂等的：只删除仍绑定当前 `lockToken` 的 seatKey 及其 token 元数据。如果数据库已经提交但 Redis 清理失败，不能回滚或否认已成立的订单事实；遗留临时锁允许通过重试清理或原 TTL 最终收敛，而 MySQL 的 `HELD_BY_UNPAID_ORDER` 状态会阻止座位被再次成功转换为订单。
+
+#### 4.6.7 订单成功后普通 release 的权限边界
+
+订单创建成功后：
+
+```text
+lockToken
+  → 已消费
+```
+
+此后即使再次收到相同 token 的普通释放请求，也只能按幂等完成处理：
+
+```text
+不得把 status=1 的订单座位恢复为 AVAILABLE
+不得取消 TicketOrder
+不得删除其他 token 的锁
+```
+
+订单创建成功后，座位释放职责正式从 `SeatLockService` 转移到 `TicketOrderService`。后续只有订单取消或订单超时流程有权在受控数据库事务中执行：
+
+```text
+HELD_BY_UNPAID_ORDER
+  → AVAILABLE
+```
+
+普通 `/seats/release` 接口永远无权修改订单或 MySQL 座位状态。
+
+#### 4.6.8 lockToken 的一次性消费与订单幂等
+
+`lockToken` 是一次性消费凭证：
+
+```text
+一个 lockToken
+最多成功创建一个 TicketOrder
+```
+
+相同 token 重复请求创建订单时不能产生第二个订单。业务语义冻结为：
+
+```text
+同一个已签发 lockToken 重试
+  → 返回同一个已经创建的 TicketOrder
+  → 不新建订单
+```
+
+为保证 Redis token 元数据删除或过期后仍能识别订单重试，`lockToken → TicketOrder` 的消费关系必须随订单持久化在 MySQL 中，并具备防止一个 token 对应多个订单的唯一性保障，不能只依赖 Redis。具体表字段、唯一约束和幂等实现留到订单阶段设计，本 Step 不修改现有订单表。
+
+#### 4.6.9 最终状态职责
+
+锁座、订单和支付的状态职责最终冻结为：
+
+```text
+Redis 无锁
++
+MySQL AVAILABLE
+  → 可锁
+
+Redis TEMP_LOCKED
++
+MySQL AVAILABLE
+  → 用户选座中
+
+Redis 临时锁结束
++
+MySQL HELD_BY_UNPAID_ORDER
+  → 已形成待支付订单
+
+MySQL SOLD
+  → 已支付售出
+```
+
+各阶段只负责自己的状态转换：
+
+```text
+Redis 临时锁：
+AVAILABLE → TEMP_LOCKED
+
+TicketOrder 创建：
+TEMP_LOCKED → HELD_BY_UNPAID_ORDER
+
+支付阶段：
+HELD_BY_UNPAID_ORDER → SOLD
+```
+
+本 Step 不实现：
+
+- `TicketOrder` Entity、Mapper 或 Service。
+- 新建或修改订单表。
+- 订单座位明细表。
+- `ShowtimeSeat.status` 更新 SQL。
+- 订单幂等代码。
+- Redis 锁消费 Lua。
+- 支付。
+- 订单超时取消。
+
+阶段 7 的整体方案检查与实现前冻结留待 Step 7.7。
+
+### Step 7.7：阶段 7 锁座方案冻结
+
+本 Step 对阶段 7 的职责、Redis 数据结构、TTL、前置校验、原子性、幂等、释放以及订单边界进行实现前检查。检查结果如下。
+
+#### 1. 职责边界检查：通过
+
+状态职责已统一为：
+
+```text
+Redis
+  → TEMP_LOCKED
+  → 只负责临时占座
+
+MySQL tb_showtime_seat.status
+  0 = AVAILABLE
+  1 = HELD_BY_UNPAID_ORDER
+  2 = SOLD
+```
+
+阶段 7 不存在“Redis 锁成功后立即修改 `ShowtimeSeat.status=1`”的设计。`status=1` 只允许在后续 `TicketOrder` 创建事务成功时写入；阶段 6 中的 `status=1` 只是既有数据库状态语义，不表示锁座已经实现。
+
+#### 2. Redis Key 检查：通过
+
+阶段 7 有效锁座数据只保留两类 Redis Key：
+
+```text
+seat:lock:{showtimeId}:{seatId}
+  → lockToken
+
+seat:lock:token:{lockToken}
+  → userId
+  → showtimeId
+  → 规范化 seatIds
+  → expireTime
+```
+
+`seat:lock:user:{userId}:{showtimeId}` 仅作为明确禁止采用的反例保留在文档中，不属于有效 Key 设计，不维护用户锁集合或其他重复索引。
+
+#### 3. TTL 检查：通过
+
+锁座 TTL 统一冻结为 5 分钟，并满足：
+
+- 全部 seatKey 与 token 元数据 Key 使用同一服务端绝对过期时刻。
+- 相同有效锁座的重复请求返回原 token，不刷新 TTL，不延长 `expireTime`。
+- release 只执行条件删除，不续期、不重建任何锁。
+- Redis 重启或临时锁丢失后，不重建旧 `TEMP_LOCKED`，旧 token 直接失去订单创建资格。
+
+#### 4. 锁座前置校验检查：通过
+
+进入 Redis 前必须完成以下校验和规范化：
+
+```text
+当前用户已登录
+  ↓
+Showtime 满足阶段 6 的有效性与关联完整性规则
+  ↓
+seatIds 数量为 1～6 个
+  ↓
+不允许重复 seatId
+  ↓
+按 Long 升序规范化 seatIds
+  ↓
+批量查询 Seat，确认全部属于目标 Hall
+  ↓
+确认全部 tb_seat.base_status = 1
+  ↓
+批量查询 ShowtimeSeat，确认数量完整
+  ↓
+确认全部 ShowtimeSeat.status = AVAILABLE
+  ↓
+进入 Redis 锁定判断
+```
+
+参数格式和重复值必须先完成低成本校验，Showtime 直接复用阶段 6 的 `MOVIE + status=1 + start_time > NOW()` 及 Venue、Hall、Movie 关联有效规则。Seat 与 ShowtimeSeat 都必须通过批量查询和结果数量比较验证完整性，禁止逐座位查询造成 N+1。
+
+#### 5. 多座位原子性检查：通过
+
+多座位 Redis 锁定冻结为：
+
+```text
+任意一个 seatKey 已存在
+  → 整次失败
+  → 不写入任何 Redis 数据
+
+全部 seatKey 均可锁
+  → 一次性写入全部 seatKey = lockToken
+  → 一次性写入 token 元数据
+  → 全部 Key 使用同一锁座生命周期
+```
+
+不能出现部分座位成功、部分座位失败或缺失 token 元数据的状态。Redis 内的全部检查和写入必须由一次 Lua 原子执行。
+
+#### 6. 锁座幂等检查：通过
+
+只有以下条件全部满足时才属于同一次有效锁座的重复请求：
+
+```text
+同一 userId
++ 同一 showtimeId
++ 完全相同的规范化 seatIds
++ 全部 seatKey 绑定同一有效 lockToken
++ token 元数据完整且未过期
+```
+
+命中后直接返回原 `lockToken + expireTime`，不生成新 token、不写 Redis、不刷新 TTL。其他请求只要包含任意已锁 seatKey，即使锁的持有者是当前用户，也返回 `SEAT_ALREADY_LOCKED`。
+
+当前不支持扩座、减座、合并锁或修改已有锁座集合。
+
+#### 7. release 边界检查：通过
+
+主动释放接口保持为：
+
+```http
+POST /api/showtimes/{id}/seats/release
+```
+
+客户端请求体只允许：
+
+```json
+{
+  "lockToken": "xxx"
+}
+```
+
+禁止客户端提交 `seatIds`。释放范围必须从 token 元数据恢复，并且只能删除满足以下条件的锁：
+
+```text
+seatKey.value == 当前 lockToken
+```
+
+不存在的 seatKey 视为已释放；Value 已属于其他 token 时绝对不能删除。检查、条件删除 seatKey 和删除 token 元数据必须由一次 release Lua 原子完成。该 token-only 释放约束与 API 文档一致。
+
+#### 8. TTL 与主动释放语义检查：通过
+
+未创建订单时的状态变化固定为：
+
+```text
+AVAILABLE
+  → TEMP_LOCKED
+  → TTL / release
+  → AVAILABLE
+```
+
+TTL 到期和主动释放都只结束 Redis 临时状态，不执行 `UPDATE tb_showtime_seat`，不需要定时任务恢复 MySQL，不需要 Redis Stream，也不扫描或重建普通临时锁。
+
+#### 9. 订单边界检查：通过
+
+锁座阶段只为后续订单提供一份含义不可变的凭证：
+
+```text
+lockToken
+  → 唯一 userId
+  → 唯一 showtimeId
+  → 一组固定且规范化的 seatIds
+  → 一个固定 expireTime
+```
+
+后续订单创建流程必须先查询持久化的 token 消费关系：
+
+```text
+先查询 lockToken 是否已经消费
+
+已消费
+  → 校验请求与原订单归属一致
+  → 返回原 TicketOrder
+
+未消费
+  → 校验 Redis token 元数据和全部 seatKey 完整有效
+  → 再校验 Showtime 与 MySQL ShowtimeSeat
+  → 在数据库事务中创建 UNPAID 订单
+```
+
+`SeatLockService` 负责临时锁座，`TicketOrderService` 负责 token 消费、订单持久化和订单形成后的座位释放，两阶段职责不混用。
+
+#### 10. 阶段 7 实现范围检查：通过
+
+阶段 7 后续实现范围严格限制为：
+
+- `POST /api/showtimes/{id}/seats/lock`。
+- `POST /api/showtimes/{id}/seats/release`。
+- `SeatLockService`。
+- 锁座 Lua。
+- 释放 Lua。
+- Redis Key 与 TTL 常量。
+- 锁座、释放所需 DTO / VO。
+- 本阶段锁座相关错误码。
+- 自动化测试。
+- 真实 Redis、MySQL 与 HTTP 联调。
+
+阶段 7 暂不实现：
+
+- `TicketOrder`。
+- 新建或修改订单表。
+- 订单座位明细业务。
+- `ShowtimeSeat.status=1` 写入。
+- 支付。
+- 订单超时取消。
+- 出票。
+- Redis Stream 订单任务。
+
+该范围符合阶段 6 交接边界：阶段 7 先完成并冻结锁座设计，在锁座实现阶段不得提前实现订单、支付、超时取消或出票能力。
+
+#### 阶段 7 冻结结论
+
+阶段 7 锁座设计已完成冻结。
+
+锁座采用 Redis 临时状态与 MySQL 最终事实的两阶段模型。多座位锁定和释放均要求 Redis Lua 原子执行。`lockToken` 是服务端签发、不可预测、含义不可变且有期限的一次锁座凭证。普通锁座阶段不修改 `tb_showtime_seat.status`，不创建订单。
+
+该冻结范围已用于阶段 7 实现：实现内容严格限制为 `SeatLockService`、lock/release API、Redis Lua 及其 DTO、VO、常量、错误码、测试和联调，未提前实现 `TicketOrder`、支付或订单超时流程。
+
+### Step 7.16：阶段 7 实现结果
+
+阶段 7 已按冻结设计完成 Redis 临时锁座实现：
+
+- Redis Seat Lock TTL 固定为 5 分钟。
+- `seat:lock:{showtimeId}:{seatId}` 保存 `lockToken`。
+- `seat:lock:token:{lockToken}` 保存用户、场次、规范化座位集合和过期时间 Metadata。
+- 多座位 lock 使用单次 Lua 原子执行，Redis 冲突由 Lua 作最终并发兜底，确保全部成功或全部失败。
+- release 使用 Lua 按 `seatKey.value == lockToken` 条件删除，不删除其他 token 的锁。
+- 同一用户、同一场次、完全相同规范化座位集合的有效锁支持幂等返回，重试不刷新 TTL。
+- Token 不存在、已释放或已过期时 release 保持幂等完成。
+- Seat 与 ShowtimeSeat 前置校验均使用批量查询，不产生逐座位 N+1。
+- 普通 lock、release 和 TTL 过期均不修改 `tb_showtime_seat.status`；MySQL 在整个临时锁生命周期内仍为 `AVAILABLE`。
+- 当前 Seat Map 只读取 MySQL，不合并 Redis `TEMP_LOCKED`，因此锁座期间仍可能展示 `AVAILABLE`。这是当前阶段的明确边界，后续如需合并展示必须单独设计。
+
+阶段 7 已通过自动化测试以及真实 HTTP、Redis、MySQL 联调，包括锁座、相同请求幂等、主动释放、重复释放和双用户并发冲突验证。阶段 7 不包含 `TicketOrder`、支付、订单超时取消或出票。
+
+## 5. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
 
@@ -178,7 +1343,7 @@ ai         评价总结的异步生成、持久化和读取
 common     统一响应、异常、鉴权、限流、幂等
 ```
 
-## 5. 关键非功能要求
+## 6. 关键非功能要求
 
 - 所有写接口校验当前用户和资源归属。
 - 订单、支付、锁座操作必须支持幂等。

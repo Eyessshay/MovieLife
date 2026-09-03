@@ -28,6 +28,10 @@ public final class RedisConstants {
     public static final String POST_LIKE_KEY = "post:like:";
     public static final String FEED_KEY = "feed:";
 
+    public static final String SEAT_LOCK_KEY_PREFIX = "seat:lock:";
+    public static final String SEAT_LOCK_TOKEN_KEY_PREFIX = "seat:lock:token:";
+    public static final long SEAT_LOCK_TTL_MINUTES = 5L;
+
     private RedisConstants() {
     }
 }
