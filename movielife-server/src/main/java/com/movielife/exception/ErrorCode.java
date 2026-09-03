@@ -29,6 +29,7 @@ public enum ErrorCode {
     INVALID_BIZ_TYPE("INVALID_BIZ_TYPE", "业务类型不合法", HttpStatus.BAD_REQUEST),
     MOVIE_NOT_FOUND("MOVIE_NOT_FOUND", "电影不存在", HttpStatus.NOT_FOUND),
     VENUE_NOT_FOUND("VENUE_NOT_FOUND", "场馆不存在", HttpStatus.NOT_FOUND),
+    SHOWTIME_NOT_FOUND("SHOWTIME_NOT_FOUND", "场次不存在", HttpStatus.NOT_FOUND),
     INVALID_TARGET_TYPE("INVALID_TARGET_TYPE", "目标类型不合法", HttpStatus.BAD_REQUEST),
     CONTENT_REQUIRED("CONTENT_REQUIRED", "评价内容不能为空且不能超过2000字", HttpStatus.BAD_REQUEST),
     REVIEW_NOT_FOUND("REVIEW_NOT_FOUND", "评价不存在", HttpStatus.NOT_FOUND),

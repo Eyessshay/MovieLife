@@ -194,6 +194,10 @@ POST /api/showtimes/{id}/seats/lock      # 仅锁定座位，不创建订单
 POST /api/showtimes/{id}/seats/release   # 主动释放未转订单的锁座
 ```
 
+`GET /api/showtimes/{id}` 是公开的场次详情接口。`id` 必须为正整数；场次不存在、已停用、已过期或不是 `MOVIE` 类型时，统一返回 `404 SHOWTIME_NOT_FOUND`，不对外暴露内部状态差异。关联场馆已停用时同样视为场次不可公开；Venue、Hall、Movie 缺失或 Hall 不属于该场馆属于内部数据不一致，返回统一服务异常。
+
+接口固定读取一条 Showtime，并分别查询关联的 Venue、Hall、Movie，不使用复杂 JOIN，也不产生列表 N+1。响应 `ShowtimeDetailVO` 包含 `id`、`venueId`、`venueName`、`hallId`、`hallName`、`movieId`、`movieName`、`startTime`、`endTime`、`basePrice`。详情具有时间敏感性，当前直接读取 MySQL，不增加 Redis 缓存。
+
 锁座请求：
 
 ```json
