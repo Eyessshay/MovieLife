@@ -268,7 +268,17 @@ GET  /api/orders/{id}/tickets           # 查看票券/取票码
 }
 ```
 
-`TicketOrderService` 必须校验 `lockToken` 的用户归属、场次、座位集合和过期时间，并在一个受控事务中创建 `UNPAID` 订单及座位明细、关联锁座状态。相同幂等键或同一有效 `lockToken` 重试不得创建重复订单。订单创建成功后，Redis 临时锁转换为数据库中的订单占用状态；订单超时或取消后释放座位。
+`TicketOrderService` 首次创建订单前必须校验 `lockToken` 的用户归属、场次、规范化座位集合、有效期以及全部 seatKey 的完整归属。客户端提交的 `seatIds` 只用于一致性校验，实际下单座位以 Redis token 元数据为准；价格由服务端读取 `ShowtimeSeat.price` 计算，不能信任客户端价格。
+
+`Redis Metadata` 只表示尚未消费阶段的临时下单资格；`tb_ticket_order.lock_token` 是消费成功后的长期幂等事实，并具有唯一约束。请求进入后必须先按 `lockToken` 查询订单：已有订单且用户、场次和订单明细座位集合完全一致时直接返回原订单，即使 Redis Key 已删除也不得创建第二个订单；只有 token 尚未消费时才校验 Redis 和 MySQL 并首次创建订单。
+
+订单创建必须在一个受控 MySQL 事务中完成：创建 `UNPAID` 订单、批量创建座位明细、将全部目标 `ShowtimeSeat` 按 `status=AVAILABLE AND lock_order_id IS NULL` 条件更新为 `HELD_BY_UNPAID_ORDER` 并绑定当前订单，同时同步减少 `Showtime.available_seats`。座位更新数量必须等于 `seatIds` 数量，余票计数更新影响行数必须为 1；否则整个事务回滚。`available_seats` 只是派生计数，更新失败按内部数据一致性异常处理，不能替代 `ShowtimeSeat` 的可售判断。
+
+Redis 5 分钟 `lockExpireTime` 只决定能否首次创建订单。订单成功后使用独立的 15 分钟支付窗口，`orderExpireTime = min(创建基准时间 + 15 分钟, Showtime.startTime)`，并且必须严格晚于订单创建基准时间；否则首次创建失败，不生成创建即过期的 `UNPAID` 订单。
+
+数据库事务提交前禁止删除 Redis 锁。提交成功后才按 `seatKey.value == lockToken` 条件清理 seatKey 和 token 元数据；清理失败不能回滚已经成立的订单事实，只能重试清理或等待原 TTL 收敛。订单超时或取消后，由订单域按 `status=HELD_BY_UNPAID_ORDER AND lock_order_id=当前订单` 的归属条件释放座位，普通锁座 release 不承担该职责。
+
+若并发创建命中 `uk_order_lock_token`，当前失败事务必须先回滚，再在事务外或新事务中按 `lockToken` 查询既有订单，校验 `userId`、`showtimeId` 和规范化 `seatIds` 后返回原订单；不得在已经被标记为 rollback-only 的事务中继续查询并返回。
 
 支付回调和退款回调预留内部接口：
 
@@ -278,6 +288,8 @@ POST /api/refund/notify                # 退款渠道异步通知
 ```
 
 客户端不得直接修改订单状态。订单状态暂定为 `UNPAID`、`PAID`、`CANCELED`、`REFUNDED`；支付、取消、退款接口必须校验状态机和幂等性。
+
+订单明细继续采用“一座一票”：`tb_ticket_order_item.ticket_code` 和 `ticket_status` 属于具体座位明细，`ticket_code` 在支付成功后的出票阶段生成。当前单场次订单通过 `order.showtime_id + item.seat_id` 唯一定位 `ShowtimeSeat`，不额外引入 `showtime_seat_id`。
 
 ### 3.10 AI 评价总结
 

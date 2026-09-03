@@ -1323,7 +1323,193 @@ lockToken
 
 阶段 7 已通过自动化测试以及真实 HTTP、Redis、MySQL 联调，包括锁座、相同请求幂等、主动释放、重复释放和双用户并发冲突验证。阶段 7 不包含 `TicketOrder`、支付、订单超时取消或出票。
 
-## 5. 服务端模块建议
+## 5. 阶段 8：订单数据模型设计
+
+### 5.1 Step 8.1：订单数据模型与 lockToken 一次性消费关系
+
+本 Step 只冻结订单数据模型、事务边界和 Redis 锁消费关系，不创建 Entity、Mapper、Service、Controller，也不实现 `POST /api/orders`。
+
+#### 5.1.1 lockToken 的持久化与唯一消费
+
+`tb_ticket_order` 增加 `lock_token VARCHAR(64) NOT NULL`，并建立唯一索引 `uk_order_lock_token(lock_token)`：
+
+```text
+一个 lockToken
+→ 数据库最多对应一个 TicketOrder
+```
+
+当前服务端签发的是 32 位无连字符 UUID 字符串，字段保留至 64 位以便后续扩展，并使用 ASCII 二进制比较。`lock_token` 是订单的长期幂等事实，订单支付、取消、超时或退款后均不得清空或复用。本阶段不增加独立的 token 消费表，避免在 Redis 锁、订单和消费记录之间维护无必要的第三份状态。
+
+订单请求进入后必须先按 `lockToken` 查询 MySQL。若订单已存在，必须校验订单 `userId`、`showtimeId` 以及订单明细中的规范化 `seatIds` 与当前请求完全一致；一致时直接返回原订单，不一致时拒绝请求。只有确认 token 尚未消费时，才读取 Redis Metadata 并执行首次创建订单校验。因此即使订单创建成功后 Redis Key 已删除，相同 token 重试仍可返回原订单。
+
+若两个请求并发首次创建订单并命中 `uk_order_lock_token`，失败请求必须遵循：
+
+```text
+INSERT 命中唯一约束
+→ 当前事务回滚
+→ 在事务外或新事务中按 lockToken 查询既有订单
+→ 校验 userId、showtimeId、规范化 seatIds
+→ 返回原订单
+```
+
+不得在已经触发唯一键异常、可能被 Spring 标记为 rollback-only 的事务中继续查询并返回。
+
+#### 5.1.2 Redis 锁期限与订单支付期限
+
+锁座与订单使用两个不同的期限：
+
+```text
+lockExpireTime
+→ Redis 临时锁截止时间
+→ 决定 token 是否仍有资格首次创建订单
+
+orderExpireTime
+→ tb_ticket_order.expire_time
+→ 决定 UNPAID 订单何时超时取消
+```
+
+订单支付窗口冻结为 15 分钟。首次创建订单时只获取一次创建基准时间，并计算：
+
+```text
+orderExpireTime = min(创建基准时间 + 15 分钟, Showtime.startTime)
+```
+
+`orderExpireTime` 必须严格晚于创建基准时间；如果事务执行边界已经跨过开场时间，导致计算结果 `<=` 创建基准时间，则首次创建失败，禁止生成创建即过期的 `UNPAID` 订单。`tb_ticket_order.expire_time` 因此为非空字段。订单支付期限不能使用 Redis 剩余 TTL 代替，订单创建成功后不再依赖临时锁继续生存。
+
+#### 5.1.3 订单、明细与票券归属
+
+当前订单继续限定为一个订单只属于一个 Showtime：
+
+```text
+TicketOrder.showtimeId
++
+TicketOrderItem.seatId
+→ 通过 (showtimeId, seatId) 唯一定位 ShowtimeSeat
+```
+
+`tb_showtime_seat` 已具有 `(showtime_id, seat_id)` 唯一约束，因此 `tb_ticket_order_item` 不增加 `showtime_seat_id`，避免同时保存可以互相矛盾的冗余关联。`uk_order_item_seat(order_id, seat_id)` 继续防止同一订单重复记录相同座位；不同历史订单可以包含同一物理座位，当前占用归属由 `ShowtimeSeat` 状态和 `lock_order_id` 决定。
+
+“一座一票”继续作为现行模型：`ticket_code` 和 `ticket_status` 保存在 `tb_ticket_order_item`，一个订单的每个座位明细分别对应一张电子票。订单创建时 `ticket_code` 允许为空，支付成功后的出票阶段再生成，并继续由 `uk_ticket_code` 保证唯一。
+
+#### 5.1.4 金额快照
+
+订单价格只能由服务端读取数据库计算：
+
+```text
+ShowtimeSeat.price
+→ TicketOrderItem.price
+
+全部 item.price 求和
+→ TicketOrder.total_amount
+```
+
+客户端不得提交或决定订单价格。`TicketOrderItem.price` 是下单时的座位价格快照，`TicketOrder.total_amount` 必须等于全部明细金额之和，并与订单、明细及座位占用在同一数据库事务中落库。
+
+#### 5.1.5 创建订单的数据库事务
+
+首次消费有效 token 时，以下操作必须在同一个 MySQL 事务中完成：
+
+```text
+1. 创建 TicketOrder
+   status = UNPAID
+   lock_token = 当前 lockToken
+   expire_time = orderExpireTime
+
+2. 批量创建全部 TicketOrderItem
+
+3. 批量条件更新全部 ShowtimeSeat
+   AVAILABLE → HELD_BY_UNPAID_ORDER
+   lock_order_id = 当前 orderId
+
+4. 同步减少 Showtime.available_seats
+
+5. 校验全部影响行数
+
+6. 任一步失败 → 整个事务回滚
+```
+
+ShowtimeSeat 必须一次批量更新，条件至少包含：
+
+```text
+showtime_id = 当前 showtimeId
+seat_id IN (规范化 seatIds)
+status = AVAILABLE
+lock_order_id IS NULL
+```
+
+更新时写入 `status=HELD_BY_UNPAID_ORDER`、`lock_order_id=当前 orderId`，并递增 `version`。实际更新数量必须等于 `seatIds.size()`；禁止逐座位更新、无条件更新或接受部分成功。
+
+#### 5.1.6 available_seats 的职责
+
+`tb_showtime.available_seats` 只是便于查询的派生余票计数，不能提升为售票判断依据。座位是否可售仍以 `tb_seat.base_status` 和 `tb_showtime_seat.status` 为最终事实。
+
+创建 `UNPAID` 订单时，在同一事务中执行等价于以下条件更新的操作：
+
+```sql
+UPDATE tb_showtime
+SET available_seats = available_seats - :seatCount
+WHERE id = :showtimeId
+  AND available_seats >= :seatCount;
+```
+
+影响行数必须为 1；否则整个订单事务回滚，并按内部数据一致性异常处理，不能包装成普通“库存不足”。订单取消或超时时在其受控事务中增加相同数量；`UNPAID → PAID` 不再改变计数。阶段 7 的 Redis lock、release 和 TTL 到期始终不修改 `available_seats`。
+
+#### 5.1.7 lock_order_id 生命周期
+
+逻辑归属固定为：
+
+```text
+AVAILABLE
+status = 0
+lock_order_id = NULL
+
+创建订单
+status = 1 (HELD_BY_UNPAID_ORDER)
+lock_order_id = 当前 orderId
+
+支付成功
+status = 2 (SOLD)
+lock_order_id 继续保留当前 orderId
+
+取消或超时
+status = 0 (AVAILABLE)
+lock_order_id = NULL
+```
+
+后续支付、取消和超时操作不能只检查 `status=1`，还必须要求 `lock_order_id=当前 orderId`，确保订单 A 不能售出或释放订单 B 的座位。当前 SQL 已为 `lock_order_id` 建立索引；本 Step 不强制增加物理外键，关系完整性由条件更新、事务和 Service 校验保证，是否增加外键留待后续数据库约束专项调整。
+
+#### 5.1.8 数据库提交后的 Redis 条件清理
+
+数据库事务提交前禁止删除 Redis 临时锁。固定顺序为：
+
+```text
+完整校验 Redis
+→ 执行订单数据库事务
+→ COMMIT
+→ 按 lockToken 条件清理 Redis
+```
+
+提交后的清理继续沿用阶段 7 的所有权语义：只有 `seatKey.value == 当前 lockToken` 才允许删除对应 seatKey，禁止无条件 `DEL`，token 元数据清理也必须幂等。如果数据库已经提交但 Redis 清理失败，不得回滚或否认已经成立的订单事实；残留临时锁只能通过重试清理或原 TTL 最终收敛，MySQL 中的订单和 `HELD_BY_UNPAID_ORDER` 状态仍是最终事实。
+
+#### 5.1.9 Step 8.1 冻结结论
+
+```text
+Redis Metadata
+= 首次创建订单前的临时资格证明
+
+tb_ticket_order.lock_token UNIQUE
+= Token 已消费后的长期幂等事实
+
+tb_showtime_seat.status + lock_order_id
+= 座位订单归属的最终事实
+
+Redis 清理
+= 必须发生在数据库 COMMIT 之后
+```
+
+阶段 8 订单数据模型采用 Redis 临时资格、MySQL token 唯一消费关系和 MySQL 场次座位最终状态的分层职责。普通锁座仍不修改 MySQL；只有订单事务成功时才将全部座位从 `AVAILABLE` 转换为 `HELD_BY_UNPAID_ORDER`。本 Step 只同步 SQL 草案和设计文档，不实现订单 Java 代码、支付、取消、超时任务、出票或 Redis Stream。
+
+## 6. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
 
@@ -1343,7 +1529,7 @@ ai         评价总结的异步生成、持久化和读取
 common     统一响应、异常、鉴权、限流、幂等
 ```
 
-## 6. 关键非功能要求
+## 7. 关键非功能要求
 
 - 所有写接口校验当前用户和资源归属。
 - 订单、支付、锁座操作必须支持幂等。
