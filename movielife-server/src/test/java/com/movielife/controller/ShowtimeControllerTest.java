@@ -3,7 +3,9 @@ package com.movielife.controller;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.service.ShowtimeService;
+import com.movielife.vo.SeatVO;
 import com.movielife.vo.ShowtimeDetailVO;
+import com.movielife.vo.ShowtimeSeatMapVO;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -13,6 +15,7 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.Collections;
 
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -76,5 +79,34 @@ class ShowtimeControllerTest {
         mockMvc.perform(get("/api/showtimes/abc"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("INVALID_ID"));
+    }
+
+    @Test
+    void shouldReturnPublicShowtimeSeatMap() throws Exception {
+        SeatVO seat = new SeatVO();
+        seat.setSeatId(10L);
+        seat.setRowNo(1);
+        seat.setColNo(2);
+        seat.setSeatNo("1排2座");
+        seat.setSeatType("VIP");
+        seat.setStatus(2);
+        seat.setPrice(new BigDecimal("60.00"));
+        ShowtimeSeatMapVO seatMap = new ShowtimeSeatMapVO();
+        seatMap.setShowtimeId(101L);
+        seatMap.setHallId(2L);
+        seatMap.setHallName("2号厅");
+        seatMap.setBasePrice(new BigDecimal("45.00"));
+        seatMap.setSeats(Collections.singletonList(seat));
+        when(showtimeService.querySeatMap(101L)).thenReturn(seatMap);
+
+        mockMvc.perform(get("/api/showtimes/101/seats"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.showtimeId").value(101))
+                .andExpect(jsonPath("$.data.hallName").value("2号厅"))
+                .andExpect(jsonPath("$.data.basePrice").value(45.00))
+                .andExpect(jsonPath("$.data.seats[0].seatId").value(10))
+                .andExpect(jsonPath("$.data.seats[0].colNo").value(2))
+                .andExpect(jsonPath("$.data.seats[0].status").value(2))
+                .andExpect(jsonPath("$.data.seats[0].price").value(60.00));
     }
 }

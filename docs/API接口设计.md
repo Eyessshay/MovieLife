@@ -198,6 +198,12 @@ POST /api/showtimes/{id}/seats/release   # 主动释放未转订单的锁座
 
 接口固定读取一条 Showtime，并分别查询关联的 Venue、Hall、Movie，不使用复杂 JOIN，也不产生列表 N+1。响应 `ShowtimeDetailVO` 包含 `id`、`venueId`、`venueName`、`hallId`、`hallName`、`movieId`、`movieName`、`startTime`、`endTime`、`basePrice`。详情具有时间敏感性，当前直接读取 MySQL，不增加 Redis 缓存。
 
+`GET /api/showtimes/{id}/seats` 是公开的场次座位图查询接口，复用场次详情的有效性规则，只允许未来、启用、关联场馆有效的 `MOVIE` 场次。接口只执行查询，不创建座位状态、不锁座，也不操作 Redis。
+
+响应包含 `showtimeId`、`hallId`、`hallName`、`basePrice` 和扁平 `seats` 列表。每个座位返回 `seatId`、`rowNo`、`colNo`、`seatNo`、`seatType`、`status`、`price`；其中 `status` 来自 `tb_showtime_seat`，当前数值语义为 `0=AVAILABLE`、`1=HELD_BY_UNPAID_ORDER`、`2=SOLD`，`price` 为该场次下的座位价格。`tb_seat.base_status=0` 的物理座位不返回。
+
+座位按 `row_no ASC, col_no ASC` 稳定排序。服务端先批量查询 Hall 的有效 `tb_seat`，再一次查询对应 `tb_showtime_seat` 并通过 `seatId` 映射；Hall 没有有效座位时返回 `seats: []`。只要存在有效 Seat 却缺少对应 ShowtimeSeat，就按内部数据不完整返回 `INTERNAL_ERROR`，不会把缺失状态默认为可售。当前座位图直接读取 MySQL，不缓存。
+
 锁座请求：
 
 ```json

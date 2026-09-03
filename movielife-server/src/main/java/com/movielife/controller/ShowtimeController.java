@@ -3,6 +3,7 @@ package com.movielife.controller;
 import com.movielife.common.Result;
 import com.movielife.service.ShowtimeService;
 import com.movielife.vo.ShowtimeDetailVO;
+import com.movielife.vo.ShowtimeSeatMapVO;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -19,5 +20,10 @@ public class ShowtimeController {
     @GetMapping("/{id}")
     public Result<ShowtimeDetailVO> detail(@PathVariable Long id) {
         return Result.ok(showtimeService.queryShowtimeDetail(id));
+    }
+
+    @GetMapping("/{id}/seats")
+    public Result<ShowtimeSeatMapVO> seats(@PathVariable Long id) {
+        return Result.ok(showtimeService.querySeatMap(id));
     }
 }

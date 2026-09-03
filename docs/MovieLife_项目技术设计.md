@@ -110,7 +110,27 @@ showtimeId
 
 `ShowtimeDetailVO` 返回场馆、影厅、电影的展示名称以及起止时间和 `basePrice`。该接口直接读取 MySQL，不缓存时间敏感的场次状态。本 Step 仍不查询 Seat、ShowtimeSeat，不涉及锁座、订单或支付。
 
-### 3.7 推荐与 AI
+### 3.7 场次座位图查询
+
+`tb_seat` 表示 Hall 的固定物理座位模板，`base_status` 只表达座位本身是否启用；`tb_showtime_seat` 表示 `Showtime × Seat` 的场次级销售事实，`status` 表达该场次中的可售、待支付订单占用或已售状态。两层状态不能混用。
+
+```text
+有效 MOVIE Showtime 上下文
+  ↓
+按 hallId 批量查询 base_status=1 的 Seat
+  ↓
+按 showtimeId + seatIds 一次查询 ShowtimeSeat
+  ↓
+以 seatId 建立状态映射并校验完整性
+  ↓
+按 rowNo + colNo 组装座位图
+```
+
+响应保持扁平列表，同时返回数据库已有的 `colNo` 和场次座位 `price`：`colNo` 用于可靠表达物理列位置，避免按字符串 `seatNo` 排序产生 `1、10、2` 的问题；`price` 表达座位在当前场次中的实际价格，场次 `basePrice` 仍作为基础价保留。
+
+Hall 没有有效 Seat 时正常返回空列表；Hall 有有效 Seat 但缺少对应 ShowtimeSeat 时视为初始化或数据一致性异常，不默认成可售，也不在 GET 请求中自动补数据。当前座位图只读取 MySQL，不合并 Redis 锁座状态、不增加缓存；实时 `AVAILABLE / LOCKED / SOLD` 合并留待后续锁座阶段。
+
+### 3.8 推荐与 AI
 
 推荐链路暂定为：行为采集 → 用户/内容标签打分 → 候选召回 → 规则排序 → AI 生成推荐理由，推荐理由随推荐结果一起返回。评价总结由评论变化触发异步生成，持久化并缓存后由只读接口提供，禁止在详情页请求中同步调用模型。AI 不直接决定座位库存、价格、支付结果或订单状态。
 
