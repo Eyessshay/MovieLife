@@ -68,7 +68,29 @@ GEO 初始化只处理 `status=1` 且经纬度完整的场馆，按 `city + type
 - Redis GEO 故障直接返回统一服务异常，暂不使用 MySQL 经纬度计算降级。
 - 电影过滤模式的 GEO 候选窗口为 `min(page × pageSize × 5, 200)`；200 条上限是当前数据规模下控制 Redis 召回和 MySQL 查询成本的工程折中，不代表完整深分页能力。
 
-### 3.5 推荐与 AI
+### 3.5 电影场次查询
+
+阶段 6 的第一条查询链路为：
+
+```text
+Movie
+  ↓
+附近有该电影排片的 Venue
+  ↓
+venueId + movieId + date
+  ↓
+查询当天未来且可售的 tb_showtime
+  ↓
+批量查询 Hall 并补齐 hallName
+  ↓
+按 startTime 升序返回 ShowtimeVO
+```
+
+日期条件在 Java 中计算为 `[date.atStartOfDay(), date.plusDays(1).atStartOfDay())`，SQL 不对 `start_time` 使用 `DATE()` 函数。有效场次口径与 nearby 电影过滤保持一致，即 `biz_type=MOVIE`、`status=1` 且 `start_time > NOW()`。场次 VO 使用 `basePrice` 表达场次基础价，后续座位查询再叠加具体座位价格。
+
+场次列表是 `venue + movie + date + 当前时间` 的动态组合查询，当前直接读取 MySQL，不增加 Redis 列表缓存，避免引入排片修改、停售和时间流逝导致的复杂失效逻辑。本阶段只提供查询，不涉及座位锁定、订单、支付、超时取消或出票。
+
+### 3.6 推荐与 AI
 
 推荐链路暂定为：行为采集 → 用户/内容标签打分 → 候选召回 → 规则排序 → AI 生成推荐理由，推荐理由随推荐结果一起返回。评价总结由评论变化触发异步生成，持久化并缓存后由只读接口提供，禁止在详情页请求中同步调用模型。AI 不直接决定座位库存、价格、支付结果或订单状态。
 

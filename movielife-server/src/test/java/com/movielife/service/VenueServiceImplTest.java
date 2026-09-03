@@ -5,6 +5,8 @@ import com.movielife.constants.RedisConstants;
 import com.movielife.dto.VenueDetailCacheDTO;
 import com.movielife.dto.VenueNearbyQueryDTO;
 import com.movielife.entity.Movie;
+import com.movielife.entity.Hall;
+import com.movielife.entity.Showtime;
 import com.movielife.entity.Venue;
 import com.movielife.enums.VenueType;
 import com.movielife.exception.BusinessException;
@@ -16,6 +18,7 @@ import com.movielife.mapper.ShowtimeMapper;
 import com.movielife.service.impl.VenueServiceImpl;
 import com.movielife.vo.VenueDetailVO;
 import com.movielife.vo.VenueNearbyVO;
+import com.movielife.vo.ShowtimeVO;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -35,6 +38,8 @@ import org.springframework.data.redis.connection.RedisGeoCommands;
 
 import java.math.BigDecimal;
 import java.time.Duration;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -328,6 +333,27 @@ class VenueServiceImplTest {
                 .isEqualTo(ErrorCode.INVALID_BIZ_TYPE);
     }
 
+    @Test
+    void venueShowtimeQueryShouldBatchLoadHalls() {
+        LocalDate date = LocalDate.now().plusDays(1);
+        Showtime first = showtime(1L, 11L, date.atTime(10, 0));
+        Showtime second = showtime(2L, 12L, date.atTime(13, 0));
+        Hall firstHall = hall(11L, "1号厅");
+        Hall secondHall = hall(12L, "2号厅");
+        when(venueMapper.selectById(1L)).thenReturn(enabledVenue());
+        when(movieMapper.selectById(1L)).thenReturn(new Movie());
+        when(showtimeMapper.selectList(any())).thenReturn(Arrays.asList(first, second));
+        when(hallMapper.selectBatchIds(any())).thenReturn(Arrays.asList(secondHall, firstHall));
+
+        List<ShowtimeVO> result = venueService.queryVenueShowtimes(1L, 1L, date);
+
+        assertThat(result).extracting(ShowtimeVO::getHallName)
+                .containsExactly("1号厅", "2号厅");
+        assertThat(result).extracting(ShowtimeVO::getBasePrice)
+                .containsOnly(new BigDecimal("45.00"));
+        verify(hallMapper).selectBatchIds(any());
+    }
+
     private void assertVenueNotFound(Long id) {
         assertThatThrownBy(() -> venueService.queryVenueDetail(id))
                 .isInstanceOf(BusinessException.class)
@@ -386,5 +412,22 @@ class VenueServiceImplTest {
     private final GeoResults<RedisGeoCommands.GeoLocation<String>> geoResults(
             GeoResult<RedisGeoCommands.GeoLocation<String>>... results) {
         return new GeoResults<>(Arrays.asList(results));
+    }
+
+    private Showtime showtime(Long id, Long hallId, LocalDateTime startTime) {
+        Showtime showtime = new Showtime();
+        showtime.setId(id);
+        showtime.setHallId(hallId);
+        showtime.setStartTime(startTime);
+        showtime.setEndTime(startTime.plusHours(2));
+        showtime.setBasePrice(new BigDecimal("45.00"));
+        return showtime;
+    }
+
+    private Hall hall(Long id, String name) {
+        Hall hall = new Hall();
+        hall.setId(id);
+        hall.setName(name);
+        return hall;
     }
 }

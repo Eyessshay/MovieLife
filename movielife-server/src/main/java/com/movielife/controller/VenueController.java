@@ -9,13 +9,17 @@ import com.movielife.vo.PageVO;
 import com.movielife.vo.VenueDetailVO;
 import com.movielife.vo.VenueListItemVO;
 import com.movielife.vo.VenueNearbyVO;
+import com.movielife.vo.ShowtimeVO;
 import lombok.RequiredArgsConstructor;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import javax.validation.Valid;
+import java.time.LocalDate;
 import java.util.List;
 
 @RestController
@@ -43,5 +47,13 @@ public class VenueController {
     @GetMapping("/{id}/halls")
     public Result<List<HallVO>> halls(@PathVariable Long id) {
         return Result.ok(venueService.queryVenueHalls(id));
+    }
+
+    @GetMapping("/{venueId}/showtimes")
+    public Result<List<ShowtimeVO>> showtimes(
+            @PathVariable Long venueId,
+            @RequestParam Long movieId,
+            @RequestParam @DateTimeFormat(pattern = "yyyy-MM-dd") LocalDate date) {
+        return Result.ok(venueService.queryVenueShowtimes(venueId, movieId, date));
     }
 }

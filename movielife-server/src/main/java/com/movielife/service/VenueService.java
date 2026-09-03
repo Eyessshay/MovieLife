@@ -7,7 +7,9 @@ import com.movielife.vo.PageVO;
 import com.movielife.vo.VenueDetailVO;
 import com.movielife.vo.VenueListItemVO;
 import com.movielife.vo.VenueNearbyVO;
+import com.movielife.vo.ShowtimeVO;
 
+import java.time.LocalDate;
 import java.util.List;
 
 public interface VenueService {
@@ -19,4 +21,6 @@ public interface VenueService {
     List<HallVO> queryVenueHalls(Long venueId);
 
     List<VenueNearbyVO> queryNearbyVenues(VenueNearbyQueryDTO queryDTO);
+
+    List<ShowtimeVO> queryVenueShowtimes(Long venueId, Long movieId, LocalDate date);
 }

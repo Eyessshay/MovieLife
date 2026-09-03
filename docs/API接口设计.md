@@ -169,6 +169,9 @@ GET /api/venues/nearby                  # 附近场馆
     &y=纬度
     &distance=距离米数
 GET /api/venues/{id}/halls               # 场馆影厅/场厅列表
+GET /api/venues/{venueId}/showtimes       # 场馆下指定电影的可售场次
+    ?movieId=1
+    &date=2026-09-03
 GET /api/venues/{id}/reviews             # 场馆评价
 ```
 
@@ -177,6 +180,10 @@ GET /api/venues/{id}/reviews             # 场馆评价
 普通模式只传场馆和坐标条件：服务端查询 `venue:geo:{city}:{TYPE}`，按距离升序召回 `venueId + distance`，再从 MySQL 批量补齐启用的场馆信息，并按 GEO 顺序返回。GEO Key 不存在时返回空列表；Redis GEO 查询异常时返回 `INTERNAL_ERROR`，当前不使用 MySQL 经纬度计算降级。
 
 电影过滤模式额外传入 `bizType=MOVIE&bizId={movieId}`。`bizType` 和 `bizId` 必须同时存在或同时为空，当前仅支持 `MOVIE`，其他类型返回 `INVALID_BIZ_TYPE`；电影不存在返回 `MOVIE_NOT_FOUND`。服务端先进行 GEO 候选召回，再通过 `tb_showtime` 的 `biz_type=MOVIE`、`biz_id`、`start_time > NOW()`、`status=1` 条件筛选存在未来可售场次的场馆，过滤后分页，最终保持 GEO 距离顺序。同一场馆即使存在多个有效场次也只返回一次。
+
+`GET /api/venues/{venueId}/showtimes` 是公开接口，当前只查询电影场次。`movieId` 和 `date` 均为必填参数，日期格式固定为 `yyyy-MM-dd`。场馆不存在或已停用返回 `VENUE_NOT_FOUND`，电影不存在返回 `MOVIE_NOT_FOUND`，ID 或日期参数不合法返回相应的 400 错误；当天没有可售场次时正常返回空列表。
+
+有效场次必须同时满足 `venue_id`、`biz_type=MOVIE`、`biz_id=movieId`、`status=1`、`start_time >= dateStart`、`start_time < nextDateStart` 和 `start_time > NOW()`，并按 `start_time ASC` 返回。响应项包含 `id`、`hallId`、`hallName`、`startTime`、`endTime`、`basePrice`；其中 `basePrice` 是场次基础价，座位差异价留待座位查询阶段处理。影厅信息通过一次批量查询补齐，本阶段不缓存场次组合列表。
 
 ### 3.8 场次、座位与锁座
 

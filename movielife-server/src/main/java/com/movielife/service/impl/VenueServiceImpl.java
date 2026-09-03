@@ -10,6 +10,8 @@ import com.movielife.dto.VenueDetailCacheDTO;
 import com.movielife.dto.VenueNearbyQueryDTO;
 import com.movielife.dto.VenueQueryDTO;
 import com.movielife.entity.Hall;
+import com.movielife.entity.Movie;
+import com.movielife.entity.Showtime;
 import com.movielife.entity.Venue;
 import com.movielife.enums.VenueType;
 import com.movielife.exception.BusinessException;
@@ -24,6 +26,7 @@ import com.movielife.vo.PageVO;
 import com.movielife.vo.VenueDetailVO;
 import com.movielife.vo.VenueListItemVO;
 import com.movielife.vo.VenueNearbyVO;
+import com.movielife.vo.ShowtimeVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -37,6 +40,8 @@ import org.springframework.data.geo.Point;
 import org.springframework.data.redis.connection.RedisGeoCommands;
 
 import java.time.Duration;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Collections;
@@ -108,6 +113,52 @@ public class VenueServiceImpl implements VenueService {
                                 .orderByAsc(Hall::getId)
                 ).stream()
                 .map(this::toHallVO)
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public List<ShowtimeVO> queryVenueShowtimes(Long venueId, Long movieId, LocalDate date) {
+        if (venueId == null || venueId <= 0 || movieId == null || movieId <= 0) {
+            throw new BusinessException(ErrorCode.INVALID_ID);
+        }
+        if (date == null) {
+            throw new BusinessException(ErrorCode.INVALID_PARAM);
+        }
+
+        Venue venue = venueMapper.selectById(venueId);
+        if (venue == null || !Integer.valueOf(ENABLED_STATUS).equals(venue.getStatus())) {
+            throw new BusinessException(ErrorCode.VENUE_NOT_FOUND);
+        }
+        Movie movie = movieMapper.selectById(movieId);
+        if (movie == null) {
+            throw new BusinessException(ErrorCode.MOVIE_NOT_FOUND);
+        }
+
+        LocalDateTime dateStart = date.atStartOfDay();
+        LocalDateTime dateEnd = date.plusDays(1).atStartOfDay();
+        LocalDateTime now = LocalDateTime.now();
+        List<Showtime> showtimes = showtimeMapper.selectList(
+                new LambdaQueryWrapper<Showtime>()
+                        .eq(Showtime::getVenueId, venueId)
+                        .eq(Showtime::getBizType, MOVIE_BIZ_TYPE)
+                        .eq(Showtime::getBizId, movieId)
+                        .eq(Showtime::getStatus, ENABLED_STATUS)
+                        .ge(Showtime::getStartTime, dateStart)
+                        .lt(Showtime::getStartTime, dateEnd)
+                        .gt(Showtime::getStartTime, now)
+                        .orderByAsc(Showtime::getStartTime)
+        );
+        if (showtimes.isEmpty()) {
+            return Collections.emptyList();
+        }
+
+        Set<Long> hallIds = showtimes.stream()
+                .map(Showtime::getHallId)
+                .collect(Collectors.toSet());
+        Map<Long, Hall> hallMap = hallMapper.selectBatchIds(hallIds).stream()
+                .collect(Collectors.toMap(Hall::getId, hall -> hall));
+        return showtimes.stream()
+                .map(showtime -> toShowtimeVO(showtime, hallMap.get(showtime.getHallId())))
                 .collect(Collectors.toList());
     }
 
@@ -386,6 +437,17 @@ public class VenueServiceImpl implements VenueService {
         vo.setAvgScore(venue.getAvgScore());
         vo.setOpenTime(venue.getOpenTime());
         vo.setDistance(distance);
+        return vo;
+    }
+
+    private ShowtimeVO toShowtimeVO(Showtime showtime, Hall hall) {
+        ShowtimeVO vo = new ShowtimeVO();
+        vo.setId(showtime.getId());
+        vo.setHallId(showtime.getHallId());
+        vo.setHallName(hall == null ? null : hall.getName());
+        vo.setStartTime(showtime.getStartTime());
+        vo.setEndTime(showtime.getEndTime());
+        vo.setBasePrice(showtime.getBasePrice());
         return vo;
     }
 }

@@ -5,6 +5,7 @@ import com.movielife.vo.VenueDetailVO;
 import com.movielife.vo.HallVO;
 import com.movielife.vo.PageVO;
 import com.movielife.vo.VenueNearbyVO;
+import com.movielife.vo.ShowtimeVO;
 import com.movielife.enums.VenueType;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
@@ -17,6 +18,9 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import java.util.Collections;
 import java.util.Arrays;
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
@@ -212,6 +216,49 @@ class VenueControllerTest {
         mockMvc.perform(get("/api/venues/999999/halls"))
                 .andExpect(status().isNotFound())
                 .andExpect(jsonPath("$.code").value("VENUE_NOT_FOUND"));
+    }
+
+    @Test
+    void shouldAllowPublicVenueShowtimeQuery() throws Exception {
+        ShowtimeVO showtime = new ShowtimeVO();
+        showtime.setId(10L);
+        showtime.setHallId(2L);
+        showtime.setHallName("2号厅");
+        showtime.setStartTime(LocalDateTime.of(2026, 9, 3, 14, 30));
+        showtime.setEndTime(LocalDateTime.of(2026, 9, 3, 16, 30));
+        showtime.setBasePrice(new BigDecimal("45.00"));
+        when(venueService.queryVenueShowtimes(1L, 1L, LocalDate.of(2026, 9, 3)))
+                .thenReturn(Collections.singletonList(showtime));
+
+        mockMvc.perform(get("/api/venues/1/showtimes")
+                        .param("movieId", "1")
+                        .param("date", "2026-09-03"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].id").value(10))
+                .andExpect(jsonPath("$.data[0].hallName").value("2号厅"))
+                .andExpect(jsonPath("$.data[0].basePrice").value(45.00));
+    }
+
+    @Test
+    void venueShowtimeQueryShouldRejectInvalidDateFormat() throws Exception {
+        mockMvc.perform(get("/api/venues/1/showtimes")
+                        .param("movieId", "1")
+                        .param("date", "2026/09/03"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PARAM"));
+    }
+
+    @Test
+    void venueShowtimeQueryShouldRequireMovieIdAndDate() throws Exception {
+        mockMvc.perform(get("/api/venues/1/showtimes")
+                        .param("date", "2026-09-03"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PARAM"));
+
+        mockMvc.perform(get("/api/venues/1/showtimes")
+                        .param("movieId", "1"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PARAM"));
     }
 
     private HallVO hall(Long id, Long venueId, String name) {
