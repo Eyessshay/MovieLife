@@ -70,7 +70,7 @@ class TicketOrderCreationValidatorTest {
         assertError(ErrorCode.INVALID_PARAM,
                 () -> validator.validate(USER_ID, request(101L, 101L)));
 
-        verify(ticketOrderMapper, never()).selectOne(any());
+        verify(ticketOrderMapper, never()).selectByLockToken(any());
         verify(stringRedisTemplate, never()).opsForValue();
     }
 
@@ -78,7 +78,7 @@ class TicketOrderCreationValidatorTest {
     void consumedTokenWithSameRequestShouldReturnExistingOrderWithoutRedis() {
         TicketOrder order = existingOrder(USER_ID, SHOWTIME_ID);
         order.setStatus("REFUNDED");
-        when(ticketOrderMapper.selectOne(any())).thenReturn(order);
+        when(ticketOrderMapper.selectByLockToken(any())).thenReturn(order);
         when(ticketOrderItemMapper.selectList(any())).thenReturn(Arrays.asList(item(102L), item(101L)));
 
         TicketOrderCreationContext context = validator.validate(USER_ID, request(102L, 101L));
@@ -92,7 +92,7 @@ class TicketOrderCreationValidatorTest {
 
     @Test
     void consumedTokenOwnedByAnotherUserShouldFailWithoutItemsOrRedis() {
-        when(ticketOrderMapper.selectOne(any())).thenReturn(existingOrder(2L, SHOWTIME_ID));
+        when(ticketOrderMapper.selectByLockToken(any())).thenReturn(existingOrder(2L, SHOWTIME_ID));
 
         assertError(ErrorCode.ORDER_NOT_OWNED,
                 () -> validator.validate(USER_ID, request(101L, 102L)));
@@ -103,7 +103,7 @@ class TicketOrderCreationValidatorTest {
 
     @Test
     void consumedTokenWithDifferentShowtimeShouldFailWithoutRedis() {
-        when(ticketOrderMapper.selectOne(any())).thenReturn(existingOrder(USER_ID, 2002L));
+        when(ticketOrderMapper.selectByLockToken(any())).thenReturn(existingOrder(USER_ID, 2002L));
 
         assertError(ErrorCode.ORDER_REQUEST_MISMATCH,
                 () -> validator.validate(USER_ID, request(101L, 102L)));
@@ -114,7 +114,7 @@ class TicketOrderCreationValidatorTest {
 
     @Test
     void consumedTokenWithDifferentSeatsShouldFailWithoutRedis() {
-        when(ticketOrderMapper.selectOne(any())).thenReturn(existingOrder(USER_ID, SHOWTIME_ID));
+        when(ticketOrderMapper.selectByLockToken(any())).thenReturn(existingOrder(USER_ID, SHOWTIME_ID));
         when(ticketOrderItemMapper.selectList(any())).thenReturn(Collections.singletonList(item(101L)));
 
         assertError(ErrorCode.ORDER_REQUEST_MISMATCH,

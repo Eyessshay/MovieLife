@@ -51,10 +51,7 @@ public class TicketOrderCreationValidator {
     }
 
     private TicketOrder findExistingOrder(String lockToken) {
-        return ticketOrderMapper.selectOne(
-                new LambdaQueryWrapper<TicketOrder>()
-                        .eq(TicketOrder::getLockToken, lockToken)
-        );
+        return ticketOrderMapper.selectByLockToken(lockToken);
     }
 
     private void validateExistingOrder(TicketOrder order, ValidatedRequest request) {

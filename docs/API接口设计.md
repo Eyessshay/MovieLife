@@ -282,6 +282,8 @@ Redis 5 分钟 `lockExpireTime` 只决定能否首次创建订单。订单成功
 
 若并发创建命中 `uk_order_lock_token`，当前失败事务必须先回滚，再在事务外或新事务中按 `lockToken` 查询既有订单，校验 `userId`、`showtimeId` 和规范化 `seatIds` 后返回原订单；不得在已经被标记为 rollback-only 的事务中继续查询并返回。
 
+当前实现进度截至阶段 8 Step 8.4：上述 MySQL 创建事务和唯一 token 冲突后的事务外幂等恢复已经在 Service 层实现；订单 ID 沿用数据库自增策略。数据库提交后的 Redis 条件清理尚未实现，因此业务代码不会删除或刷新锁 Key；`POST /api/orders` Controller 也尚未正式开放，需待 Step 8.5 完成完整编排后再对外提供。
+
 已消费 token 对应订单的 `userId` 不属于当前用户时返回 `403 ORDER_NOT_OWNED`；`showtimeId` 或座位集合与原订单不一致时返回 `409 ORDER_REQUEST_MISMATCH`。未消费 token 的 Redis Metadata 不存在、过期、场次或座位集合不匹配，以及任一 seatKey 缺失或不再等于当前 token 时，统一返回 `400 INVALID_LOCK_TOKEN`；Metadata 用户不一致继续复用 `403 LOCK_NOT_OWNED`。
 
 支付回调和退款回调预留内部接口：

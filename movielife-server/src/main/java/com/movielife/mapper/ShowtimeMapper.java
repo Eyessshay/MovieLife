@@ -5,6 +5,7 @@ import com.movielife.entity.Showtime;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
 
 import java.util.List;
 
@@ -26,4 +27,11 @@ public interface ShowtimeMapper extends BaseMapper<Showtime> {
             @Param("movieId") Long movieId,
             @Param("venueIds") List<Long> venueIds
     );
+
+    @Update("UPDATE tb_showtime " +
+            "SET available_seats = available_seats - #{seatCount} " +
+            "WHERE id = #{showtimeId} " +
+            "AND available_seats >= #{seatCount}")
+    int decreaseAvailableSeats(@Param("showtimeId") Long showtimeId,
+                               @Param("seatCount") Integer seatCount);
 }

@@ -1529,6 +1529,22 @@ Step 8.2 已完成真实数据库验证：本地 `tb_ticket_order` 已同步 Ste
 
 Step 8.3 已完成 22 项新增自动化测试和真实 MySQL、Redis 联调。未消费 token 场景验证了 Metadata 与全部 seatKey 后仍保留原 Key、未刷新 TTL，且订单表、ShowtimeSeat 和 `available_seats` 均未变化；已消费 token 场景在 Redis Key 不存在且订单状态为 `PAID` 时仍以 MySQL 订单事实完成幂等命中。全量自动化测试共 211 项，0 failure、0 error，Maven `clean package` 构建成功。本 Step 至此冻结，不开放 `POST /api/orders`。
 
+### 5.4 Step 8.4：创建订单数据库事务
+
+本 Step 在 `TicketOrderServiceImpl` 中完成创建编排，并将数据库写入隔离到独立 Spring Bean `TicketOrderTransactionService`，避免同类方法调用导致 `@Transactional` 失效。外层先复用 Step 8.3 校验器：已消费 token 直接返回原订单；未消费 token 才进入数据库事务。
+
+事务内实际顺序冻结为：复用阶段 6 规则确认 Showtime 有效；一次批量查询目标 `ShowtimeSeat` 并读取各座位价格；计算 `orderExpireTime = min(now + 15 分钟, Showtime.startTime)`；插入 `UNPAID` 的 `TicketOrder`；一次批量插入全部 `TicketOrderItem`；一次条件 UPDATE 将全部座位更新为 `HELD_BY_UNPAID_ORDER` 并绑定 `lock_order_id`、递增 `version`；最后条件扣减 `Showtime.available_seats`。每个写入步骤均严格检查影响行数，任何不一致都会抛出异常并回滚整个事务。
+
+金额完全来自 `ShowtimeSeat.price`：每条订单明细保存对应座位的价格快照，订单总金额为全部明细价格之和，不使用客户端金额，也不以 `Showtime.base_price × 座位数` 代替。当前项目没有独立 `RedisIdWorker`，因此订单 ID 继续沿用 Step 8.2 已冻结的 MySQL 自增主键策略，没有引入第二套 ID 生成器。
+
+`ShowtimeSeat` 最终占座 SQL 同时要求 `showtime_id`、完整 `seat_id IN (...)`、`status=AVAILABLE` 和 `lock_order_id IS NULL`，实际影响行数必须等于请求座位数；`available_seats` 使用 `available_seats >= seatCount` 条件原子扣减且影响行数必须为 1。Java 查询仅用于给出清晰错误，数据库条件更新及事务回滚才是最终并发兜底。
+
+并发线程同时通过“token 尚未消费”校验时，`uk_order_lock_token` 仍是最终一次性消费约束。唯一键冲突会先结束并回滚失败事务，再由事务外层重新执行已消费订单一致性校验；请求用户、场次和座位完全一致时返回赢家订单，否则继续拒绝或抛出原异常，不在失败事务内继续查询。
+
+本 Step 的订单业务代码不执行任何 Redis 写操作。数据库提交后，token Metadata 和全部 seatKey 仍保持原值及原 TTL；条件清理留给 Step 8.5。`POST /api/orders` Controller 同样尚未开放，支付、取消、超时、出票、退款和 Redis Stream 均不属于本 Step。
+
+Step 8.4 新增 14 项自动化测试。真实 MySQL/Redis 联调覆盖两种座位价格形成订单与明细快照、批量占座及余票扣减、近场次支付截止时间、提交后 Redis Key 及 TTL 不变；还覆盖 `available_seats` 条件更新失败时订单、明细和座位更新整体回滚，并在修复计数后使用同一仍有效 token 重试成功。全量自动化测试共 225 项，0 failure、0 error，Maven `clean package` 构建成功；测试订单、明细及联调基础数据均已删除，Redis `seat:lock:*` 无残留。本 Step 至此冻结。
+
 ## 6. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
