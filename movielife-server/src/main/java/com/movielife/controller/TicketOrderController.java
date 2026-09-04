@@ -48,4 +48,11 @@ public class TicketOrderController {
     public Result<TicketOrderDetailVO> queryOrderDetail(@PathVariable Long id) {
         return Result.ok(ticketOrderService.queryOrderDetail(UserHolder.getUserId(), id));
     }
+
+    @PostMapping("/{id}/cancel")
+    @LoginRequired
+    public Result<Void> cancelOrder(@PathVariable Long id) {
+        ticketOrderService.cancelOrder(UserHolder.getUserId(), id);
+        return Result.ok();
+    }
 }

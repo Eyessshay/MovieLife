@@ -14,4 +14,6 @@ public interface TicketOrderService {
             Long userId, Integer page, Integer pageSize);
 
     TicketOrderDetailVO queryOrderDetail(Long userId, Long orderId);
+
+    void cancelOrder(Long userId, Long orderId);
 }

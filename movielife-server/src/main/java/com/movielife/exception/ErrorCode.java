@@ -37,6 +37,7 @@ public enum ErrorCode {
     ORDER_NOT_FOUND("ORDER_NOT_FOUND", "订单不存在", HttpStatus.NOT_FOUND),
     ORDER_NOT_OWNED("ORDER_NOT_OWNED", "无权操作该订单", HttpStatus.FORBIDDEN),
     ORDER_REQUEST_MISMATCH("ORDER_REQUEST_MISMATCH", "订单请求与已消费锁座凭证不一致", HttpStatus.CONFLICT),
+    ORDER_STATUS_CONFLICT("ORDER_STATUS_CONFLICT", "当前订单状态不允许该操作", HttpStatus.CONFLICT),
     INVALID_TARGET_TYPE("INVALID_TARGET_TYPE", "目标类型不合法", HttpStatus.BAD_REQUEST),
     CONTENT_REQUIRED("CONTENT_REQUIRED", "评价内容不能为空且不能超过2000字", HttpStatus.BAD_REQUEST),
     REVIEW_NOT_FOUND("REVIEW_NOT_FOUND", "评价不存在", HttpStatus.NOT_FOUND),

@@ -28,6 +28,7 @@ public class TicketOrderServiceImpl implements TicketOrderService {
     private final TicketOrderTransactionService transactionService;
     private final SeatLockService seatLockService;
     private final TicketOrderQueryService queryService;
+    private final TicketOrderCancellationService cancellationService;
 
     @Override
     public CreateTicketOrderVO createOrder(Long userId, CreateTicketOrderDTO dto) {
@@ -62,6 +63,11 @@ public class TicketOrderServiceImpl implements TicketOrderService {
     @Override
     public TicketOrderDetailVO queryOrderDetail(Long userId, Long orderId) {
         return queryService.queryOrderDetail(userId, orderId);
+    }
+
+    @Override
+    public void cancelOrder(Long userId, Long orderId) {
+        cancellationService.cancelOrder(userId, orderId);
     }
 
     private void cleanupRedisBestEffort(Long orderId, TicketOrderCreationContext context) {

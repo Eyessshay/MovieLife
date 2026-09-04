@@ -42,6 +42,10 @@ import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
@@ -210,6 +214,164 @@ class TicketOrderTransactionIntegrationTest {
         assertThat(redisTemplate.opsForValue().get(locked.metadataKey)).isNull();
         assertThat(redisTemplate.opsForValue().get(locked.seatKeys.get(0))).isNull();
         assertThat(redisTemplate.opsForValue().get(reownedSeatKey)).isEqualTo("another-token");
+    }
+
+    @Test
+    void unpaidOrderCancellationShouldReleaseSeatsRestoreCounterAndBeIdempotent() {
+        context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
+        LockedRequest locked = lockAndBuildRequest(context);
+        CreateTicketOrderVO created = ticketOrderService.createOrder(1L, locked.request);
+        TicketOrder expired = new TicketOrder();
+        expired.setId(created.getOrderId());
+        expired.setExpireTime(LocalDateTime.now().minusMinutes(1));
+        assertThat(ticketOrderMapper.updateById(expired)).isEqualTo(1);
+        List<TicketOrderItem> itemsBefore = ticketOrderItemMapper.selectList(
+                new LambdaQueryWrapper<TicketOrderItem>()
+                        .eq(TicketOrderItem::getOrderId, created.getOrderId())
+                        .orderByAsc(TicketOrderItem::getId));
+
+        ticketOrderService.cancelOrder(1L, created.getOrderId());
+
+        assertThat(ticketOrderMapper.selectById(created.getOrderId()).getStatus())
+                .isEqualTo("CANCELED");
+        assertThat(queryStates()).allSatisfy(state -> {
+            assertThat(state.getStatus()).isZero();
+            assertThat(state.getLockOrderId()).isNull();
+            assertThat(state.getVersion()).isEqualTo(2);
+        });
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats())
+                .isEqualTo(2);
+        assertThat(ticketOrderItemMapper.selectList(new LambdaQueryWrapper<TicketOrderItem>()
+                .eq(TicketOrderItem::getOrderId, created.getOrderId())
+                .orderByAsc(TicketOrderItem::getId))).isEqualTo(itemsBefore);
+
+        ticketOrderService.cancelOrder(1L, created.getOrderId());
+
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats())
+                .isEqualTo(2);
+        assertThat(queryStates()).allSatisfy(state -> assertThat(state.getVersion()).isEqualTo(2));
+    }
+
+    @Test
+    void paidOrderCancellationShouldConflictWithoutChangingSeatsOrCounter() {
+        context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
+        CreateTicketOrderVO created = ticketOrderService.createOrder(
+                1L, lockAndBuildRequest(context).request);
+        TicketOrder paid = new TicketOrder();
+        paid.setId(created.getOrderId());
+        paid.setStatus("PAID");
+        assertThat(ticketOrderMapper.updateById(paid)).isEqualTo(1);
+        List<ShowtimeSeat> statesBefore = queryStates();
+
+        assertThatThrownBy(() -> ticketOrderService.cancelOrder(1L, created.getOrderId()))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        exception -> assertThat(exception.getErrorCode())
+                                .isEqualTo(ErrorCode.ORDER_STATUS_CONFLICT));
+
+        assertThat(ticketOrderMapper.selectById(created.getOrderId()).getStatus()).isEqualTo("PAID");
+        assertThat(queryStates()).isEqualTo(statesBefore);
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats()).isZero();
+    }
+
+    @Test
+    void partialSeatStateAndWrongLockOwnerShouldRollbackEveryRelease() {
+        context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
+        CreateTicketOrderVO created = ticketOrderService.createOrder(
+                1L, lockAndBuildRequest(context).request);
+        ShowtimeSeat inconsistent = queryStates().get(1);
+        inconsistent.setStatus(0);
+        inconsistent.setLockOrderId(null);
+        assertThat(showtimeSeatMapper.updateById(inconsistent)).isEqualTo(1);
+
+        assertThatThrownBy(() -> ticketOrderService.cancelOrder(1L, created.getOrderId()))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        exception -> assertThat(exception.getErrorCode())
+                                .isEqualTo(ErrorCode.INTERNAL_ERROR));
+        assertThat(ticketOrderMapper.selectById(created.getOrderId()).getStatus())
+                .isEqualTo("UNPAID");
+        assertThat(queryStates().get(0).getLockOrderId()).isEqualTo(created.getOrderId());
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats()).isZero();
+
+        inconsistent = queryStates().get(1);
+        inconsistent.setStatus(1);
+        inconsistent.setLockOrderId(created.getOrderId() + 1000);
+        assertThat(showtimeSeatMapper.updateById(inconsistent)).isEqualTo(1);
+        assertThatThrownBy(() -> ticketOrderService.cancelOrder(1L, created.getOrderId()))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        exception -> assertThat(exception.getErrorCode())
+                                .isEqualTo(ErrorCode.INTERNAL_ERROR));
+        assertThat(queryStates().get(0).getLockOrderId()).isEqualTo(created.getOrderId());
+        assertThat(queryStates().get(1).getLockOrderId()).isEqualTo(created.getOrderId() + 1000);
+        assertThat(ticketOrderMapper.selectById(created.getOrderId()).getStatus())
+                .isEqualTo("UNPAID");
+    }
+
+    @Test
+    void availableSeatCounterOverflowShouldRollbackReleasedSeats() {
+        context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
+        CreateTicketOrderVO created = ticketOrderService.createOrder(
+                1L, lockAndBuildRequest(context).request);
+        Showtime inconsistent = new Showtime();
+        inconsistent.setId(context.showtime.getId());
+        inconsistent.setAvailableSeats(2);
+        assertThat(showtimeMapper.updateById(inconsistent)).isEqualTo(1);
+
+        assertThatThrownBy(() -> ticketOrderService.cancelOrder(1L, created.getOrderId()))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        exception -> assertThat(exception.getErrorCode())
+                                .isEqualTo(ErrorCode.INTERNAL_ERROR));
+
+        assertThat(ticketOrderMapper.selectById(created.getOrderId()).getStatus())
+                .isEqualTo("UNPAID");
+        assertThat(queryStates()).allSatisfy(state -> {
+            assertThat(state.getStatus()).isEqualTo(1);
+            assertThat(state.getLockOrderId()).isEqualTo(created.getOrderId());
+        });
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats())
+                .isEqualTo(2);
+    }
+
+    @Test
+    void concurrentDuplicateCancellationShouldRestoreAvailabilityOnlyOnce() throws Exception {
+        context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
+        CreateTicketOrderVO created = ticketOrderService.createOrder(
+                1L, lockAndBuildRequest(context).request);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<?> first = executor.submit(() -> {
+                await(start);
+                ticketOrderService.cancelOrder(1L, created.getOrderId());
+            });
+            Future<?> second = executor.submit(() -> {
+                await(start);
+                ticketOrderService.cancelOrder(1L, created.getOrderId());
+            });
+            start.countDown();
+            first.get(10, TimeUnit.SECONDS);
+            second.get(10, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdownNow();
+        }
+
+        assertThat(ticketOrderMapper.selectById(created.getOrderId()).getStatus())
+                .isEqualTo("CANCELED");
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats())
+                .isEqualTo(2);
+        assertThat(queryStates()).allSatisfy(state -> {
+            assertThat(state.getStatus()).isZero();
+            assertThat(state.getLockOrderId()).isNull();
+            assertThat(state.getVersion()).isEqualTo(2);
+        });
+    }
+
+    private void await(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException exception) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException(exception);
+        }
     }
 
     private TestContext insertShowtimeWithSeats(int availableSeats, LocalDateTime startTime) {

@@ -251,7 +251,7 @@ class TicketOrderHttpIntegrationTest {
                 .isEqualTo(availableBefore - 2);
 
         Long olderOrderId = insertHistoricalOrder(owner.userId, "CANCELED", -1);
-        insertHistoricalOrder(anotherUser.userId, "PAID", -2);
+        Long paidOrderId = insertHistoricalOrder(anotherUser.userId, "PAID", -2);
         TicketOrder orderBeforeQueries = ticketOrderMapper.selectById(orderId);
         List<TicketOrderItem> itemsBeforeQueries = ticketOrderItemMapper.selectList(
                 new LambdaQueryWrapper<TicketOrderItem>()
@@ -321,6 +321,62 @@ class TicketOrderHttpIntegrationTest {
         assertThat(showtimeMapper.selectById(showtimeId)).isEqualTo(showtimeBeforeQueries);
         assertThat(redisTemplate.opsForValue().get(RedisConstants.LOGIN_TOKEN_KEY + owner.token))
                 .isEqualTo(loginValueBeforeQueries);
+        assertThat(redisTemplate.opsForValue().get(tokenKey(lockToken))).isNull();
+        for (Long seatId : selectedSeatIds) {
+            assertThat(redisTemplate.opsForValue().get(seatKey(seatId))).isNull();
+        }
+
+        ResponseEntity<String> foreignCancel = post(
+                "/api/orders/" + orderId + "/cancel", null, anotherUser.token);
+        assertThat(foreignCancel.getStatusCodeValue()).isEqualTo(404);
+        assertThat(json(foreignCancel).path("code").asText()).isEqualTo("ORDER_NOT_FOUND");
+        ResponseEntity<String> paidCancel = post(
+                "/api/orders/" + paidOrderId + "/cancel", null, anotherUser.token);
+        assertThat(paidCancel.getStatusCodeValue()).isEqualTo(409);
+        assertThat(json(paidCancel).path("code").asText()).isEqualTo("ORDER_STATUS_CONFLICT");
+
+        ResponseEntity<String> cancelResponse = post(
+                "/api/orders/" + orderId + "/cancel", null, owner.token);
+        assertThat(cancelResponse.getStatusCodeValue()).isEqualTo(200);
+        assertThat(json(cancelResponse).path("code").asText()).isEqualTo("OK");
+        assertThat(ticketOrderMapper.selectById(orderId).getStatus()).isEqualTo("CANCELED");
+        assertThat(ticketOrderItemMapper.selectCount(new LambdaQueryWrapper<TicketOrderItem>()
+                .eq(TicketOrderItem::getOrderId, orderId))).isEqualTo(2);
+        assertThat(showtimeMapper.selectById(showtimeId).getAvailableSeats())
+                .isEqualTo(availableBefore);
+        assertThat(showtimeSeatMapper.selectList(new LambdaQueryWrapper<ShowtimeSeat>()
+                .eq(ShowtimeSeat::getShowtimeId, showtimeId)
+                .in(ShowtimeSeat::getSeatId, selectedSeatIds))).allSatisfy(state -> {
+                    assertThat(state.getStatus()).isZero();
+                    assertThat(state.getLockOrderId()).isNull();
+                });
+
+        ResponseEntity<String> canceledDetail = get("/api/orders/" + orderId, owner.token);
+        assertThat(canceledDetail.getStatusCodeValue()).isEqualTo(200);
+        assertThat(json(canceledDetail).path("data").path("status").asText())
+                .isEqualTo("CANCELED");
+        ResponseEntity<String> seatsAfterCancel = get(
+                "/api/showtimes/" + showtimeId + "/seats", owner.token);
+        assertThat(seatsAfterCancel.getStatusCodeValue()).isEqualTo(200);
+        JsonNode seatMapAfterCancel = json(seatsAfterCancel).path("data").path("seats");
+        for (Long selectedSeatId : selectedSeatIds) {
+            boolean available = false;
+            for (JsonNode seat : seatMapAfterCancel) {
+                if (seat.path("seatId").asLong() == selectedSeatId
+                        && seat.path("status").asInt() == 0) {
+                    available = true;
+                    break;
+                }
+            }
+            assertThat(available).isTrue();
+        }
+
+        ResponseEntity<String> repeatedCancel = post(
+                "/api/orders/" + orderId + "/cancel", null, owner.token);
+        assertThat(repeatedCancel.getStatusCodeValue()).isEqualTo(200);
+        assertThat(showtimeMapper.selectById(showtimeId).getAvailableSeats())
+                .isEqualTo(availableBefore);
+        assertThat(ticketOrderMapper.selectById(orderId).getStatus()).isEqualTo("CANCELED");
         assertThat(redisTemplate.opsForValue().get(tokenKey(lockToken))).isNull();
         for (Long seatId : selectedSeatIds) {
             assertThat(redisTemplate.opsForValue().get(seatKey(seatId))).isNull();

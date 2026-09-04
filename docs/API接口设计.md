@@ -296,6 +296,12 @@ Redis 5 分钟 `lockExpireTime` 只决定能否首次创建订单。订单成功
 
 订单不存在或不属于当前用户均返回 `404 ORDER_NOT_FOUND`，避免泄露其他用户订单是否存在；非法订单 ID 返回 `400 INVALID_ID`。订单存在但 Showtime、Movie、Venue、Hall、明细或 Seat 关联数据缺失时返回不暴露细节的 `500 INTERNAL_ERROR`。两个查询接口只读取 MySQL，不读取订单 Redis Key，不修改订单状态，也不会根据 `expireTime` 临时修正 `UNPAID` 状态。
 
+`POST /api/orders/{id}/cancel` 已在阶段 8 Step 8.8 正式开放，仅允许当前登录用户主动取消自己的 `UNPAID` 订单。订单不存在或不属于当前用户统一返回 `404 ORDER_NOT_FOUND`；`PAID`、`REFUNDED` 等非 `UNPAID/CANCELED` 状态返回 `409 ORDER_STATUS_CONFLICT`；已经为 `CANCELED` 时按幂等成功返回 HTTP 200，不重复释放座位或增加余票。
+
+取消在独立 MySQL 事务中完成：先以 `SELECT ... FOR UPDATE` 锁定订单行并确认归属与状态，一次查询全部订单明细；随后按 `showtime_id + seatIds + status=HELD_BY_UNPAID_ORDER + lock_order_id=当前订单` 一次批量释放全部座位，恢复 `available_seats`，最后以 `id + user_id + status=UNPAID` 条件更新订单为 `CANCELED`。座位释放数必须等于明细数，余票和订单更新影响行数必须为 1，任一步异常都会整体回滚。余票恢复同时限制不能超过 `total_seats`。
+
+订单行锁与订单状态条件更新共同保证并发重复取消只会执行一次释放；第二个请求在首个事务提交后看到 `CANCELED` 并幂等返回。这也为未来支付事务与取消竞争保留了互斥边界。主动取消只依据数据库真实状态，不因 `expireTime` 已过而拒绝仍为 `UNPAID` 的订单，也不实现自动超时状态修正。取消不读取或写入 `seat:lock:*`，因为释放的是 MySQL 正式订单占用而不是阶段 7 临时锁。
+
 支付回调和退款回调预留内部接口：
 
 ```bash

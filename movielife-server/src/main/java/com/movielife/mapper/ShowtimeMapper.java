@@ -34,4 +34,11 @@ public interface ShowtimeMapper extends BaseMapper<Showtime> {
             "AND available_seats >= #{seatCount}")
     int decreaseAvailableSeats(@Param("showtimeId") Long showtimeId,
                                @Param("seatCount") Integer seatCount);
+
+    @Update("UPDATE tb_showtime " +
+            "SET available_seats = available_seats + #{seatCount} " +
+            "WHERE id = #{showtimeId} " +
+            "AND available_seats + #{seatCount} <= total_seats")
+    int increaseAvailableSeats(@Param("showtimeId") Long showtimeId,
+                               @Param("seatCount") Integer seatCount);
 }

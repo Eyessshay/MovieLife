@@ -40,6 +40,8 @@ class TicketOrderServiceImplTest {
     private SeatLockService seatLockService;
     @Mock
     private TicketOrderQueryService queryService;
+    @Mock
+    private TicketOrderCancellationService cancellationService;
 
     private TicketOrderServiceImpl service;
     private CreateTicketOrderDTO request;
@@ -47,7 +49,8 @@ class TicketOrderServiceImplTest {
     @BeforeEach
     void setUp() {
         service = new TicketOrderServiceImpl(
-                creationValidator, transactionService, seatLockService, queryService);
+                creationValidator, transactionService, seatLockService,
+                queryService, cancellationService);
         request = new CreateTicketOrderDTO();
         request.setLockToken("lock-token");
     }
@@ -179,6 +182,13 @@ class TicketOrderServiceImplTest {
 
         assertThat(service.queryOrderDetail(1L, 9001L)).isSameAs(detail);
         verify(queryService).queryOrderDetail(1L, 9001L);
+    }
+
+    @Test
+    void cancellationShouldDelegateToTransactionalCancellationService() {
+        service.cancelOrder(1L, 9001L);
+
+        verify(cancellationService).cancelOrder(1L, 9001L);
     }
 
     private TicketOrderCreationContext consumedContext(Long orderId) {

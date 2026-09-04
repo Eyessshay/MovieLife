@@ -1585,6 +1585,22 @@ Step 8.6 新增 10 项 HTTP 自动化测试，全量共 240 项，0 failure、0 
 
 Step 8.7 新增 16 项自动化测试，全量共 256 项，0 failure、0 error，Maven `clean package` 构建成功。Controller 测试覆盖登录、分页、空列表、非法参数、本人详情、隐藏他人订单和不存在订单；Service 测试覆盖批量关联查询次数、座位计数、详情快照与排序、分页边界和关联数据异常。真实 MySQL/Redis HTTP 联调从创建订单继续执行列表与详情查询，验证当前用户隔离、稳定倒序和 404 防泄露语义，并确认查询前后数据库及 Redis 状态不变。测试订单、明细、场次座位和 Redis 临时锁均已清理，本 Step 至此冻结。
 
+### 5.8 Step 8.8：未支付订单主动取消与座位释放
+
+正式开放 `POST /api/orders/{id}/cancel`。Controller 仅传递当前登录用户 ID 和订单 ID；订单不存在或不属于当前用户统一返回 `ORDER_NOT_FOUND`，不泄露资源存在性。`CANCELED` 重复请求直接幂等成功，只有 `UNPAID` 可以进入取消事务，`PAID`、`REFUNDED` 等状态返回 `ORDER_STATUS_CONFLICT`。主动取消不判断 `expireTime`，已过支付截止时间但数据库状态仍为 `UNPAID` 时依然允许用户取消；自动超时处理留给 Step 8.9。
+
+取消事务隔离在 `TicketOrderCancellationService`。事务先以 `SELECT ... FOR UPDATE` 锁定订单行，再一次查询全部订单明细；随后使用一个条件 UPDATE 将全部 `ShowtimeSeat` 从 `HELD_BY_UNPAID_ORDER` 更新为 `AVAILABLE`、清空 `lock_order_id` 并递增 `version`，条件严格包含当前 showtime、完整 seatId 集合、`status=1` 和 `lock_order_id=当前订单`。实际释放行数必须等于订单明细数，否则整体回滚，不能部分释放或释放其他订单的座位。
+
+座位全部释放后，同一事务原子增加 `Showtime.available_seats`，影响行数必须为 1，并额外要求恢复后不超过 `total_seats`；最后以 `id + user_id + status=UNPAID` 条件将订单更新为 `CANCELED`。任一行数不一致或 SQL 异常都会回滚此前的座位、余票和订单变化，订单明细始终保留不变。
+
+订单行锁使并发取消在事务入口串行化：首个请求完成状态转换和资源恢复，后续请求读取到 `CANCELED` 后幂等返回，因此余票只增加一次。未来支付若同样遵守订单行锁或 `status=UNPAID` 条件更新，就只能与取消有一个状态转换成功。取消链路不依赖 `SeatLockService`，不读取、不创建也不删除 Redis 临时锁。
+
+真实事务测试覆盖正常及重复取消、过期 UNPAID 主动取消、PAID 状态冲突、部分座位异常、`lock_order_id` 错误归属、余票上界异常整体回滚和双线程并发取消；真实 HTTP 链路覆盖创建、详情、取消、取消后详情和 Seat Map，并验证其他用户返回 404、PAID 返回 409、重复取消返回 200，以及取消前后 Redis 不产生临时锁。
+
+本 Step 不实现自动超时取消、支付、出票、退款或 Redis Stream。
+
+Step 8.8 新增 19 项自动化测试，全量共 275 项，0 failure、0 error，Maven `clean package` 构建成功。正常取消、重复取消、资源隔离、非法状态、全部回滚路径和双线程并发均通过；真实 HTTP 验证完成创建订单、查询详情、主动取消、取消后详情及 Seat Map 闭环。取消后订单明细保持不变，全部座位恢复可用、`lock_order_id` 清空、余票仅恢复一次，Redis 未产生任何订单取消状态。联调数据和 Redis 临时锁均已清理，本 Step 至此冻结。
+
 ## 6. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：

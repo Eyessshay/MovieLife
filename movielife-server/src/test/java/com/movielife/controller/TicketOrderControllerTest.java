@@ -282,6 +282,58 @@ class TicketOrderControllerTest {
                 .andExpect(jsonPath("$.code").value("INVALID_ID"));
     }
 
+    @Test
+    void shouldCancelCurrentUsersUnpaidOrderAndAllowIdempotentRetry() throws Exception {
+        mockMvc.perform(post("/api/orders/9001/cancel")
+                        .header("Authorization", AUTHORIZATION))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("OK"))
+                .andExpect(jsonPath("$.data").doesNotExist());
+        mockMvc.perform(post("/api/orders/9001/cancel")
+                        .header("Authorization", AUTHORIZATION))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("OK"));
+
+        verify(ticketOrderService, org.mockito.Mockito.times(2)).cancelOrder(1L, 9001L);
+    }
+
+    @Test
+    void cancellationShouldRequireAuthentication() throws Exception {
+        mockMvc.perform(post("/api/orders/9001/cancel"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("UNAUTHORIZED"));
+
+        verify(ticketOrderService, never()).cancelOrder(any(), any());
+    }
+
+    @Test
+    void invalidCancellationOrderIdShouldReturnBadRequest() throws Exception {
+        doThrow(new BusinessException(ErrorCode.INVALID_ID))
+                .when(ticketOrderService).cancelOrder(1L, 0L);
+
+        mockMvc.perform(post("/api/orders/0/cancel")
+                        .header("Authorization", AUTHORIZATION))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_ID"));
+    }
+
+    @Test
+    void missingForeignAndPaidCancellationShouldUseStableErrors() throws Exception {
+        doThrow(new BusinessException(ErrorCode.ORDER_NOT_FOUND))
+                .when(ticketOrderService).cancelOrder(1L, 9001L);
+        doThrow(new BusinessException(ErrorCode.ORDER_STATUS_CONFLICT))
+                .when(ticketOrderService).cancelOrder(1L, 9002L);
+
+        mockMvc.perform(post("/api/orders/9001/cancel")
+                        .header("Authorization", AUTHORIZATION))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("ORDER_NOT_FOUND"));
+        mockMvc.perform(post("/api/orders/9002/cancel")
+                        .header("Authorization", AUTHORIZATION))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("ORDER_STATUS_CONFLICT"));
+    }
+
     private void assertBadRequest(String body) throws Exception {
         mockMvc.perform(post("/api/orders")
                         .header("Authorization", AUTHORIZATION)
