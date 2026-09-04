@@ -1509,6 +1509,16 @@ Redis 清理
 
 阶段 8 订单数据模型采用 Redis 临时资格、MySQL token 唯一消费关系和 MySQL 场次座位最终状态的分层职责。普通锁座仍不修改 MySQL；只有订单事务成功时才将全部座位从 `AVAILABLE` 转换为 `HELD_BY_UNPAID_ORDER`。本 Step 只同步 SQL 草案和设计文档，不实现订单 Java 代码、支付、取消、超时任务、出票或 Redis Stream。
 
+### 5.2 Step 8.2：订单基础持久化模型
+
+本 Step 只建立 Step 8.1 已冻结表结构对应的 Java 持久化层，不实现创建订单业务。`TicketOrder` 与 `TicketOrderItem` 逐字段映射 `tb_ticket_order` 和 `tb_ticket_order_item`，主键沿用 MyBatis-Plus 自增策略；金额使用 `BigDecimal`，数据库 `DATETIME` 使用 `LocalDateTime`。
+
+订单状态以 `TicketOrderStatus` 定义 `UNPAID`、`PAID`、`CANCELED`、`REFUNDED`，票状态以 `TicketStatus` 定义 `PENDING(0)`、`VALID(1)`、`USED(2)`、`REFUNDED(3)`。Entity 仍保存数据库原始的 `String` 或 `Integer` 值，避免在本 Step 提前引入类型处理器或状态流转逻辑。
+
+`TicketOrderMapper` 与 `TicketOrderItemMapper` 仅继承 MyBatis-Plus `BaseMapper`。真实 MySQL 映射测试覆盖订单和明细的插入、自动生成主键、全部字段回读、`pay_time` 与 `ticket_code` 可空，以及数据库生成的 `create_time`。本 Step 不新增 DTO、VO、Service、Controller，不读取或清理 Redis，不更新 `ShowtimeSeat` 或 `available_seats`。
+
+Step 8.2 已完成真实数据库验证：本地 `tb_ticket_order` 已同步 Step 8.1 冻结的 `lock_token`、`expire_time NOT NULL` 和 `uk_order_lock_token`；订单及明细映射测试在事务中完成插入和回读后自动回滚。全量自动化测试共 189 项，0 failure、0 error，Maven `clean package` 构建成功。本 Step 至此冻结，后续创建订单事务仍由新的独立 Step 实现。
+
 ## 6. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
