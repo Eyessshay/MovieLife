@@ -6,6 +6,9 @@ import com.movielife.service.TicketOrderCreationContext;
 import com.movielife.service.TicketOrderCreationValidator;
 import com.movielife.service.SeatLockService;
 import com.movielife.vo.CreateTicketOrderVO;
+import com.movielife.vo.PageVO;
+import com.movielife.vo.TicketOrderDetailVO;
+import com.movielife.vo.TicketOrderListItemVO;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -16,6 +19,7 @@ import org.springframework.dao.DuplicateKeyException;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.Arrays;
+import java.util.Collections;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -34,13 +38,16 @@ class TicketOrderServiceImplTest {
     private TicketOrderTransactionService transactionService;
     @Mock
     private SeatLockService seatLockService;
+    @Mock
+    private TicketOrderQueryService queryService;
 
     private TicketOrderServiceImpl service;
     private CreateTicketOrderDTO request;
 
     @BeforeEach
     void setUp() {
-        service = new TicketOrderServiceImpl(creationValidator, transactionService, seatLockService);
+        service = new TicketOrderServiceImpl(
+                creationValidator, transactionService, seatLockService, queryService);
         request = new CreateTicketOrderDTO();
         request.setLockToken("lock-token");
     }
@@ -152,6 +159,26 @@ class TicketOrderServiceImplTest {
         when(transactionService.createNewOrder(initial)).thenThrow(duplicate);
 
         assertThatThrownBy(() -> service.createOrder(1L, request)).isSameAs(duplicate);
+    }
+
+    @Test
+    void orderListQueryShouldDelegateToReadOnlyQueryService() {
+        PageVO<TicketOrderListItemVO> page =
+                new PageVO<>(Collections.emptyList(), 0L, 1, 20);
+        when(queryService.queryMyOrders(1L, 1, 20)).thenReturn(page);
+
+        assertThat(service.queryMyOrders(1L, 1, 20)).isSameAs(page);
+        verify(queryService).queryMyOrders(1L, 1, 20);
+    }
+
+    @Test
+    void orderDetailQueryShouldDelegateToReadOnlyQueryService() {
+        TicketOrderDetailVO detail = new TicketOrderDetailVO();
+        detail.setOrderId(9001L);
+        when(queryService.queryOrderDetail(1L, 9001L)).thenReturn(detail);
+
+        assertThat(service.queryOrderDetail(1L, 9001L)).isSameAs(detail);
+        verify(queryService).queryOrderDetail(1L, 9001L);
     }
 
     private TicketOrderCreationContext consumedContext(Long orderId) {

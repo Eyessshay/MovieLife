@@ -1,0 +1,28 @@
+package com.movielife.vo;
+
+import lombok.Data;
+
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.util.List;
+
+@Data
+public class TicketOrderDetailVO {
+
+    private Long orderId;
+    private Long showtimeId;
+    private Long movieId;
+    private String movieName;
+    private Long venueId;
+    private String venueName;
+    private Long hallId;
+    private String hallName;
+    private LocalDateTime startTime;
+    private LocalDateTime endTime;
+    private String status;
+    private BigDecimal totalAmount;
+    private LocalDateTime expireTime;
+    private LocalDateTime createTime;
+    private LocalDateTime payTime;
+    private List<TicketOrderItemVO> items;
+}

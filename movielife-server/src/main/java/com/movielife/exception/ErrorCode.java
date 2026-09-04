@@ -34,6 +34,7 @@ public enum ErrorCode {
     SEAT_NOT_AVAILABLE("SEAT_NOT_AVAILABLE", "所选座位不可用", HttpStatus.CONFLICT),
     LOCK_NOT_OWNED("LOCK_NOT_OWNED", "无权操作该锁座", HttpStatus.FORBIDDEN),
     INVALID_LOCK_TOKEN("INVALID_LOCK_TOKEN", "锁座凭证无效", HttpStatus.BAD_REQUEST),
+    ORDER_NOT_FOUND("ORDER_NOT_FOUND", "订单不存在", HttpStatus.NOT_FOUND),
     ORDER_NOT_OWNED("ORDER_NOT_OWNED", "无权操作该订单", HttpStatus.FORBIDDEN),
     ORDER_REQUEST_MISMATCH("ORDER_REQUEST_MISMATCH", "订单请求与已消费锁座凭证不一致", HttpStatus.CONFLICT),
     INVALID_TARGET_TYPE("INVALID_TARGET_TYPE", "目标类型不合法", HttpStatus.BAD_REQUEST),

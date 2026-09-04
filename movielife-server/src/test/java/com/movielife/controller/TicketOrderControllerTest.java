@@ -6,6 +6,10 @@ import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.service.TicketOrderService;
 import com.movielife.vo.CreateTicketOrderVO;
+import com.movielife.vo.PageVO;
+import com.movielife.vo.TicketOrderDetailVO;
+import com.movielife.vo.TicketOrderItemVO;
+import com.movielife.vo.TicketOrderListItemVO;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -18,6 +22,8 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
+import java.util.Arrays;
+import java.util.Collections;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
@@ -28,6 +34,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -163,6 +170,116 @@ class TicketOrderControllerTest {
         assertBusinessError(409, "SEAT_NOT_AVAILABLE");
         assertBusinessError(404, "SHOWTIME_NOT_FOUND");
         assertBusinessError(500, "INTERNAL_ERROR");
+    }
+
+    @Test
+    void shouldQueryCurrentUserOrdersWithDefaultPagination() throws Exception {
+        TicketOrderListItemVO item = new TicketOrderListItemVO();
+        item.setOrderId(9001L);
+        item.setMovieName("Movie A");
+        item.setVenueName("Venue A");
+        item.setHallName("Hall A");
+        item.setStatus("UNPAID");
+        item.setTotalAmount(new BigDecimal("95.00"));
+        item.setSeatCount(2);
+        when(ticketOrderService.queryMyOrders(1L, 1, 20))
+                .thenReturn(new PageVO<>(Collections.singletonList(item), 1L, 1, 20));
+
+        mockMvc.perform(get("/api/orders").header("Authorization", AUTHORIZATION))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("OK"))
+                .andExpect(jsonPath("$.data.total").value(1))
+                .andExpect(jsonPath("$.data.page").value(1))
+                .andExpect(jsonPath("$.data.pageSize").value(20))
+                .andExpect(jsonPath("$.data.list[0].orderId").value(9001))
+                .andExpect(jsonPath("$.data.list[0].seatCount").value(2));
+
+        verify(ticketOrderService).queryMyOrders(1L, 1, 20);
+    }
+
+    @Test
+    void emptyOrderPageShouldReturnEmptyList() throws Exception {
+        when(ticketOrderService.queryMyOrders(1L, 2, 10))
+                .thenReturn(new PageVO<>(Collections.emptyList(), 0L, 2, 10));
+
+        mockMvc.perform(get("/api/orders")
+                        .header("Authorization", AUTHORIZATION)
+                        .param("page", "2")
+                        .param("pageSize", "10"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.list").isEmpty())
+                .andExpect(jsonPath("$.data.total").value(0));
+    }
+
+    @Test
+    void orderQueriesShouldRequireAuthentication() throws Exception {
+        mockMvc.perform(get("/api/orders"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("UNAUTHORIZED"));
+        mockMvc.perform(get("/api/orders/9001"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("UNAUTHORIZED"));
+
+        verify(ticketOrderService, never()).queryMyOrders(any(), any(), any());
+        verify(ticketOrderService, never()).queryOrderDetail(any(), any());
+    }
+
+    @Test
+    void invalidOrderPaginationShouldReturnBadRequest() throws Exception {
+        doThrow(new BusinessException(ErrorCode.INVALID_PAGE))
+                .when(ticketOrderService).queryMyOrders(1L, 0, 20);
+        doThrow(new BusinessException(ErrorCode.PAGE_SIZE_TOO_LARGE))
+                .when(ticketOrderService).queryMyOrders(1L, 1, 101);
+
+        mockMvc.perform(get("/api/orders")
+                        .header("Authorization", AUTHORIZATION).param("page", "0"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PAGE"));
+        mockMvc.perform(get("/api/orders")
+                        .header("Authorization", AUTHORIZATION).param("pageSize", "101"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("PAGE_SIZE_TOO_LARGE"));
+    }
+
+    @Test
+    void shouldReturnCurrentUserOrderDetail() throws Exception {
+        TicketOrderItemVO item = new TicketOrderItemVO();
+        item.setSeatId(101L);
+        item.setRowNo(1);
+        item.setColNo(2);
+        item.setSeatNo("A2");
+        item.setPrice(new BigDecimal("40.00"));
+        item.setTicketStatus(0);
+        TicketOrderDetailVO detail = new TicketOrderDetailVO();
+        detail.setOrderId(9001L);
+        detail.setStatus("UNPAID");
+        detail.setItems(Arrays.asList(item));
+        when(ticketOrderService.queryOrderDetail(1L, 9001L)).thenReturn(detail);
+
+        mockMvc.perform(get("/api/orders/9001").header("Authorization", AUTHORIZATION))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.orderId").value(9001))
+                .andExpect(jsonPath("$.data.status").value("UNPAID"))
+                .andExpect(jsonPath("$.data.items[0].seatNo").value("A2"))
+                .andExpect(jsonPath("$.data.items[0].price").value(40.00));
+
+        verify(ticketOrderService).queryOrderDetail(1L, 9001L);
+    }
+
+    @Test
+    void missingOrForeignOrderShouldReturnNotFoundAndInvalidIdShouldBeBadRequest()
+            throws Exception {
+        doThrow(new BusinessException(ErrorCode.ORDER_NOT_FOUND))
+                .when(ticketOrderService).queryOrderDetail(1L, 9001L);
+        doThrow(new BusinessException(ErrorCode.INVALID_ID))
+                .when(ticketOrderService).queryOrderDetail(1L, 0L);
+
+        mockMvc.perform(get("/api/orders/9001").header("Authorization", AUTHORIZATION))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("ORDER_NOT_FOUND"));
+        mockMvc.perform(get("/api/orders/0").header("Authorization", AUTHORIZATION))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_ID"));
     }
 
     private void assertBadRequest(String body) throws Exception {

@@ -1571,6 +1571,20 @@ HTTP 创建链路为：登录用户请求 Controller；`TicketOrderService` 执�
 
 Step 8.6 新增 10 项 HTTP 自动化测试，全量共 240 项，0 failure、0 error，Maven `clean package` 构建成功。Controller 切片测试覆盖登录接入、请求 DTO 校验及订单业务错误到 HTTP 状态的统一映射；真实 MySQL/Redis HTTP 联调覆盖登录、查询场次与 Seat Map、锁座、创建订单、提交后清理临时锁、相同 token 幂等重试、请求不一致和非订单持有者访问。联调结束后订单、明细、测试场次座位和 Redis 临时锁均已清理，本 Step 至此冻结。
 
+### 5.7 Step 8.7：订单列表与详情只读接口
+
+正式开放 `GET /api/orders` 和 `GET /api/orders/{id}`，两者均通过 `@LoginRequired` 使用服务端登录用户 ID。`TicketOrderService` 增加当前用户分页列表和订单详情入口，具体读取逻辑隔离在不依赖 Redis 的 `TicketOrderQueryService`；查询过程不修改订单、明细、ShowtimeSeat、`available_seats` 或任何 Redis Key，也不根据过期时间改变订单状态。
+
+订单列表沿用项目 `PageVO` 和页大小 1～100 的统一约束，固定按 `create_time DESC, id DESC` 排序。每页只执行订单分页、全部订单明细、Showtime、Movie、Venue、Hall 六类查询；后五类均按本页 ID 集合批量读取，座位数由明细在内存中按 `orderId` 分组计算，避免逐订单查询产生 N+1。空结果正常返回空列表。
+
+订单详情先按主键读取订单，并将不存在和非当前用户所有统一映射为 `404 ORDER_NOT_FOUND`。合法订单的 Showtime、Movie、Venue、Hall 分别读取，全部订单明细一次查询，所有 Seat 再按 seatId 集合一次批量查询；最终明细按 `rowNo ASC, colNo ASC` 排序，价格、`ticketCode` 和 `ticketStatus` 均直接返回订单明细快照。任一必要关联或明细缺失统一视为 `INTERNAL_ERROR`，不静默省略不完整数据。
+
+真实 HTTP 验证链路扩展为登录、Seat Map、锁座、创建订单、当前用户列表和订单详情；列表同时使用同用户历史订单及其他用户订单验证倒序与用户隔离，详情验证价格快照、座位顺序和其他用户访问返回 404。GET 请求前后对订单、明细、ShowtimeSeat、Showtime 和相关 Redis 值做快照比对，确认查询没有产生状态变化。
+
+本 Step 不实现支付、取消、超时状态处理、出票、退款或 Redis Stream。
+
+Step 8.7 新增 16 项自动化测试，全量共 256 项，0 failure、0 error，Maven `clean package` 构建成功。Controller 测试覆盖登录、分页、空列表、非法参数、本人详情、隐藏他人订单和不存在订单；Service 测试覆盖批量关联查询次数、座位计数、详情快照与排序、分页边界和关联数据异常。真实 MySQL/Redis HTTP 联调从创建订单继续执行列表与详情查询，验证当前用户隔离、稳定倒序和 404 防泄露语义，并确认查询前后数据库及 Redis 状态不变。测试订单、明细、场次座位和 Redis 临时锁均已清理，本 Step 至此冻结。
+
 ## 6. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：

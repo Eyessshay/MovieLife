@@ -9,6 +9,9 @@ import com.movielife.service.TicketOrderCreationValidator;
 import com.movielife.service.TicketOrderService;
 import com.movielife.service.SeatLockService;
 import com.movielife.vo.CreateTicketOrderVO;
+import com.movielife.vo.PageVO;
+import com.movielife.vo.TicketOrderDetailVO;
+import com.movielife.vo.TicketOrderListItemVO;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
@@ -24,6 +27,7 @@ public class TicketOrderServiceImpl implements TicketOrderService {
     private final TicketOrderCreationValidator creationValidator;
     private final TicketOrderTransactionService transactionService;
     private final SeatLockService seatLockService;
+    private final TicketOrderQueryService queryService;
 
     @Override
     public CreateTicketOrderVO createOrder(Long userId, CreateTicketOrderDTO dto) {
@@ -47,6 +51,17 @@ public class TicketOrderServiceImpl implements TicketOrderService {
             }
             throw exception;
         }
+    }
+
+    @Override
+    public PageVO<TicketOrderListItemVO> queryMyOrders(
+            Long userId, Integer page, Integer pageSize) {
+        return queryService.queryMyOrders(userId, page, pageSize);
+    }
+
+    @Override
+    public TicketOrderDetailVO queryOrderDetail(Long userId, Long orderId) {
+        return queryService.queryOrderDetail(userId, orderId);
     }
 
     private void cleanupRedisBestEffort(Long orderId, TicketOrderCreationContext context) {

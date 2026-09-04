@@ -34,6 +34,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -248,6 +249,102 @@ class TicketOrderHttpIntegrationTest {
                 .eq(TicketOrderItem::getOrderId, orderId))).isEqualTo(2);
         assertThat(showtimeMapper.selectById(showtimeId).getAvailableSeats())
                 .isEqualTo(availableBefore - 2);
+
+        Long olderOrderId = insertHistoricalOrder(owner.userId, "CANCELED", -1);
+        insertHistoricalOrder(anotherUser.userId, "PAID", -2);
+        TicketOrder orderBeforeQueries = ticketOrderMapper.selectById(orderId);
+        List<TicketOrderItem> itemsBeforeQueries = ticketOrderItemMapper.selectList(
+                new LambdaQueryWrapper<TicketOrderItem>()
+                        .eq(TicketOrderItem::getOrderId, orderId)
+                        .orderByAsc(TicketOrderItem::getId));
+        List<ShowtimeSeat> seatsBeforeQueries = showtimeSeatMapper.selectList(
+                new LambdaQueryWrapper<ShowtimeSeat>()
+                        .eq(ShowtimeSeat::getShowtimeId, showtimeId)
+                        .in(ShowtimeSeat::getSeatId, selectedSeatIds)
+                        .orderByAsc(ShowtimeSeat::getSeatId));
+        Showtime showtimeBeforeQueries = showtimeMapper.selectById(showtimeId);
+        String loginValueBeforeQueries = redisTemplate.opsForValue().get(
+                RedisConstants.LOGIN_TOKEN_KEY + owner.token);
+
+        ResponseEntity<String> listResponse = get("/api/orders?page=1&pageSize=20", owner.token);
+        assertThat(listResponse.getStatusCodeValue()).isEqualTo(200);
+        JsonNode orderPage = json(listResponse).path("data");
+        assertThat(orderPage.path("total").asLong()).isEqualTo(2);
+        assertThat(orderPage.path("page").asInt()).isEqualTo(1);
+        assertThat(orderPage.path("pageSize").asInt()).isEqualTo(20);
+        assertThat(orderPage.path("list").get(0).path("orderId").asLong()).isEqualTo(orderId);
+        assertThat(orderPage.path("list").get(1).path("orderId").asLong())
+                .isEqualTo(olderOrderId);
+        JsonNode createdListItem = orderPage.path("list").get(0);
+        assertThat(createdListItem.path("showtimeId").asLong()).isEqualTo(showtimeId);
+        assertThat(createdListItem.path("movieId").asLong()).isEqualTo(1L);
+        assertThat(createdListItem.path("venueId").asLong()).isEqualTo(1L);
+        assertThat(createdListItem.path("hallId").asLong()).isEqualTo(1L);
+        assertThat(createdListItem.path("movieName").asText()).isNotBlank();
+        assertThat(createdListItem.path("venueName").asText()).isNotBlank();
+        assertThat(createdListItem.path("hallName").asText()).isNotBlank();
+        assertThat(createdListItem.path("seatCount").asInt()).isEqualTo(2);
+
+        ResponseEntity<String> detailResponseAfterCreate = get(
+                "/api/orders/" + orderId, owner.token);
+        assertThat(detailResponseAfterCreate.getStatusCodeValue()).isEqualTo(200);
+        JsonNode detail = json(detailResponseAfterCreate).path("data");
+        assertThat(detail.path("orderId").asLong()).isEqualTo(orderId);
+        assertThat(detail.path("showtimeId").asLong()).isEqualTo(showtimeId);
+        assertThat(detail.path("status").asText()).isEqualTo("UNPAID");
+        assertThat(detail.path("totalAmount").decimalValue()).isEqualByComparingTo("95.00");
+        assertThat(detail.path("items")).hasSize(2);
+        assertThat(detail.path("items").get(0).path("rowNo").asInt())
+                .isLessThanOrEqualTo(detail.path("items").get(1).path("rowNo").asInt());
+        assertThat(detail.path("items").get(0).path("ticketCode").isNull()).isTrue();
+        assertThat(detail.path("items").get(0).path("ticketStatus").asInt()).isZero();
+        assertThat(detail.path("items").get(0).path("price").decimalValue()
+                .add(detail.path("items").get(1).path("price").decimalValue()))
+                .isEqualByComparingTo("95.00");
+
+        ResponseEntity<String> hiddenForeignOrder = get(
+                "/api/orders/" + orderId, anotherUser.token);
+        assertThat(hiddenForeignOrder.getStatusCodeValue()).isEqualTo(404);
+        assertThat(json(hiddenForeignOrder).path("code").asText()).isEqualTo("ORDER_NOT_FOUND");
+        ResponseEntity<String> missingOrder = get("/api/orders/9223372036854775807", owner.token);
+        assertThat(missingOrder.getStatusCodeValue()).isEqualTo(404);
+        assertThat(json(missingOrder).path("code").asText()).isEqualTo("ORDER_NOT_FOUND");
+
+        assertThat(ticketOrderMapper.selectById(orderId)).isEqualTo(orderBeforeQueries);
+        assertThat(ticketOrderItemMapper.selectList(new LambdaQueryWrapper<TicketOrderItem>()
+                .eq(TicketOrderItem::getOrderId, orderId)
+                .orderByAsc(TicketOrderItem::getId))).isEqualTo(itemsBeforeQueries);
+        assertThat(showtimeSeatMapper.selectList(new LambdaQueryWrapper<ShowtimeSeat>()
+                .eq(ShowtimeSeat::getShowtimeId, showtimeId)
+                .in(ShowtimeSeat::getSeatId, selectedSeatIds)
+                .orderByAsc(ShowtimeSeat::getSeatId))).isEqualTo(seatsBeforeQueries);
+        assertThat(showtimeMapper.selectById(showtimeId)).isEqualTo(showtimeBeforeQueries);
+        assertThat(redisTemplate.opsForValue().get(RedisConstants.LOGIN_TOKEN_KEY + owner.token))
+                .isEqualTo(loginValueBeforeQueries);
+        assertThat(redisTemplate.opsForValue().get(tokenKey(lockToken))).isNull();
+        for (Long seatId : selectedSeatIds) {
+            assertThat(redisTemplate.opsForValue().get(seatKey(seatId))).isNull();
+        }
+    }
+
+    private Long insertHistoricalOrder(Long userId, String status, int daysOffset) {
+        TicketOrder order = new TicketOrder();
+        order.setUserId(userId);
+        order.setShowtimeId(showtimeId);
+        order.setLockToken("query-" + UUID.randomUUID());
+        order.setTotalAmount(new BigDecimal("40.00"));
+        order.setStatus(status);
+        order.setExpireTime(LocalDateTime.now().plusDays(1));
+        order.setCreateTime(LocalDateTime.now().plusDays(daysOffset));
+        assertThat(ticketOrderMapper.insert(order)).isEqualTo(1);
+
+        TicketOrderItem item = new TicketOrderItem();
+        item.setOrderId(order.getId());
+        item.setSeatId(selectedSeatIds.get(0));
+        item.setPrice(new BigDecimal("40.00"));
+        item.setTicketStatus(0);
+        assertThat(ticketOrderItemMapper.insert(item)).isEqualTo(1);
+        return order.getId();
     }
 
     private LoginSession login(String phone, String code) throws Exception {
