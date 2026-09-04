@@ -268,6 +268,8 @@ GET  /api/orders/{id}/tickets           # 查看票券/取票码
 }
 ```
 
+创建订单成功响应中的 `CreateTicketOrderVO` 固定包含 `orderId`、`status`、`totalAmount`、`expireTime`，不包含属于票明细或支付结果的 `ticketCode`、`ticketStatus`、`payTime`。`seatIds` 必须为 1 到 6 个互不重复的正整数，服务端去重、排序后必须与原数量一致；`lockToken` 非空且最长 64 位。
+
 `TicketOrderService` 首次创建订单前必须校验 `lockToken` 的用户归属、场次、规范化座位集合、有效期以及全部 seatKey 的完整归属。客户端提交的 `seatIds` 只用于一致性校验，实际下单座位以 Redis token 元数据为准；价格由服务端读取 `ShowtimeSeat.price` 计算，不能信任客户端价格。
 
 `Redis Metadata` 只表示尚未消费阶段的临时下单资格；`tb_ticket_order.lock_token` 是消费成功后的长期幂等事实，并具有唯一约束。请求进入后必须先按 `lockToken` 查询订单：已有订单且用户、场次和订单明细座位集合完全一致时直接返回原订单，即使 Redis Key 已删除也不得创建第二个订单；只有 token 尚未消费时才校验 Redis 和 MySQL 并首次创建订单。
@@ -279,6 +281,8 @@ Redis 5 分钟 `lockExpireTime` 只决定能否首次创建订单。订单成功
 数据库事务提交前禁止删除 Redis 锁。提交成功后才按 `seatKey.value == lockToken` 条件清理 seatKey 和 token 元数据；清理失败不能回滚已经成立的订单事实，只能重试清理或等待原 TTL 收敛。订单超时或取消后，由订单域按 `status=HELD_BY_UNPAID_ORDER AND lock_order_id=当前订单` 的归属条件释放座位，普通锁座 release 不承担该职责。
 
 若并发创建命中 `uk_order_lock_token`，当前失败事务必须先回滚，再在事务外或新事务中按 `lockToken` 查询既有订单，校验 `userId`、`showtimeId` 和规范化 `seatIds` 后返回原订单；不得在已经被标记为 rollback-only 的事务中继续查询并返回。
+
+已消费 token 对应订单的 `userId` 不属于当前用户时返回 `403 ORDER_NOT_OWNED`；`showtimeId` 或座位集合与原订单不一致时返回 `409 ORDER_REQUEST_MISMATCH`。未消费 token 的 Redis Metadata 不存在、过期、场次或座位集合不匹配，以及任一 seatKey 缺失或不再等于当前 token 时，统一返回 `400 INVALID_LOCK_TOKEN`；Metadata 用户不一致继续复用 `403 LOCK_NOT_OWNED`。
 
 支付回调和退款回调预留内部接口：
 

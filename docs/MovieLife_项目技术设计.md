@@ -1519,6 +1519,16 @@ Redis 清理
 
 Step 8.2 已完成真实数据库验证：本地 `tb_ticket_order` 已同步 Step 8.1 冻结的 `lock_token`、`expire_time NOT NULL` 和 `uk_order_lock_token`；订单及明细映射测试在事务中完成插入和回读后自动回滚。全量自动化测试共 189 项，0 failure、0 error，Maven `clean package` 构建成功。本 Step 至此冻结，后续创建订单事务仍由新的独立 Step 实现。
 
+### 5.3 Step 8.3：订单创建前置校验
+
+本 Step 冻结 `CreateTicketOrderDTO`、`CreateTicketOrderVO` 和 `TicketOrderService.createOrder(userId, dto)` 入口，但不提供 Controller，也不创建订单。为了避免对“校验通过但尚无订单”的请求伪造 VO，校验逻辑独立为 `TicketOrderCreationValidator`，返回可由 Step 8.4 复用的内部 `TicketOrderCreationContext`。
+
+校验顺序固定为：服务端再次校验参数并规范化座位 ID；按 `lockToken` 查询 MySQL；已存在订单时校验用户、场次及一次批量查询得到的订单明细座位集合，完全一致则返回已有订单上下文，全程不访问 Redis，也不限制原订单当前状态。仅在 MySQL 不存在对应订单时读取 `seat:lock:token:{lockToken}`，校验 Metadata 的用户、场次、已规范化座位集合和绝对过期时间，再对全部 `seat:lock:{showtimeId}:{seatId}` 执行一次 `MGET`，要求每个值都严格等于当前 token。
+
+本 Step 的 Redis 行为严格只读，不执行 `SET`、`DEL`、`EXPIRE` 或 Lua，不刷新 TTL。校验器不检查 Showtime 有效性、ShowtimeSeat 状态或价格，不计算金额，不插入订单或明细，不修改 `ShowtimeSeat`、`available_seats`，也不清理 Redis；这些数据库交易职责留给 Step 8.4。
+
+Step 8.3 已完成 22 项新增自动化测试和真实 MySQL、Redis 联调。未消费 token 场景验证了 Metadata 与全部 seatKey 后仍保留原 Key、未刷新 TTL，且订单表、ShowtimeSeat 和 `available_seats` 均未变化；已消费 token 场景在 Redis Key 不存在且订单状态为 `PAID` 时仍以 MySQL 订单事实完成幂等命中。全量自动化测试共 211 项，0 failure、0 error，Maven `clean package` 构建成功。本 Step 至此冻结，不开放 `POST /api/orders`。
+
 ## 6. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
