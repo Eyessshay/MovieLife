@@ -29,7 +29,6 @@ import org.springframework.stereotype.Service;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
@@ -116,10 +115,24 @@ public class SeatLockServiceImpl implements SeatLockService {
             throw new BusinessException(ErrorCode.INVALID_LOCK_TOKEN);
         }
 
+        cleanupLock(metadata.getShowtimeId(), metadata.getSeatIds(), lockToken);
+    }
+
+    @Override
+    public void cleanupLock(Long showtimeId, List<Long> seatIds, String lockToken) {
+        if (showtimeId == null || showtimeId <= 0
+                || seatIds == null || seatIds.isEmpty()
+                || seatIds.stream().anyMatch(seatId -> seatId == null || seatId <= 0)
+                || lockToken == null || lockToken.trim().isEmpty()) {
+            throw new BusinessException(ErrorCode.INVALID_LOCK_TOKEN);
+        }
+        String normalizedLockToken = lockToken.trim();
+        List<String> keys = buildSeatKeys(showtimeId, seatIds);
+        keys.add(0, tokenKey(normalizedLockToken));
         Long result = stringRedisTemplate.execute(
                 SEAT_RELEASE_SCRIPT,
-                Collections.singletonList(tokenKey(lockToken)),
-                lockToken,
+                keys,
+                normalizedLockToken,
                 RedisConstants.SEAT_LOCK_KEY_PREFIX
         );
         if (!Long.valueOf(0L).equals(result)) {

@@ -7,33 +7,67 @@ import com.movielife.exception.ErrorCode;
 import com.movielife.service.TicketOrderCreationContext;
 import com.movielife.service.TicketOrderCreationValidator;
 import com.movielife.service.TicketOrderService;
+import com.movielife.service.SeatLockService;
 import com.movielife.vo.CreateTicketOrderVO;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class TicketOrderServiceImpl implements TicketOrderService {
+
+    private static final int REDIS_CLEANUP_ATTEMPTS = 2;
 
     private final TicketOrderCreationValidator creationValidator;
     private final TicketOrderTransactionService transactionService;
+    private final SeatLockService seatLockService;
 
     @Override
     public CreateTicketOrderVO createOrder(Long userId, CreateTicketOrderDTO dto) {
         TicketOrderCreationContext context = creationValidator.validate(userId, dto);
         if (context.isConsumed()) {
-            return toCreateOrderVO(context.getExistingOrder());
+            CreateTicketOrderVO existingOrder = toCreateOrderVO(context.getExistingOrder());
+            cleanupRedisBestEffort(existingOrder.getOrderId(), context);
+            return existingOrder;
         }
 
         try {
-            return transactionService.createNewOrder(context);
+            CreateTicketOrderVO createdOrder = transactionService.createNewOrder(context);
+            cleanupRedisBestEffort(createdOrder.getOrderId(), context);
+            return createdOrder;
         } catch (DuplicateKeyException exception) {
             TicketOrderCreationContext retryContext = creationValidator.validate(userId, dto);
             if (retryContext.isConsumed()) {
-                return toCreateOrderVO(retryContext.getExistingOrder());
+                CreateTicketOrderVO existingOrder = toCreateOrderVO(retryContext.getExistingOrder());
+                cleanupRedisBestEffort(existingOrder.getOrderId(), retryContext);
+                return existingOrder;
             }
             throw exception;
+        }
+    }
+
+    private void cleanupRedisBestEffort(Long orderId, TicketOrderCreationContext context) {
+        for (int attempt = 1; attempt <= REDIS_CLEANUP_ATTEMPTS; attempt++) {
+            try {
+                seatLockService.cleanupLock(
+                        context.getShowtimeId(), context.getSeatIds(), context.getLockToken());
+                return;
+            } catch (RuntimeException exception) {
+                if (attempt < REDIS_CLEANUP_ATTEMPTS) {
+                    log.warn("Order {} committed, retrying Redis seat-lock cleanup: "
+                                    + "lockToken={}, showtimeId={}, seatIds={}, attempt={}",
+                            orderId, context.getLockToken(), context.getShowtimeId(),
+                            context.getSeatIds(), attempt, exception);
+                } else {
+                    log.error("Order {} committed, Redis seat-lock cleanup failed: "
+                                    + "lockToken={}, showtimeId={}, seatIds={}, attempts={}",
+                            orderId, context.getLockToken(), context.getShowtimeId(),
+                            context.getSeatIds(), REDIS_CLEANUP_ATTEMPTS, exception);
+                }
+            }
         }
     }
 

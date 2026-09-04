@@ -31,6 +31,14 @@ class SeatLockContractTest {
     }
 
     @Test
+    void shouldExposeConditionalCleanupMethodForCommittedOrders() throws NoSuchMethodException {
+        Method method = SeatLockService.class.getDeclaredMethod(
+                "cleanupLock", Long.class, java.util.List.class, String.class);
+
+        assertThat(method.getReturnType()).isEqualTo(Void.TYPE);
+    }
+
+    @Test
     void shouldCarryValidatedAndNormalizedSeatLockData() {
         LocalDateTime expireTime = LocalDateTime.of(2026, 9, 3, 18, 30);
         SeatLockContext context = new SeatLockContext();

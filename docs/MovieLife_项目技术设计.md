@@ -1545,6 +1545,20 @@ Step 8.3 已完成 22 项新增自动化测试和真实 MySQL、Redis 联调。�
 
 Step 8.4 新增 14 项自动化测试。真实 MySQL/Redis 联调覆盖两种座位价格形成订单与明细快照、批量占座及余票扣减、近场次支付截止时间、提交后 Redis Key 及 TTL 不变；还覆盖 `available_seats` 条件更新失败时订单、明细和座位更新整体回滚，并在修复计数后使用同一仍有效 token 重试成功。全量自动化测试共 225 项，0 failure、0 error，Maven `clean package` 构建成功；测试订单、明细及联调基础数据均已删除，Redis `seat:lock:*` 无残留。本 Step 至此冻结。
 
+### 5.5 Step 8.5：提交后的 Redis 条件清理与完整创建编排
+
+完整 Service 编排冻结为：`TicketOrderCreationValidator` 先识别 token 是否已消费；未消费时调用独立的 `TicketOrderTransactionService` 完成 MySQL 事务；只有事务代理正常返回、即数据库已经 COMMIT 后，`TicketOrderServiceImpl` 才执行 Redis 清理。事务服务不持有 Redis 依赖，Redis 异常不会把已提交的订单标记为回滚。
+
+订单清理直接复用阶段 7 已验证的 `seat_release.lua`，并为同一脚本增加显式 seatKey 的兼容入口；阶段 7 原有 release 模式和条件删除规则保持不变。`SeatLockService.cleanupLock(showtimeId, seatIds, lockToken)` 使用已校验的订单上下文构造 tokenKey 和全部 seatKey，不重复执行用户鉴权，也不修改任何 MySQL 状态。Lua 仅删除 `seatKey.value == lockToken` 的 seatKey，随后删除 token Metadata；即使 Metadata 已不存在，仍能清理上下文中属于该 token 的残留 seatKey。相关 Key 已不存在时按幂等成功处理，已被其他 token 重新拥有的 seatKey 必须保留。
+
+清理采用最多两次同步尝试。第一次 Redis 异常后立即重试一次；仍失败时记录包含 `orderId`、`lockToken`、`showtimeId` 和 `seatIds` 的错误日志，但 `CreateTicketOrderVO` 仍正常返回。残留临时锁由相同 token 的后续幂等请求再次 best-effort 清理，或由阶段 7 的原 TTL 最终收敛，不引入 Redis Stream、补偿队列或定时任务。
+
+MySQL 已存在订单时仍以持久化 token 消费事实为先：请求一致即返回原订单，不要求 Redis Metadata 存在。返回前会顺便执行一次相同的条件清理，因此既能收敛上一次 Redis 故障，也不会无条件删除后来产生的新锁。唯一 token 竞态的赢家订单在失败事务回滚并重新查询成功后同样进入该清理路径。
+
+本 Step 仅完成 Service 级闭环，未新增或开放 `POST /api/orders` Controller，也不实现支付、取消、超时、出票、退款或 Redis Stream。
+
+Step 8.5 新增 5 项自动化测试，全量共 230 项，0 failure、0 error，Maven `clean package` 构建成功。真实 MySQL/Redis 联调确认正常创建后订单、明细、座位归属和余票扣减均已提交，随后全部临时锁 Key 被清理；相同 token 在 Metadata 已删除后仍返回原订单且不重复扣减。条件清理重复执行保持成功，seatKey 已改为其他 token 时不会被误删；模拟 Redis 连续异常时订单结果仍正常返回，并覆盖下一次幂等请求再次清理。测试数据和 Redis Key 已清理，本 Step 至此冻结。
+
 ## 6. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：

@@ -1,3 +1,13 @@
+if #KEYS > 1 then
+    for i = 2, #KEYS do
+        if redis.call('GET', KEYS[i]) == ARGV[1] then
+            redis.call('DEL', KEYS[i])
+        end
+    end
+    redis.call('DEL', KEYS[1])
+    return 0
+end
+
 local metadataJson = redis.call('GET', KEYS[1])
 if not metadataJson then
     return 0

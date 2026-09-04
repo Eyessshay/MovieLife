@@ -105,11 +105,9 @@ class TicketOrderTransactionIntegrationTest {
     }
 
     @Test
-    void shouldAtomicallyCreatePriceSnapshotAndKeepRedisLocksUntouched() {
+    void shouldCreateOrderThenConditionallyRemoveRedisLocks() {
         context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
         LockedRequest locked = lockAndBuildRequest(context);
-        long seatTtlBefore = ttl(locked.seatKeys.get(0));
-        long metadataTtlBefore = ttl(locked.metadataKey);
 
         CreateTicketOrderVO result = ticketOrderService.createOrder(1L, locked.request);
 
@@ -139,13 +137,10 @@ class TicketOrderTransactionIntegrationTest {
         });
         assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats()).isZero();
 
-        assertThat(redisTemplate.opsForValue().get(locked.metadataKey)).isNotNull();
-        assertThat(redisTemplate.opsForValue().get(locked.seatKeys.get(0)))
-                .isEqualTo(locked.request.getLockToken());
-        assertThat(ttl(locked.seatKeys.get(0))).isPositive().isLessThanOrEqualTo(seatTtlBefore + 100L);
-        assertThat(ttl(locked.metadataKey)).isPositive().isLessThanOrEqualTo(metadataTtlBefore + 100L);
+        assertThat(redisTemplate.opsForValue().get(locked.metadataKey)).isNull();
+        assertThat(redisTemplate.opsForValue().multiGet(locked.seatKeys))
+                .allMatch(value -> value == null);
 
-        redisTemplate.delete(cleanupKeys);
         CreateTicketOrderVO idempotent = ticketOrderService.createOrder(1L, locked.request);
         assertThat(idempotent.getOrderId()).isEqualTo(order.getId());
         assertThat(ticketOrderMapper.selectCount(new LambdaQueryWrapper<TicketOrder>()
@@ -183,6 +178,9 @@ class TicketOrderTransactionIntegrationTest {
         assertThat(retry.getOrderId()).isNotNull();
         assertThat(queryStates()).allMatch(state -> retry.getOrderId().equals(state.getLockOrderId()));
         assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats()).isZero();
+        assertThat(redisTemplate.opsForValue().get(locked.metadataKey)).isNull();
+        assertThat(redisTemplate.opsForValue().multiGet(locked.seatKeys))
+                .allMatch(value -> value == null);
     }
 
     @Test
@@ -194,6 +192,24 @@ class TicketOrderTransactionIntegrationTest {
         CreateTicketOrderVO result = ticketOrderService.createOrder(1L, locked.request);
 
         assertThat(result.getExpireTime()).isEqualTo(startTime);
+    }
+
+    @Test
+    void conditionalCleanupShouldBeIdempotentAndKeepSeatOwnedByAnotherToken() {
+        context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
+        LockedRequest locked = lockAndBuildRequest(context);
+        String reownedSeatKey = locked.seatKeys.get(1);
+        redisTemplate.opsForValue().set(reownedSeatKey, "another-token", 30, TimeUnit.SECONDS);
+        redisTemplate.delete(locked.metadataKey);
+
+        seatLockService.cleanupLock(context.showtime.getId(), context.seatIds,
+                locked.request.getLockToken());
+        seatLockService.cleanupLock(context.showtime.getId(), context.seatIds,
+                locked.request.getLockToken());
+
+        assertThat(redisTemplate.opsForValue().get(locked.metadataKey)).isNull();
+        assertThat(redisTemplate.opsForValue().get(locked.seatKeys.get(0))).isNull();
+        assertThat(redisTemplate.opsForValue().get(reownedSeatKey)).isEqualTo("another-token");
     }
 
     private TestContext insertShowtimeWithSeats(int availableSeats, LocalDateTime startTime) {
