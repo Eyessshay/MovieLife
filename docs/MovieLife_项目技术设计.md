@@ -1559,6 +1559,18 @@ MySQL 已存在订单时仍以持久化 token 消费事实为先：请求一致�
 
 Step 8.5 新增 5 项自动化测试，全量共 230 项，0 failure、0 error，Maven `clean package` 构建成功。真实 MySQL/Redis 联调确认正常创建后订单、明细、座位归属和余票扣减均已提交，随后全部临时锁 Key 被清理；相同 token 在 Metadata 已删除后仍返回原订单且不重复扣减。条件清理重复执行保持成功，seatKey 已改为其他 token 时不会被误删；模拟 Redis 连续异常时订单结果仍正常返回，并覆盖下一次幂等请求再次清理。测试数据和 Redis Key 已清理，本 Step 至此冻结。
 
+### 5.6 Step 8.6：开放订单创建 HTTP 接口
+
+新增 `TicketOrderController` 并正式开放 `POST /api/orders`。Controller 使用 `@LoginRequired` 接入现有认证拦截器，通过 `UserHolder.getUserId()` 获取当前用户，复用 `CreateTicketOrderDTO` 的 Bean Validation 和 `CreateTicketOrderVO`，不读取 Redis、不调用 Mapper、不参与事务，也不捕获业务异常。参数和业务异常统一交由 `GlobalExceptionHandler` 映射为稳定的 HTTP 状态与 `Result<T>` 结构。
+
+HTTP 创建链路为：登录用户请求 Controller；`TicketOrderService` 执行 token 校验和 MySQL 已消费判断；未消费时进入独立订单事务；事务 COMMIT 后条件清理 Redis；最后返回 `orderId`、`status`、`totalAmount` 和 `expireTime`。相同 token 在 Redis Metadata 和 seatKey 已清理后再次请求，会直接命中 MySQL 原订单，不重复创建明细、占座或扣减 `available_seats`。
+
+本 Step 的真实 HTTP 联调完整经过登录、场次详情、Seat Map、Redis lock 和订单创建，随后直接核对订单、明细价格快照、ShowtimeSeat 状态与 `lock_order_id`、余票扣减及 Redis Key 清理；还验证了相同 token HTTP 重试返回相同 orderId、不同座位请求返回 `409 ORDER_REQUEST_MISMATCH`、其他登录用户返回 `403 ORDER_NOT_OWNED`，且数据库状态均不再变化。
+
+本 Step 只开放创建接口，未新增 `GET /api/orders`、`GET /api/orders/{id}`，也不实现支付、取消、订单超时、出票、退款或 Redis Stream。
+
+Step 8.6 新增 10 项 HTTP 自动化测试，全量共 240 项，0 failure、0 error，Maven `clean package` 构建成功。Controller 切片测试覆盖登录接入、请求 DTO 校验及订单业务错误到 HTTP 状态的统一映射；真实 MySQL/Redis HTTP 联调覆盖登录、查询场次与 Seat Map、锁座、创建订单、提交后清理临时锁、相同 token 幂等重试、请求不一致和非订单持有者访问。联调结束后订单、明细、测试场次座位和 Redis 临时锁均已清理，本 Step 至此冻结。
+
 ## 6. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
