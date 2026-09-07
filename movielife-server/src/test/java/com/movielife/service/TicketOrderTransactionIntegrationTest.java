@@ -27,6 +27,7 @@ import com.movielife.mapper.UserMapper;
 import com.movielife.mapper.VenueMapper;
 import com.movielife.utils.UserHolder;
 import com.movielife.vo.CreateTicketOrderVO;
+import com.movielife.vo.PayTicketOrderVO;
 import com.movielife.vo.SeatLockVO;
 import com.movielife.service.impl.TicketOrderCancellationService;
 import org.junit.jupiter.api.AfterEach;
@@ -456,6 +457,194 @@ class TicketOrderTransactionIntegrationTest {
             assertThat(state.getLockOrderId()).isNull();
             assertThat(state.getVersion()).isEqualTo(2);
         });
+    }
+
+    @Test
+    void paymentShouldSellHeldSeatsKeepCounterAndBeIdempotent() {
+        context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
+        CreateTicketOrderVO created = ticketOrderService.createOrder(
+                1L, lockAndBuildRequest(context).request);
+        int availableBefore = showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats();
+
+        PayTicketOrderVO first = ticketOrderService.payOrder(1L, created.getOrderId());
+        PayTicketOrderVO second = ticketOrderService.payOrder(1L, created.getOrderId());
+
+        TicketOrder paid = ticketOrderMapper.selectById(created.getOrderId());
+        assertThat(paid.getStatus()).isEqualTo("PAID");
+        assertThat(paid.getPayTime()).isEqualTo(first.getPayTime());
+        assertThat(second.getPayTime()).isEqualTo(first.getPayTime());
+        assertThat(queryStates()).allSatisfy(state -> {
+            assertThat(state.getStatus()).isEqualTo(2);
+            assertThat(state.getLockOrderId()).isEqualTo(created.getOrderId());
+            assertThat(state.getVersion()).isEqualTo(2);
+        });
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats())
+                .isEqualTo(availableBefore);
+    }
+
+    @Test
+    void expiredAndCanceledOrdersShouldNotBePaid() {
+        context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
+        CreateTicketOrderVO created = ticketOrderService.createOrder(
+                1L, lockAndBuildRequest(context).request);
+        TicketOrder expired = new TicketOrder();
+        expired.setId(created.getOrderId());
+        expired.setExpireTime(LocalDateTime.now().minusSeconds(1));
+        assertThat(ticketOrderMapper.updateById(expired)).isEqualTo(1);
+        List<ShowtimeSeat> held = queryStates();
+
+        assertThatThrownBy(() -> ticketOrderService.payOrder(1L, created.getOrderId()))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        exception -> assertThat(exception.getErrorCode())
+                                .isEqualTo(ErrorCode.ORDER_EXPIRED));
+        assertThat(ticketOrderMapper.selectById(created.getOrderId()).getStatus())
+                .isEqualTo("UNPAID");
+        assertThat(queryStates()).isEqualTo(held);
+
+        ticketOrderService.cancelOrder(1L, created.getOrderId());
+        assertThatThrownBy(() -> ticketOrderService.payOrder(1L, created.getOrderId()))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        exception -> assertThat(exception.getErrorCode())
+                                .isEqualTo(ErrorCode.ORDER_STATUS_CONFLICT));
+    }
+
+    @Test
+    void partialSeatSaleShouldRollbackAllPaymentChanges() {
+        context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
+        CreateTicketOrderVO created = ticketOrderService.createOrder(
+                1L, lockAndBuildRequest(context).request);
+        ShowtimeSeat inconsistent = queryStates().get(1);
+        inconsistent.setStatus(0);
+        inconsistent.setLockOrderId(null);
+        assertThat(showtimeSeatMapper.updateById(inconsistent)).isEqualTo(1);
+
+        assertThatThrownBy(() -> ticketOrderService.payOrder(1L, created.getOrderId()))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        exception -> assertThat(exception.getErrorCode())
+                                .isEqualTo(ErrorCode.INTERNAL_ERROR));
+
+        assertThat(ticketOrderMapper.selectById(created.getOrderId()).getStatus())
+                .isEqualTo("UNPAID");
+        assertThat(ticketOrderMapper.selectById(created.getOrderId()).getPayTime()).isNull();
+        assertThat(queryStates().get(0).getStatus()).isEqualTo(1);
+        assertThat(queryStates().get(0).getLockOrderId()).isEqualTo(created.getOrderId());
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats()).isZero();
+    }
+
+    @Test
+    void concurrentDuplicatePaymentShouldPreserveFirstPayTime() throws Exception {
+        context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
+        CreateTicketOrderVO created = ticketOrderService.createOrder(
+                1L, lockAndBuildRequest(context).request);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<PayTicketOrderVO> first = executor.submit(() -> {
+                await(start);
+                return ticketOrderService.payOrder(1L, created.getOrderId());
+            });
+            Future<PayTicketOrderVO> second = executor.submit(() -> {
+                await(start);
+                return ticketOrderService.payOrder(1L, created.getOrderId());
+            });
+            start.countDown();
+            assertThat(first.get(10, TimeUnit.SECONDS).getPayTime())
+                    .isEqualTo(second.get(10, TimeUnit.SECONDS).getPayTime());
+        } finally {
+            executor.shutdownNow();
+        }
+
+        assertThat(ticketOrderMapper.selectById(created.getOrderId()).getStatus()).isEqualTo("PAID");
+        assertThat(queryStates()).allSatisfy(state -> {
+            assertThat(state.getStatus()).isEqualTo(2);
+            assertThat(state.getVersion()).isEqualTo(2);
+        });
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats()).isZero();
+    }
+
+    @Test
+    void paymentAndActiveCancellationShouldLeaveOneCoherentFinalState() throws Exception {
+        context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
+        CreateTicketOrderVO created = ticketOrderService.createOrder(
+                1L, lockAndBuildRequest(context).request);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<?> payment = executor.submit(() -> runIgnoringBusinessConflict(
+                    start, () -> ticketOrderService.payOrder(1L, created.getOrderId())));
+            Future<?> cancellation = executor.submit(() -> runIgnoringBusinessConflict(
+                    start, () -> ticketOrderService.cancelOrder(1L, created.getOrderId())));
+            start.countDown();
+            payment.get(10, TimeUnit.SECONDS);
+            cancellation.get(10, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdownNow();
+        }
+
+        TicketOrder finalOrder = ticketOrderMapper.selectById(created.getOrderId());
+        if ("PAID".equals(finalOrder.getStatus())) {
+            assertThat(finalOrder.getPayTime()).isNotNull();
+            assertThat(queryStates()).allSatisfy(state -> {
+                assertThat(state.getStatus()).isEqualTo(2);
+                assertThat(state.getLockOrderId()).isEqualTo(created.getOrderId());
+            });
+            assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats()).isZero();
+        } else {
+            assertThat(finalOrder.getStatus()).isEqualTo("CANCELED");
+            assertThat(finalOrder.getPayTime()).isNull();
+            assertThat(queryStates()).allSatisfy(state -> {
+                assertThat(state.getStatus()).isZero();
+                assertThat(state.getLockOrderId()).isNull();
+            });
+            assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats())
+                    .isEqualTo(2);
+        }
+    }
+
+    @Test
+    void expiredPaymentAndTimeoutCancellationShouldEndCanceledAndAvailable() throws Exception {
+        context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
+        CreateTicketOrderVO created = ticketOrderService.createOrder(
+                1L, lockAndBuildRequest(context).request);
+        TicketOrder expired = new TicketOrder();
+        expired.setId(created.getOrderId());
+        expired.setExpireTime(LocalDateTime.now().minusSeconds(1));
+        assertThat(ticketOrderMapper.updateById(expired)).isEqualTo(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<?> payment = executor.submit(() -> runIgnoringBusinessConflict(
+                    start, () -> ticketOrderService.payOrder(1L, created.getOrderId())));
+            Future<?> timeout = executor.submit(() -> {
+                await(start);
+                cancellationService.cancelExpiredOrder(created.getOrderId());
+            });
+            start.countDown();
+            payment.get(10, TimeUnit.SECONDS);
+            timeout.get(10, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdownNow();
+        }
+
+        TicketOrder finalOrder = ticketOrderMapper.selectById(created.getOrderId());
+        assertThat(finalOrder.getStatus()).isEqualTo("CANCELED");
+        assertThat(finalOrder.getPayTime()).isNull();
+        assertThat(queryStates()).allSatisfy(state -> {
+            assertThat(state.getStatus()).isZero();
+            assertThat(state.getLockOrderId()).isNull();
+        });
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats())
+                .isEqualTo(2);
+    }
+
+    private void runIgnoringBusinessConflict(CountDownLatch start, Runnable action) {
+        await(start);
+        try {
+            action.run();
+        } catch (BusinessException exception) {
+            assertThat(exception.getErrorCode()).isIn(
+                    ErrorCode.ORDER_STATUS_CONFLICT, ErrorCode.ORDER_EXPIRED);
+        }
     }
 
     private void await(CountDownLatch latch) {

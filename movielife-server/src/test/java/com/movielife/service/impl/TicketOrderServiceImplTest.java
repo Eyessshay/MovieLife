@@ -7,6 +7,7 @@ import com.movielife.service.TicketOrderCreationValidator;
 import com.movielife.service.SeatLockService;
 import com.movielife.vo.CreateTicketOrderVO;
 import com.movielife.vo.PageVO;
+import com.movielife.vo.PayTicketOrderVO;
 import com.movielife.vo.TicketOrderDetailVO;
 import com.movielife.vo.TicketOrderListItemVO;
 import org.junit.jupiter.api.BeforeEach;
@@ -42,6 +43,8 @@ class TicketOrderServiceImplTest {
     private TicketOrderQueryService queryService;
     @Mock
     private TicketOrderCancellationService cancellationService;
+    @Mock
+    private TicketOrderPaymentService paymentService;
 
     private TicketOrderServiceImpl service;
     private CreateTicketOrderDTO request;
@@ -50,7 +53,7 @@ class TicketOrderServiceImplTest {
     void setUp() {
         service = new TicketOrderServiceImpl(
                 creationValidator, transactionService, seatLockService,
-                queryService, cancellationService);
+                queryService, cancellationService, paymentService);
         request = new CreateTicketOrderDTO();
         request.setLockToken("lock-token");
     }
@@ -189,6 +192,16 @@ class TicketOrderServiceImplTest {
         service.cancelOrder(1L, 9001L);
 
         verify(cancellationService).cancelOrder(1L, 9001L);
+    }
+
+    @Test
+    void paymentShouldDelegateToTransactionalPaymentService() {
+        PayTicketOrderVO paid = new PayTicketOrderVO();
+        paid.setOrderId(9001L);
+        when(paymentService.payOrder(1L, 9001L)).thenReturn(paid);
+
+        assertThat(service.payOrder(1L, 9001L)).isSameAs(paid);
+        verify(paymentService).payOrder(1L, 9001L);
     }
 
     private TicketOrderCreationContext consumedContext(Long orderId) {

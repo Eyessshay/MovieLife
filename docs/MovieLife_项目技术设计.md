@@ -1613,6 +1613,20 @@ Step 8.8 新增 19 项自动化测试，全量共 275 项，0 failure、0 error�
 
 Step 8.9 新增 10 项自动化测试，全量共 285 项，0 failure、0 error，Maven `clean package` 构建成功。测试覆盖正常超时取消、尚未到期跳过、已取消及已支付跳过、部分座位异常整体回滚、批量扫描筛选、单订单异常隔离，以及主动取消与超时任务并发时座位和余票只恢复一次；真实 MySQL/Redis 集成验证确认订单、座位和余票状态正确，扫描前后 Redis 临时锁集合保持不变。测试订单、明细、场次座位和 Redis 临时锁均已清理，本 Step 至此冻结。
 
+### 5.10 Step 8.10：模拟支付与座位售出
+
+正式开放 `POST /api/orders/{id}/pay`，不接收请求体或支付参数，当前只模拟支付成功。Controller 仅传递登录用户和订单 ID，返回包含 `orderId`、`status`、`payTime` 的 `PayTicketOrderVO`；订单不存在或不属于当前用户统一返回 `ORDER_NOT_FOUND`。`PAID` 重复支付直接返回原始 `payTime`，`CANCELED`、`REFUNDED` 等状态返回 `ORDER_STATUS_CONFLICT`，`UNPAID` 订单在锁行后的事务内时间已经到期时返回 `ORDER_EXPIRED`，不在支付事务中顺手取消订单。
+
+支付逻辑隔离在 `TicketOrderPaymentService` 的独立 MySQL 事务中。事务先以 `SELECT ... FOR UPDATE` 锁定订单行并重新校验归属、状态与 `expire_time>payTime`；随后一次查询全部订单明细，使用单条条件 UPDATE 按当前 showtime、完整 seatId 集合、`status=HELD_BY_UNPAID_ORDER` 和 `lock_order_id=当前订单` 将全部座位更新为 `SOLD`，递增 `version` 并保留 `lock_order_id`。影响行数必须等于明细数，否则订单与全部座位变化整体回滚。
+
+座位全部售出后，以 `id + status=UNPAID + expire_time>payTime` 条件将订单更新为 `PAID` 并写入秒精度 `pay_time`，影响行数必须为 1。创建 UNPAID 订单时已经扣减余票，因此支付事务不依赖 `ShowtimeMapper`，不修改 `available_seats`；同时不生成 `ticketCode`、不改变 `ticket_status`，也不依赖或操作 Redis。
+
+支付、主动取消和超时取消使用同一个订单行锁作为串行化边界：双支付只有首个请求推进状态，后续请求幂等读取首次支付时间；支付与取消竞争后只可能得到 `PAID + SOLD + lock_order_id保留` 或 `CANCELED + AVAILABLE + lock_order_id清空`。支付与超时取消在真正获得锁后再次判断状态和截止时间，过期订单不会被支付覆盖。
+
+本 Step 不接入第三方支付平台，不生成票码，不实现出票、退款或 Redis Stream。
+
+Step 8.10 新增 21 项自动化测试，全量共 306 项，0 failure、0 error，Maven `clean package` 构建成功。测试覆盖正常支付、重复支付保留首次 `payTime`、过期与非法状态拒绝、座位异常整体回滚、双支付并发、支付与主动取消并发、支付与超时取消并发，以及真实 HTTP 登录、锁座、创建、支付、详情和 Seat Map 闭环；支付前后 `available_seats` 与 Redis 临时锁集合均保持不变，订单明细仍未生成票码。测试订单、明细、场次座位和 Redis 临时锁均已清理，本 Step 至此冻结。
+
 ## 6. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：

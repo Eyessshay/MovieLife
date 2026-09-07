@@ -35,4 +35,10 @@ public interface TicketOrderMapper extends BaseMapper<TicketOrder> {
             "ORDER BY expire_time ASC, id ASC LIMIT #{limit}")
     List<Long> selectExpiredUnpaidOrderIds(@Param("now") LocalDateTime now,
                                            @Param("limit") Integer limit);
+
+    @Update("UPDATE tb_ticket_order SET status = 'PAID', pay_time = #{payTime} " +
+            "WHERE id = #{orderId} AND status = 'UNPAID' " +
+            "AND expire_time > #{payTime}")
+    int payUnpaidOrder(@Param("orderId") Long orderId,
+                       @Param("payTime") LocalDateTime payTime);
 }

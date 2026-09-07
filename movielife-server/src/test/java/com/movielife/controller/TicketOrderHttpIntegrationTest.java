@@ -383,6 +383,83 @@ class TicketOrderHttpIntegrationTest {
         }
     }
 
+    @Test
+    void completeHttpPaymentFlowShouldPayOnceSellSeatsAndKeepAvailability() throws Exception {
+        LoginSession owner = login("13800000001", "345678");
+        LoginSession anotherUser = login("13800000002", "456789");
+        String seatJson = selectedSeatIds.get(0) + "," + selectedSeatIds.get(1);
+        ResponseEntity<String> lockResponse = post(
+                "/api/showtimes/" + showtimeId + "/seats/lock",
+                "{\"seatIds\":[" + seatJson + "]}", owner.token);
+        assertThat(lockResponse.getStatusCodeValue()).isEqualTo(200);
+        String lockToken = json(lockResponse).path("data").path("lockToken").asText();
+        lockTokens.add(lockToken);
+
+        String orderBody = "{\"showtimeId\":" + showtimeId
+                + ",\"seatIds\":[" + seatJson + "],\"lockToken\":\"" + lockToken + "\"}";
+        ResponseEntity<String> createResponse = post("/api/orders", orderBody, owner.token);
+        assertThat(createResponse.getStatusCodeValue()).isEqualTo(200);
+        long orderId = json(createResponse).path("data").path("orderId").asLong();
+        int availableAfterCreate = showtimeMapper.selectById(showtimeId).getAvailableSeats();
+        Set<String> redisKeysBeforePayment = new LinkedHashSet<>(
+                redisTemplate.keys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*"));
+
+        ResponseEntity<String> payment = post(
+                "/api/orders/" + orderId + "/pay", null, owner.token);
+
+        assertThat(payment.getStatusCodeValue()).isEqualTo(200);
+        JsonNode paidBody = json(payment).path("data");
+        assertThat(paidBody.path("orderId").asLong()).isEqualTo(orderId);
+        assertThat(paidBody.path("status").asText()).isEqualTo("PAID");
+        LocalDateTime payTime = LocalDateTime.parse(paidBody.path("payTime").asText());
+        TicketOrder paidOrder = ticketOrderMapper.selectById(orderId);
+        assertThat(paidOrder.getStatus()).isEqualTo("PAID");
+        assertThat(paidOrder.getPayTime()).isEqualTo(payTime);
+        assertThat(showtimeSeatMapper.selectList(new LambdaQueryWrapper<ShowtimeSeat>()
+                .eq(ShowtimeSeat::getShowtimeId, showtimeId)
+                .in(ShowtimeSeat::getSeatId, selectedSeatIds))).allSatisfy(state -> {
+                    assertThat(state.getStatus()).isEqualTo(2);
+                    assertThat(state.getLockOrderId()).isEqualTo(orderId);
+                });
+        assertThat(showtimeMapper.selectById(showtimeId).getAvailableSeats())
+                .isEqualTo(availableAfterCreate);
+        assertThat(new LinkedHashSet<>(redisTemplate.keys(
+                RedisConstants.SEAT_LOCK_KEY_PREFIX + "*"))).isEqualTo(redisKeysBeforePayment);
+        assertThat(ticketOrderItemMapper.selectList(new LambdaQueryWrapper<TicketOrderItem>()
+                .eq(TicketOrderItem::getOrderId, orderId))).allSatisfy(item -> {
+                    assertThat(item.getTicketCode()).isNull();
+                    assertThat(item.getTicketStatus()).isZero();
+                });
+
+        ResponseEntity<String> repeated = post(
+                "/api/orders/" + orderId + "/pay", null, owner.token);
+        assertThat(repeated.getStatusCodeValue()).isEqualTo(200);
+        assertThat(LocalDateTime.parse(json(repeated).path("data").path("payTime").asText()))
+                .isEqualTo(payTime);
+        assertThat(showtimeMapper.selectById(showtimeId).getAvailableSeats())
+                .isEqualTo(availableAfterCreate);
+
+        ResponseEntity<String> paidDetail = get("/api/orders/" + orderId, owner.token);
+        assertThat(paidDetail.getStatusCodeValue()).isEqualTo(200);
+        assertThat(json(paidDetail).path("data").path("status").asText()).isEqualTo("PAID");
+        assertThat(LocalDateTime.parse(json(paidDetail).path("data").path("payTime").asText()))
+                .isEqualTo(payTime);
+
+        ResponseEntity<String> seatMap = get(
+                "/api/showtimes/" + showtimeId + "/seats", owner.token);
+        for (JsonNode seat : json(seatMap).path("data").path("seats")) {
+            if (selectedSeatIds.contains(seat.path("seatId").asLong())) {
+                assertThat(seat.path("status").asInt()).isEqualTo(2);
+            }
+        }
+
+        ResponseEntity<String> hiddenForeignPayment = post(
+                "/api/orders/" + orderId + "/pay", null, anotherUser.token);
+        assertThat(hiddenForeignPayment.getStatusCodeValue()).isEqualTo(404);
+        assertThat(json(hiddenForeignPayment).path("code").asText())
+                .isEqualTo("ORDER_NOT_FOUND");
+    }
+
     private Long insertHistoricalOrder(Long userId, String status, int daysOffset) {
         TicketOrder order = new TicketOrder();
         order.setUserId(userId);

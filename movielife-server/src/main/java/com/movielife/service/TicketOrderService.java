@@ -3,6 +3,7 @@ package com.movielife.service;
 import com.movielife.dto.CreateTicketOrderDTO;
 import com.movielife.vo.CreateTicketOrderVO;
 import com.movielife.vo.PageVO;
+import com.movielife.vo.PayTicketOrderVO;
 import com.movielife.vo.TicketOrderDetailVO;
 import com.movielife.vo.TicketOrderListItemVO;
 
@@ -16,4 +17,6 @@ public interface TicketOrderService {
     TicketOrderDetailVO queryOrderDetail(Long userId, Long orderId);
 
     void cancelOrder(Long userId, Long orderId);
+
+    PayTicketOrderVO payOrder(Long userId, Long orderId);
 }

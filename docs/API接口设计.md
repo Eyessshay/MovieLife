@@ -282,7 +282,7 @@ Redis 5 分钟 `lockExpireTime` 只决定能否首次创建订单。订单成功
 
 若并发创建命中 `uk_order_lock_token`，当前失败事务必须先回滚，再在事务外或新事务中按 `lockToken` 查询既有订单，校验 `userId`、`showtimeId` 和规范化 `seatIds` 后返回原订单；不得在已经被标记为 rollback-only 的事务中继续查询并返回。
 
-当前实现进度截至阶段 8 Step 8.9：`POST /api/orders` 已正式开放，要求登录并统一返回 HTTP 200 的 `Result<CreateTicketOrderVO>`；`userId` 只从服务端登录上下文获取，请求体不能提交用户、金额、状态、订单 ID 或过期时间。上述 MySQL 创建事务、唯一 token 冲突后的事务外幂等恢复，以及 COMMIT 后复用阶段 7 Lua 的 Redis 条件清理已经完整接入 HTTP 链路；订单 ID 沿用数据库自增策略。清理最多同步尝试两次，失败只记录已提交订单的上下文并继续返回成功；同 token HTTP 重试在 Redis Key 已删除后仍根据 MySQL 返回原订单，缺失 Key 按成功处理，其他 token 拥有的 seatKey 不会被删除。
+当前实现进度截至阶段 8 Step 8.10：`POST /api/orders` 已正式开放，要求登录并统一返回 HTTP 200 的 `Result<CreateTicketOrderVO>`；`userId` 只从服务端登录上下文获取，请求体不能提交用户、金额、状态、订单 ID 或过期时间。上述 MySQL 创建事务、唯一 token 冲突后的事务外幂等恢复，以及 COMMIT 后复用阶段 7 Lua 的 Redis 条件清理已经完整接入 HTTP 链路；订单 ID 沿用数据库自增策略。清理最多同步尝试两次，失败只记录已提交订单的上下文并继续返回成功；同 token HTTP 重试在 Redis Key 已删除后仍根据 MySQL 返回原订单，缺失 Key 按成功处理，其他 token 拥有的 seatKey 不会被删除。
 
 创建订单当前可能返回的业务错误包括：`400 INVALID_PARAM`、`400 INVALID_LOCK_TOKEN`、`403 LOCK_NOT_OWNED`、`403 ORDER_NOT_OWNED`、`404 SHOWTIME_NOT_FOUND`、`409 SEAT_NOT_AVAILABLE`、`409 ORDER_REQUEST_MISMATCH` 以及不暴露内部数据细节的 `500 INTERNAL_ERROR`。首次创建与幂等重试均返回 HTTP 200 和相同响应结构。
 
@@ -306,6 +306,12 @@ Redis 5 分钟 `lockExpireTime` 只决定能否首次创建订单。订单成功
 
 扫描后已经取消、已经支付、尚未到期或已不存在的订单直接跳过。单个订单因明细、座位归属或余票一致性异常而回滚时，只记录该订单失败并继续处理本批其他订单；任务本身不持有整批事务。自动超时完全以 MySQL 为准，不读取或写入 Redis，也不会创建新的 `seat:lock:*`。
 
+`POST /api/orders/{id}/pay` 已开放为当前阶段的模拟支付接口，必须登录且不接收支付参数。订单不存在或不属于当前用户统一返回 `404 ORDER_NOT_FOUND`；只有尚未超过支付截止时间的 `UNPAID` 订单可以支付，`expire_time<=事务内当前时间` 返回 `409 ORDER_EXPIRED`，`CANCELED`、`REFUNDED` 等状态返回 `409 ORDER_STATUS_CONFLICT`。已经 `PAID` 的订单幂等返回首次支付结果，不重复修改座位或 `pay_time`。
+
+支付响应 `PayTicketOrderVO` 包含 `orderId`、`status=PAID` 和 `payTime`。支付事务以 `SELECT ... FOR UPDATE` 锁定订单行，一次读取全部订单明细，再按 `showtime_id + seatIds + status=HELD_BY_UNPAID_ORDER + lock_order_id=当前订单` 批量将座位更新为 `SOLD`、递增版本并保留 `lock_order_id`；座位影响行数必须等于订单明细数，随后以 `id + status=UNPAID + expire_time>payTime` 条件写入 `PAID` 和 `pay_time`。任一步异常均整体回滚。
+
+创建订单时已经扣减 `available_seats`，因此支付时不再修改余票计数。支付不生成 `ticketCode`、不改变 `ticket_status`，也不读取或写入 Redis。订单行锁使双支付、支付与主动取消、支付与超时取消串行竞争，最终只能形成 `PAID + SOLD` 或 `CANCELED + AVAILABLE` 的一致状态。
+
 支付回调和退款回调预留内部接口：
 
 ```bash
@@ -313,7 +319,7 @@ POST /api/payment/notify               # 支付渠道异步通知
 POST /api/refund/notify                # 退款渠道异步通知
 ```
 
-客户端不得直接修改订单状态。订单状态暂定为 `UNPAID`、`PAID`、`CANCELED`、`REFUNDED`；支付、取消、退款接口必须校验状态机和幂等性。
+客户端不得直接修改订单状态。订单状态暂定为 `UNPAID`、`PAID`、`CANCELED`、`REFUNDED`；当前模拟支付与主动取消已经按状态机和幂等规则实现，真实支付平台、退款和出票仍留待后续阶段。
 
 订单明细继续采用“一座一票”：`tb_ticket_order_item.ticket_code` 和 `ticket_status` 属于具体座位明细，`ticket_code` 在支付成功后的出票阶段生成。当前单场次订单通过 `order.showtime_id + item.seat_id` 唯一定位 `ShowtimeSeat`，不额外引入 `showtime_seat_id`。
 

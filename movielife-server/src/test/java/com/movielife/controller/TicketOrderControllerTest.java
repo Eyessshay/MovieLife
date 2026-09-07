@@ -7,6 +7,7 @@ import com.movielife.exception.ErrorCode;
 import com.movielife.service.TicketOrderService;
 import com.movielife.vo.CreateTicketOrderVO;
 import com.movielife.vo.PageVO;
+import com.movielife.vo.PayTicketOrderVO;
 import com.movielife.vo.TicketOrderDetailVO;
 import com.movielife.vo.TicketOrderItemVO;
 import com.movielife.vo.TicketOrderListItemVO;
@@ -332,6 +333,65 @@ class TicketOrderControllerTest {
                         .header("Authorization", AUTHORIZATION))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.code").value("ORDER_STATUS_CONFLICT"));
+    }
+
+    @Test
+    void shouldPayCurrentUsersOrderAndReturnPaymentResult() throws Exception {
+        PayTicketOrderVO paid = new PayTicketOrderVO();
+        paid.setOrderId(9001L);
+        paid.setStatus("PAID");
+        paid.setPayTime(LocalDateTime.of(2026, 9, 7, 11, 0));
+        when(ticketOrderService.payOrder(1L, 9001L)).thenReturn(paid);
+
+        mockMvc.perform(post("/api/orders/9001/pay")
+                        .header("Authorization", AUTHORIZATION))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("OK"))
+                .andExpect(jsonPath("$.data.orderId").value(9001))
+                .andExpect(jsonPath("$.data.status").value("PAID"))
+                .andExpect(jsonPath("$.data.payTime").value("2026-09-07T11:00:00"));
+
+        verify(ticketOrderService).payOrder(1L, 9001L);
+    }
+
+    @Test
+    void paymentShouldRequireAuthentication() throws Exception {
+        mockMvc.perform(post("/api/orders/9001/pay"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("UNAUTHORIZED"));
+
+        verify(ticketOrderService, never()).payOrder(any(), any());
+    }
+
+    @Test
+    void invalidPaymentOrderIdShouldReturnBadRequest() throws Exception {
+        doThrow(new BusinessException(ErrorCode.INVALID_ID))
+                .when(ticketOrderService).payOrder(1L, 0L);
+
+        mockMvc.perform(post("/api/orders/0/pay")
+                        .header("Authorization", AUTHORIZATION))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_ID"));
+    }
+
+    @Test
+    void paymentBusinessErrorsShouldUseStableHttpMappings() throws Exception {
+        doThrow(new BusinessException(ErrorCode.ORDER_NOT_FOUND))
+                .when(ticketOrderService).payOrder(1L, 9001L);
+        doThrow(new BusinessException(ErrorCode.ORDER_STATUS_CONFLICT))
+                .when(ticketOrderService).payOrder(1L, 9002L);
+        doThrow(new BusinessException(ErrorCode.ORDER_EXPIRED))
+                .when(ticketOrderService).payOrder(1L, 9003L);
+
+        mockMvc.perform(post("/api/orders/9001/pay").header("Authorization", AUTHORIZATION))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("ORDER_NOT_FOUND"));
+        mockMvc.perform(post("/api/orders/9002/pay").header("Authorization", AUTHORIZATION))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("ORDER_STATUS_CONFLICT"));
+        mockMvc.perform(post("/api/orders/9003/pay").header("Authorization", AUTHORIZATION))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("ORDER_EXPIRED"));
     }
 
     private void assertBadRequest(String body) throws Exception {

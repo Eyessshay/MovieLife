@@ -10,6 +10,7 @@ import com.movielife.service.TicketOrderService;
 import com.movielife.service.SeatLockService;
 import com.movielife.vo.CreateTicketOrderVO;
 import com.movielife.vo.PageVO;
+import com.movielife.vo.PayTicketOrderVO;
 import com.movielife.vo.TicketOrderDetailVO;
 import com.movielife.vo.TicketOrderListItemVO;
 import lombok.RequiredArgsConstructor;
@@ -29,6 +30,7 @@ public class TicketOrderServiceImpl implements TicketOrderService {
     private final SeatLockService seatLockService;
     private final TicketOrderQueryService queryService;
     private final TicketOrderCancellationService cancellationService;
+    private final TicketOrderPaymentService paymentService;
 
     @Override
     public CreateTicketOrderVO createOrder(Long userId, CreateTicketOrderDTO dto) {
@@ -68,6 +70,11 @@ public class TicketOrderServiceImpl implements TicketOrderService {
     @Override
     public void cancelOrder(Long userId, Long orderId) {
         cancellationService.cancelOrder(userId, orderId);
+    }
+
+    @Override
+    public PayTicketOrderVO payOrder(Long userId, Long orderId) {
+        return paymentService.payOrder(userId, orderId);
     }
 
     private void cleanupRedisBestEffort(Long orderId, TicketOrderCreationContext context) {

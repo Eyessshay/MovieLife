@@ -7,6 +7,7 @@ import com.movielife.service.TicketOrderService;
 import com.movielife.utils.UserHolder;
 import com.movielife.vo.CreateTicketOrderVO;
 import com.movielife.vo.PageVO;
+import com.movielife.vo.PayTicketOrderVO;
 import com.movielife.vo.TicketOrderDetailVO;
 import com.movielife.vo.TicketOrderListItemVO;
 import lombok.RequiredArgsConstructor;
@@ -54,5 +55,11 @@ public class TicketOrderController {
     public Result<Void> cancelOrder(@PathVariable Long id) {
         ticketOrderService.cancelOrder(UserHolder.getUserId(), id);
         return Result.ok();
+    }
+
+    @PostMapping("/{id}/pay")
+    @LoginRequired
+    public Result<PayTicketOrderVO> payOrder(@PathVariable Long id) {
+        return Result.ok(ticketOrderService.payOrder(UserHolder.getUserId(), id));
     }
 }

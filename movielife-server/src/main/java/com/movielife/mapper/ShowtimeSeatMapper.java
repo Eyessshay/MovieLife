@@ -40,4 +40,19 @@ public interface ShowtimeSeatMapper extends BaseMapper<ShowtimeSeat> {
     int releaseSeatsByOrder(@Param("showtimeId") Long showtimeId,
                             @Param("seatIds") List<Long> seatIds,
                             @Param("orderId") Long orderId);
+
+    @Update("<script>" +
+            "UPDATE tb_showtime_seat " +
+            "SET status = 2, version = version + 1 " +
+            "WHERE showtime_id = #{showtimeId} " +
+            "AND seat_id IN " +
+            "<foreach collection='seatIds' item='seatId' open='(' separator=',' close=')'>" +
+            "#{seatId}" +
+            "</foreach> " +
+            "AND status = 1 " +
+            "AND lock_order_id = #{orderId}" +
+            "</script>")
+    int markSeatsSoldByOrder(@Param("showtimeId") Long showtimeId,
+                             @Param("seatIds") List<Long> seatIds,
+                             @Param("orderId") Long orderId);
 }
