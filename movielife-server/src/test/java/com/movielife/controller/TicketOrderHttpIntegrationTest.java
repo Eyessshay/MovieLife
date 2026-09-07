@@ -458,6 +458,38 @@ class TicketOrderHttpIntegrationTest {
         assertThat(hiddenForeignPayment.getStatusCodeValue()).isEqualTo(404);
         assertThat(json(hiddenForeignPayment).path("code").asText())
                 .isEqualTo("ORDER_NOT_FOUND");
+
+        List<ShowtimeSeat> beforeIssueSeats = showtimeSeatMapper.selectList(
+                new LambdaQueryWrapper<ShowtimeSeat>().eq(ShowtimeSeat::getShowtimeId, showtimeId)
+                        .orderByAsc(ShowtimeSeat::getId));
+        TicketOrder beforeIssueOrder = ticketOrderMapper.selectById(orderId);
+        ResponseEntity<String> issue = post("/api/orders/" + orderId + "/issue", null, owner.token);
+        assertThat(issue.getStatusCodeValue()).isEqualTo(200);
+        JsonNode tickets = json(issue).path("data");
+        assertThat(tickets).hasSize(2);
+        Set<String> codes = new LinkedHashSet<>();
+        for (JsonNode ticket : tickets) {
+            assertThat(ticket.path("ticketCode").asText()).matches("[0-9a-f]{32}");
+            assertThat(ticket.path("ticketStatus").asInt()).isEqualTo(1);
+            codes.add(ticket.path("ticketCode").asText());
+        }
+        assertThat(codes).hasSize(2);
+        ResponseEntity<String> repeatedIssue = post("/api/orders/" + orderId + "/issue", null, owner.token);
+        assertThat(repeatedIssue.getStatusCodeValue()).isEqualTo(200);
+        assertThat(json(repeatedIssue).path("data")).isEqualTo(tickets);
+        ResponseEntity<String> issuedDetail = get("/api/orders/" + orderId, owner.token);
+        for (JsonNode item : json(issuedDetail).path("data").path("items")) {
+            assertThat(codes).contains(item.path("ticketCode").asText());
+            assertThat(item.path("ticketStatus").asInt()).isEqualTo(1);
+        }
+        assertThat(post("/api/orders/" + orderId + "/issue", null, anotherUser.token)
+                .getStatusCodeValue()).isEqualTo(404);
+        assertThat(ticketOrderMapper.selectById(orderId)).isEqualTo(beforeIssueOrder);
+        assertThat(showtimeSeatMapper.selectList(new LambdaQueryWrapper<ShowtimeSeat>()
+                .eq(ShowtimeSeat::getShowtimeId, showtimeId).orderByAsc(ShowtimeSeat::getId)))
+                .isEqualTo(beforeIssueSeats);
+        assertThat(showtimeMapper.selectById(showtimeId).getAvailableSeats()).isEqualTo(availableAfterCreate);
+        assertThat(redisTemplate.keys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*")).isEqualTo(redisKeysBeforePayment);
     }
 
     private Long insertHistoricalOrder(Long userId, String status, int daysOffset) {

@@ -45,6 +45,8 @@ class TicketOrderServiceImplTest {
     private TicketOrderCancellationService cancellationService;
     @Mock
     private TicketOrderPaymentService paymentService;
+    @Mock
+    private TicketOrderIssuanceService issuanceService;
 
     private TicketOrderServiceImpl service;
     private CreateTicketOrderDTO request;
@@ -53,7 +55,7 @@ class TicketOrderServiceImplTest {
     void setUp() {
         service = new TicketOrderServiceImpl(
                 creationValidator, transactionService, seatLockService,
-                queryService, cancellationService, paymentService);
+                queryService, cancellationService, paymentService, issuanceService);
         request = new CreateTicketOrderDTO();
         request.setLockToken("lock-token");
     }

@@ -70,6 +70,7 @@ class TicketOrderTransactionIntegrationTest {
     @Autowired private TicketOrderMapper ticketOrderMapper;
     @Autowired private TicketOrderItemMapper ticketOrderItemMapper;
     @Autowired private TicketOrderCancellationService cancellationService;
+    @Autowired private org.springframework.transaction.PlatformTransactionManager transactionManager;
 
     private final Set<String> cleanupKeys = new LinkedHashSet<>();
     private TestContext context;
@@ -645,6 +646,116 @@ class TicketOrderTransactionIntegrationTest {
             assertThat(exception.getErrorCode()).isIn(
                     ErrorCode.ORDER_STATUS_CONFLICT, ErrorCode.ORDER_EXPIRED);
         }
+    }
+
+    @Test
+    void issuanceShouldBeUniqueIdempotentAndLeaveOrderSeatsAndCounterUnchanged() {
+        Long id = createPaidOrderForIssuance();
+        TicketOrder before = ticketOrderMapper.selectById(id);
+        List<ShowtimeSeat> seats = queryStates();
+        Showtime showtime = showtimeMapper.selectById(context.showtime.getId());
+        java.util.List<com.movielife.vo.IssueTicketVO> first = ticketOrderService.issueTickets(1L, id);
+        assertThat(first).hasSize(2);
+        assertThat(first).extracting(com.movielife.vo.IssueTicketVO::getTicketCode).doesNotHaveDuplicates();
+        assertThat(first).allSatisfy(ticket -> {
+            assertThat(ticket.getTicketCode()).matches("[0-9a-f]{32}");
+            assertThat(ticket.getTicketStatus()).isEqualTo(1);
+        });
+        assertThat(ticketOrderService.issueTickets(1L, id)).isEqualTo(first);
+        assertThat(ticketOrderMapper.selectById(id)).isEqualTo(before);
+        assertThat(queryStates()).isEqualTo(seats);
+        assertThat(showtimeMapper.selectById(context.showtime.getId())).isEqualTo(showtime);
+    }
+
+    @Test
+    void issuanceShouldCompletePartialTicketsAndPreserveExistingCode() {
+        Long id = createPaidOrderForIssuance();
+        List<TicketOrderItem> items = issuanceItems(id);
+        TicketOrderItem issued = items.get(0);
+        issued.setTicketCode(java.util.UUID.randomUUID().toString().replace("-", ""));
+        issued.setTicketStatus(1);
+        ticketOrderItemMapper.updateById(issued);
+        ticketOrderService.issueTickets(1L, id);
+        List<TicketOrderItem> after = issuanceItems(id);
+        assertThat(after.get(0).getTicketCode()).isEqualTo(issued.getTicketCode());
+        assertThat(after).allSatisfy(item -> {
+            assertThat(item.getTicketStatus()).isEqualTo(1);
+            assertThat(item.getTicketCode()).isNotBlank();
+        });
+    }
+
+    @Test
+    void issuanceShouldRejectInconsistentDetailsBeforeAnyWrite() {
+        Long id = createPaidOrderForIssuance();
+        TicketOrderItem invalid = issuanceItems(id).get(1);
+        invalid.setTicketCode(java.util.UUID.randomUUID().toString());
+        ticketOrderItemMapper.updateById(invalid);
+        List<TicketOrderItem> before = issuanceItems(id);
+        assertThatThrownBy(() -> ticketOrderService.issueTickets(1L, id))
+                .isInstanceOfSatisfying(BusinessException.class, exception ->
+                        assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.INTERNAL_ERROR));
+        assertThat(issuanceItems(id)).isEqualTo(before);
+    }
+
+    @Test
+    void issuanceShouldRejectOtherUsersAndEveryNonPaidState() {
+        Long id = createPaidOrderForIssuance();
+        assertThatThrownBy(() -> ticketOrderService.issueTickets(2L, id))
+                .isInstanceOfSatisfying(BusinessException.class, exception ->
+                        assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.ORDER_NOT_FOUND));
+        for (String status : Arrays.asList("UNPAID", "CANCELED", "REFUNDED")) {
+            TicketOrder update = new TicketOrder();
+            update.setId(id);
+            update.setStatus(status);
+            ticketOrderMapper.updateById(update);
+            assertThatThrownBy(() -> ticketOrderService.issueTickets(1L, id))
+                    .isInstanceOfSatisfying(BusinessException.class, exception ->
+                            assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.ORDER_STATUS_CONFLICT));
+        }
+        assertThat(issuanceItems(id)).allSatisfy(item -> assertThat(item.getTicketCode()).isNull());
+    }
+
+    @Test
+    void concurrentIssuanceShouldReturnSameCodes() throws Exception {
+        Long id = createPaidOrderForIssuance();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<?> first = executor.submit(() -> { await(start); return ticketOrderService.issueTickets(1L, id); });
+            Future<?> second = executor.submit(() -> { await(start); return ticketOrderService.issueTickets(1L, id); });
+            start.countDown();
+            assertThat(first.get(10, TimeUnit.SECONDS)).isEqualTo(second.get(10, TimeUnit.SECONDS));
+            assertThat(issuanceItems(id)).extracting(TicketOrderItem::getTicketCode).doesNotHaveDuplicates();
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void issuanceBatchUniqueConflictShouldLeaveEveryDetailUnchanged() {
+        Long id = createPaidOrderForIssuance();
+        List<TicketOrderItem> before = issuanceItems(id);
+        List<TicketOrderItem> updates = issuanceItems(id);
+        String duplicate = java.util.UUID.randomUUID().toString().replace("-", "");
+        updates.forEach(item -> item.setTicketCode(duplicate));
+        org.springframework.transaction.support.TransactionTemplate transaction =
+                new org.springframework.transaction.support.TransactionTemplate(transactionManager);
+        assertThatThrownBy(() -> transaction.execute(status ->
+                ticketOrderItemMapper.issueBatch(id, updates, 0, 1)))
+                .isInstanceOf(org.springframework.dao.DuplicateKeyException.class);
+        assertThat(issuanceItems(id)).isEqualTo(before);
+    }
+
+    private Long createPaidOrderForIssuance() {
+        context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
+        Long id = ticketOrderService.createOrder(1L, lockAndBuildRequest(context).request).getOrderId();
+        ticketOrderService.payOrder(1L, id);
+        return id;
+    }
+
+    private List<TicketOrderItem> issuanceItems(Long id) {
+        return ticketOrderItemMapper.selectList(new LambdaQueryWrapper<TicketOrderItem>()
+                .eq(TicketOrderItem::getOrderId, id).orderByAsc(TicketOrderItem::getSeatId));
     }
 
     private void await(CountDownLatch latch) {

@@ -6,6 +6,8 @@ import com.movielife.interceptor.LoginRequired;
 import com.movielife.service.TicketOrderService;
 import com.movielife.utils.UserHolder;
 import com.movielife.vo.CreateTicketOrderVO;
+import com.movielife.vo.IssueTicketVO;
+import java.util.List;
 import com.movielife.vo.PageVO;
 import com.movielife.vo.PayTicketOrderVO;
 import com.movielife.vo.TicketOrderDetailVO;
@@ -27,6 +29,12 @@ import javax.validation.Valid;
 public class TicketOrderController {
 
     private final TicketOrderService ticketOrderService;
+
+    @PostMapping("/{id}/issue")
+    @LoginRequired
+    public Result<List<IssueTicketVO>> issueTickets(@PathVariable Long id) {
+        return Result.ok(ticketOrderService.issueTickets(UserHolder.getUserId(), id));
+    }
 
     @PostMapping
     @LoginRequired

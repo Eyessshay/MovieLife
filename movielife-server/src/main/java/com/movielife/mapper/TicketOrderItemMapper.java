@@ -5,6 +5,7 @@ import com.movielife.entity.TicketOrderItem;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Update;
 
 import java.util.List;
 
@@ -19,4 +20,17 @@ public interface TicketOrderItemMapper extends BaseMapper<TicketOrderItem> {
             "</foreach>" +
             "</script>")
     int insertBatch(@Param("items") List<TicketOrderItem> items);
+
+    @Update("<script>UPDATE tb_ticket_order_item SET ticket_code = CASE id " +
+            "<foreach collection='items' item='item'>" +
+            "WHEN #{item.id} THEN #{item.ticketCode} " +
+            "</foreach> END, ticket_status = #{issuedStatus} " +
+            "WHERE order_id = #{orderId} AND ticket_code IS NULL " +
+            "AND ticket_status = #{pendingStatus} AND id IN " +
+            "<foreach collection='items' item='item' open='(' separator=',' close=')'>" +
+            "#{item.id}</foreach></script>")
+    int issueBatch(@Param("orderId") Long orderId,
+                   @Param("items") List<TicketOrderItem> items,
+                   @Param("pendingStatus") int pendingStatus,
+                   @Param("issuedStatus") int issuedStatus);
 }

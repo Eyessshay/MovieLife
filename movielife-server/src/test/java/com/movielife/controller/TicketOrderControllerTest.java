@@ -394,6 +394,21 @@ class TicketOrderControllerTest {
                 .andExpect(jsonPath("$.code").value("ORDER_EXPIRED"));
     }
 
+    @Test
+    void issuanceShouldRequireAuthenticationAndMapErrors() throws Exception {
+        mockMvc.perform(post("/api/orders/1/issue")).andExpect(status().isUnauthorized());
+        verify(ticketOrderService, never()).issueTickets(any(), any());
+        doThrow(new BusinessException(ErrorCode.INVALID_ID)).when(ticketOrderService).issueTickets(1L, 0L);
+        doThrow(new BusinessException(ErrorCode.ORDER_NOT_FOUND)).when(ticketOrderService).issueTickets(1L, 1L);
+        doThrow(new BusinessException(ErrorCode.ORDER_STATUS_CONFLICT)).when(ticketOrderService).issueTickets(1L, 2L);
+        mockMvc.perform(post("/api/orders/0/issue").header("Authorization", AUTHORIZATION))
+                .andExpect(status().isBadRequest());
+        mockMvc.perform(post("/api/orders/1/issue").header("Authorization", AUTHORIZATION))
+                .andExpect(status().isNotFound()).andExpect(jsonPath("$.code").value("ORDER_NOT_FOUND"));
+        mockMvc.perform(post("/api/orders/2/issue").header("Authorization", AUTHORIZATION))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.code").value("ORDER_STATUS_CONFLICT"));
+    }
+
     private void assertBadRequest(String body) throws Exception {
         mockMvc.perform(post("/api/orders")
                         .header("Authorization", AUTHORIZATION)

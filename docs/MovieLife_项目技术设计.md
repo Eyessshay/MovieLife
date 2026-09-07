@@ -1627,6 +1627,18 @@ Step 8.9 新增 10 项自动化测试，全量共 285 项，0 failure、0 error�
 
 Step 8.10 新增 21 项自动化测试，全量共 306 项，0 failure、0 error，Maven `clean package` 构建成功。测试覆盖正常支付、重复支付保留首次 `payTime`、过期与非法状态拒绝、座位异常整体回滚、双支付并发、支付与主动取消并发、支付与超时取消并发，以及真实 HTTP 登录、锁座、创建、支付、详情和 Seat Map 闭环；支付前后 `available_seats` 与 Redis 临时锁集合均保持不变，订单明细仍未生成票码。测试订单、明细、场次座位和 Redis 临时锁均已清理，本 Step 至此冻结。
 
+### 5.11 Step 8.11：PAID 订单出票
+
+`POST /api/orders/{id}/issue` 通过登录上下文获取用户，委托独立 `TicketOrderIssuanceService` 事务。使用现有订单 `SELECT ... FOR UPDATE` 串行化双出票请求，校验本人及 PAID 状态，一次查询全部明细并检查票码与状态一致性。冻结票状态沿用 `TicketStatus.PENDING(0)` 和 `VALID(1)`；VALID 即已出票可用。
+
+未出票明细使用 `UUID.randomUUID()` 去掉连字符生成 32 位不可预测票码，一座一票，`uk_ticket_code` 作为全局唯一性兜底。批量 CASE UPDATE 同时限制 `order_id`、待出票明细 ID、`ticket_code IS NULL`、初始状态，严格要求影响行数等于待出票数量。异常或唯一约束冲突传播至事务边界并整体回滚，不吞掉异常。
+
+已有有效票码保持不变，支持部分出票补齐；全部已出票直接幂等返回。异常组合（如票码非空但状态 PENDING）统一拒绝，返回 INTERNAL_ERROR。返回 `List<IssueTicketVO>`，含 seatId、ticketCode、ticketStatus；详情结构直接复用既有字段。出票服务仅依赖订单和明细 Mapper，订单 PAID、ShowtimeSeat SOLD、lock_order_id、available_seats 均不变化，Redis 不参与。
+
+本 Step 不实现真实支付、验票核销、退款或 Redis Stream。
+
+Step 8.11 新增 9 项自动化测试，并扩展真实 HTTP 支付闭环为 create → pay → issue → detail。全量共 315 项，0 failure、0 error、0 skipped，Maven `clean package` 构建成功。验证正常及重复出票、部分补齐、非 PAID 拒绝、用户隔离、异常明细、并发一致性、批量行数不足异常传播和真实 MySQL 唯一冲突回滚。出票前后订单、座位及余票快照一致，Redis 临时锁集合不变，测试数据已清理，本 Step 至此冻结。
+
 ## 6. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：

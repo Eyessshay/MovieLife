@@ -9,6 +9,8 @@ import com.movielife.service.TicketOrderCreationValidator;
 import com.movielife.service.TicketOrderService;
 import com.movielife.service.SeatLockService;
 import com.movielife.vo.CreateTicketOrderVO;
+import com.movielife.vo.IssueTicketVO;
+import java.util.List;
 import com.movielife.vo.PageVO;
 import com.movielife.vo.PayTicketOrderVO;
 import com.movielife.vo.TicketOrderDetailVO;
@@ -31,6 +33,12 @@ public class TicketOrderServiceImpl implements TicketOrderService {
     private final TicketOrderQueryService queryService;
     private final TicketOrderCancellationService cancellationService;
     private final TicketOrderPaymentService paymentService;
+    private final TicketOrderIssuanceService issuanceService;
+
+    @Override
+    public List<IssueTicketVO> issueTickets(Long userId, Long orderId) {
+        return issuanceService.issueTickets(userId, orderId);
+    }
 
     @Override
     public CreateTicketOrderVO createOrder(Long userId, CreateTicketOrderDTO dto) {
