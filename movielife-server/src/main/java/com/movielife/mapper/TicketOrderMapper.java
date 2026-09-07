@@ -7,6 +7,9 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
+import java.time.LocalDateTime;
+import java.util.List;
+
 @Mapper
 public interface TicketOrderMapper extends BaseMapper<TicketOrder> {
 
@@ -20,4 +23,16 @@ public interface TicketOrderMapper extends BaseMapper<TicketOrder> {
             "WHERE id = #{orderId} AND user_id = #{userId} AND status = 'UNPAID'")
     int cancelUnpaidOrder(@Param("orderId") Long orderId,
                           @Param("userId") Long userId);
+
+    @Update("UPDATE tb_ticket_order SET status = 'CANCELED' " +
+            "WHERE id = #{orderId} AND status = 'UNPAID' " +
+            "AND expire_time <= #{now}")
+    int cancelExpiredUnpaidOrder(@Param("orderId") Long orderId,
+                                 @Param("now") LocalDateTime now);
+
+    @Select("SELECT id FROM tb_ticket_order " +
+            "WHERE status = 'UNPAID' AND expire_time <= #{now} " +
+            "ORDER BY expire_time ASC, id ASC LIMIT #{limit}")
+    List<Long> selectExpiredUnpaidOrderIds(@Param("now") LocalDateTime now,
+                                           @Param("limit") Integer limit);
 }

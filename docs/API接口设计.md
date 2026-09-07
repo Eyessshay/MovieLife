@@ -282,7 +282,7 @@ Redis 5 分钟 `lockExpireTime` 只决定能否首次创建订单。订单成功
 
 若并发创建命中 `uk_order_lock_token`，当前失败事务必须先回滚，再在事务外或新事务中按 `lockToken` 查询既有订单，校验 `userId`、`showtimeId` 和规范化 `seatIds` 后返回原订单；不得在已经被标记为 rollback-only 的事务中继续查询并返回。
 
-当前实现进度截至阶段 8 Step 8.7：`POST /api/orders` 已正式开放，要求登录并统一返回 HTTP 200 的 `Result<CreateTicketOrderVO>`；`userId` 只从服务端登录上下文获取，请求体不能提交用户、金额、状态、订单 ID 或过期时间。上述 MySQL 创建事务、唯一 token 冲突后的事务外幂等恢复，以及 COMMIT 后复用阶段 7 Lua 的 Redis 条件清理已经完整接入 HTTP 链路；订单 ID 沿用数据库自增策略。清理最多同步尝试两次，失败只记录已提交订单的上下文并继续返回成功；同 token HTTP 重试在 Redis Key 已删除后仍根据 MySQL 返回原订单，缺失 Key 按成功处理，其他 token 拥有的 seatKey 不会被删除。
+当前实现进度截至阶段 8 Step 8.9：`POST /api/orders` 已正式开放，要求登录并统一返回 HTTP 200 的 `Result<CreateTicketOrderVO>`；`userId` 只从服务端登录上下文获取，请求体不能提交用户、金额、状态、订单 ID 或过期时间。上述 MySQL 创建事务、唯一 token 冲突后的事务外幂等恢复，以及 COMMIT 后复用阶段 7 Lua 的 Redis 条件清理已经完整接入 HTTP 链路；订单 ID 沿用数据库自增策略。清理最多同步尝试两次，失败只记录已提交订单的上下文并继续返回成功；同 token HTTP 重试在 Redis Key 已删除后仍根据 MySQL 返回原订单，缺失 Key 按成功处理，其他 token 拥有的 seatKey 不会被删除。
 
 创建订单当前可能返回的业务错误包括：`400 INVALID_PARAM`、`400 INVALID_LOCK_TOKEN`、`403 LOCK_NOT_OWNED`、`403 ORDER_NOT_OWNED`、`404 SHOWTIME_NOT_FOUND`、`409 SEAT_NOT_AVAILABLE`、`409 ORDER_REQUEST_MISMATCH` 以及不暴露内部数据细节的 `500 INTERNAL_ERROR`。首次创建与幂等重试均返回 HTTP 200 和相同响应结构。
 
@@ -301,6 +301,10 @@ Redis 5 分钟 `lockExpireTime` 只决定能否首次创建订单。订单成功
 取消在独立 MySQL 事务中完成：先以 `SELECT ... FOR UPDATE` 锁定订单行并确认归属与状态，一次查询全部订单明细；随后按 `showtime_id + seatIds + status=HELD_BY_UNPAID_ORDER + lock_order_id=当前订单` 一次批量释放全部座位，恢复 `available_seats`，最后以 `id + user_id + status=UNPAID` 条件更新订单为 `CANCELED`。座位释放数必须等于明细数，余票和订单更新影响行数必须为 1，任一步异常都会整体回滚。余票恢复同时限制不能超过 `total_seats`。
 
 订单行锁与订单状态条件更新共同保证并发重复取消只会执行一次释放；第二个请求在首个事务提交后看到 `CANCELED` 并幂等返回。这也为未来支付事务与取消竞争保留了互斥边界。主动取消只依据数据库真实状态，不因 `expireTime` 已过而拒绝仍为 `UNPAID` 的订单，也不实现自动超时状态修正。取消不读取或写入 `seat:lock:*`，因为释放的是 MySQL 正式订单占用而不是阶段 7 临时锁。
+
+`UNPAID` 订单到达 `expireTime` 后由后台定时任务自动取消，不新增公开 HTTP 接口。任务每分钟限量扫描最多 100 个 `status=UNPAID AND expire_time<=NOW()` 的订单 ID，并按 `expire_time ASC, id ASC` 稳定排序；每个订单在独立事务中重新以 `SELECT ... FOR UPDATE` 锁定并复核状态与到期时间，然后复用主动取消的座位释放和余票恢复逻辑，最终仍写入 `CANCELED`，不新增 `EXPIRED` 状态。
+
+扫描后已经取消、已经支付、尚未到期或已不存在的订单直接跳过。单个订单因明细、座位归属或余票一致性异常而回滚时，只记录该订单失败并继续处理本批其他订单；任务本身不持有整批事务。自动超时完全以 MySQL 为准，不读取或写入 Redis，也不会创建新的 `seat:lock:*`。
 
 支付回调和退款回调预留内部接口：
 

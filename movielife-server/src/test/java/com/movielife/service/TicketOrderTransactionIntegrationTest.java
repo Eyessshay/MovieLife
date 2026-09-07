@@ -28,6 +28,7 @@ import com.movielife.mapper.VenueMapper;
 import com.movielife.utils.UserHolder;
 import com.movielife.vo.CreateTicketOrderVO;
 import com.movielife.vo.SeatLockVO;
+import com.movielife.service.impl.TicketOrderCancellationService;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -67,6 +68,7 @@ class TicketOrderTransactionIntegrationTest {
     @Autowired private ShowtimeSeatMapper showtimeSeatMapper;
     @Autowired private TicketOrderMapper ticketOrderMapper;
     @Autowired private TicketOrderItemMapper ticketOrderItemMapper;
+    @Autowired private TicketOrderCancellationService cancellationService;
 
     private final Set<String> cleanupKeys = new LinkedHashSet<>();
     private TestContext context;
@@ -350,6 +352,97 @@ class TicketOrderTransactionIntegrationTest {
             start.countDown();
             first.get(10, TimeUnit.SECONDS);
             second.get(10, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdownNow();
+        }
+
+        assertThat(ticketOrderMapper.selectById(created.getOrderId()).getStatus())
+                .isEqualTo("CANCELED");
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats())
+                .isEqualTo(2);
+        assertThat(queryStates()).allSatisfy(state -> {
+            assertThat(state.getStatus()).isZero();
+            assertThat(state.getLockOrderId()).isNull();
+            assertThat(state.getVersion()).isEqualTo(2);
+        });
+    }
+
+    @Test
+    void expiredUnpaidOrderShouldBeCanceledByTimeoutTransaction() {
+        context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
+        CreateTicketOrderVO created = ticketOrderService.createOrder(
+                1L, lockAndBuildRequest(context).request);
+        TicketOrder expired = new TicketOrder();
+        expired.setId(created.getOrderId());
+        expired.setExpireTime(LocalDateTime.now().minusSeconds(1));
+        assertThat(ticketOrderMapper.updateById(expired)).isEqualTo(1);
+
+        cancellationService.cancelExpiredOrder(created.getOrderId());
+
+        assertThat(ticketOrderMapper.selectById(created.getOrderId()).getStatus())
+                .isEqualTo("CANCELED");
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats())
+                .isEqualTo(2);
+        assertThat(queryStates()).allSatisfy(state -> {
+            assertThat(state.getStatus()).isZero();
+            assertThat(state.getLockOrderId()).isNull();
+            assertThat(state.getVersion()).isEqualTo(2);
+        });
+    }
+
+    @Test
+    void timeoutTransactionShouldSkipFuturePaidAndCanceledOrders() {
+        context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
+        CreateTicketOrderVO created = ticketOrderService.createOrder(
+                1L, lockAndBuildRequest(context).request);
+        List<ShowtimeSeat> heldBefore = queryStates();
+
+        cancellationService.cancelExpiredOrder(created.getOrderId());
+        assertThat(ticketOrderMapper.selectById(created.getOrderId()).getStatus())
+                .isEqualTo("UNPAID");
+        assertThat(queryStates()).isEqualTo(heldBefore);
+
+        TicketOrder paid = new TicketOrder();
+        paid.setId(created.getOrderId());
+        paid.setStatus("PAID");
+        paid.setExpireTime(LocalDateTime.now().minusMinutes(1));
+        assertThat(ticketOrderMapper.updateById(paid)).isEqualTo(1);
+        cancellationService.cancelExpiredOrder(created.getOrderId());
+        assertThat(ticketOrderMapper.selectById(created.getOrderId()).getStatus()).isEqualTo("PAID");
+        assertThat(queryStates()).isEqualTo(heldBefore);
+
+        TicketOrder canceled = new TicketOrder();
+        canceled.setId(created.getOrderId());
+        canceled.setStatus("CANCELED");
+        assertThat(ticketOrderMapper.updateById(canceled)).isEqualTo(1);
+        cancellationService.cancelExpiredOrder(created.getOrderId());
+        assertThat(queryStates()).isEqualTo(heldBefore);
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats()).isZero();
+    }
+
+    @Test
+    void activeAndTimeoutCancellationShouldCompeteWithoutDoubleRelease() throws Exception {
+        context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
+        CreateTicketOrderVO created = ticketOrderService.createOrder(
+                1L, lockAndBuildRequest(context).request);
+        TicketOrder expired = new TicketOrder();
+        expired.setId(created.getOrderId());
+        expired.setExpireTime(LocalDateTime.now().minusSeconds(1));
+        assertThat(ticketOrderMapper.updateById(expired)).isEqualTo(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<?> active = executor.submit(() -> {
+                await(start);
+                ticketOrderService.cancelOrder(1L, created.getOrderId());
+            });
+            Future<?> timeout = executor.submit(() -> {
+                await(start);
+                cancellationService.cancelExpiredOrder(created.getOrderId());
+            });
+            start.countDown();
+            active.get(10, TimeUnit.SECONDS);
+            timeout.get(10, TimeUnit.SECONDS);
         } finally {
             executor.shutdownNow();
         }

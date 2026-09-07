@@ -7,6 +7,7 @@ import org.junit.jupiter.api.TestInstance;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.core.io.ClassPathResource;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 
@@ -140,7 +141,11 @@ class SeatLockLuaIntegrationTest {
         for (String key : keys) {
             Long ttl = redisTemplate.getExpire(key, TimeUnit.MILLISECONDS);
             assertThat(ttl).isNotNull().isPositive();
-            long actualExpireAtMillis = System.currentTimeMillis() + ttl;
+            Long redisNowMillis = redisTemplate.execute(
+                    (RedisCallback<Long>) connection ->
+                            connection.serverCommands().time(TimeUnit.MILLISECONDS));
+            assertThat(redisNowMillis).isNotNull().isPositive();
+            long actualExpireAtMillis = redisNowMillis + ttl;
             assertThat(Math.abs(actualExpireAtMillis - expectedExpireAtMillis)).isLessThan(1500L);
         }
     }

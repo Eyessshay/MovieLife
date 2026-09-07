@@ -17,6 +17,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.Arrays;
 import java.util.Collections;
+import java.time.LocalDateTime;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -146,6 +147,47 @@ class TicketOrderCancellationServiceTest {
     void invalidOrderIdShouldFailBeforeDatabaseAccess() {
         assertError(() -> service.cancelOrder(1L, 0L), ErrorCode.INVALID_ID);
         verify(ticketOrderMapper, never()).selectByIdForUpdate(any());
+    }
+
+    @Test
+    void expiredUnpaidOrderShouldReuseResourceReleaseAndCancel() {
+        TicketOrder order = order(1L, "UNPAID");
+        order.setExpireTime(LocalDateTime.now().minusMinutes(1));
+        when(ticketOrderMapper.selectByIdForUpdate(9001L)).thenReturn(order);
+        when(ticketOrderItemMapper.selectList(any())).thenReturn(Arrays.asList(
+                item(101L), item(102L)));
+        when(showtimeSeatMapper.releaseSeatsByOrder(
+                1001L, Arrays.asList(101L, 102L), 9001L)).thenReturn(2);
+        when(showtimeMapper.increaseAvailableSeats(1001L, 2)).thenReturn(1);
+        when(ticketOrderMapper.cancelExpiredUnpaidOrder(any(), any())).thenReturn(1);
+
+        service.cancelExpiredOrder(9001L);
+
+        verify(ticketOrderMapper).cancelExpiredUnpaidOrder(any(), any());
+    }
+
+    @Test
+    void timeoutShouldSkipFutureCanceledPaidAndMissingOrders() {
+        TicketOrder future = order(1L, "UNPAID");
+        future.setExpireTime(LocalDateTime.now().plusMinutes(1));
+        TicketOrder canceled = order(1L, "CANCELED");
+        canceled.setExpireTime(LocalDateTime.now().minusMinutes(1));
+        TicketOrder paid = order(1L, "PAID");
+        paid.setExpireTime(LocalDateTime.now().minusMinutes(1));
+        when(ticketOrderMapper.selectByIdForUpdate(9001L)).thenReturn(future);
+        when(ticketOrderMapper.selectByIdForUpdate(9002L)).thenReturn(canceled);
+        when(ticketOrderMapper.selectByIdForUpdate(9003L)).thenReturn(paid);
+        when(ticketOrderMapper.selectByIdForUpdate(9004L)).thenReturn(null);
+
+        service.cancelExpiredOrder(9001L);
+        service.cancelExpiredOrder(9002L);
+        service.cancelExpiredOrder(9003L);
+        service.cancelExpiredOrder(9004L);
+        service.cancelExpiredOrder(0L);
+
+        verify(ticketOrderItemMapper, never()).selectList(any());
+        verify(showtimeSeatMapper, never()).releaseSeatsByOrder(any(), any(), any());
+        verify(ticketOrderMapper, never()).cancelExpiredUnpaidOrder(any(), any());
     }
 
     private TicketOrder order(Long userId, String status) {

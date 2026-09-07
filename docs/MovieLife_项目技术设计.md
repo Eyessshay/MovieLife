@@ -1601,6 +1601,18 @@ Step 8.7 新增 16 项自动化测试，全量共 256 项，0 failure、0 error�
 
 Step 8.8 新增 19 项自动化测试，全量共 275 项，0 failure、0 error，Maven `clean package` 构建成功。正常取消、重复取消、资源隔离、非法状态、全部回滚路径和双线程并发均通过；真实 HTTP 验证完成创建订单、查询详情、主动取消、取消后详情及 Seat Map 闭环。取消后订单明细保持不变，全部座位恢复可用、`lock_order_id` 清空、余票仅恢复一次，Redis 未产生任何订单取消状态。联调数据和 Redis 临时锁均已清理，本 Step 至此冻结。
 
+### 5.9 Step 8.9：UNPAID 订单自动超时取消
+
+应用启用 Spring Scheduling，并新增 `TicketOrderTimeoutJob`。任务默认初始延迟和固定延迟均为 60 秒，每次只查询最多 100 个 `status=UNPAID AND expire_time<=扫描时间` 的订单 ID，按 `expire_time ASC, id ASC` 稳定排序。Job 不开启整批事务，仅负责扫描和逐个调用取消服务；单个订单抛出异常时记录 `orderId` 并继续处理本批其他订单。
+
+超时取消入口在独立 MySQL 事务中以 `SELECT ... FOR UPDATE` 锁定订单行，再以事务内当前时间重新确认订单仍为 `UNPAID` 且 `expire_time<=now`。订单已经 `CANCELED`、已经 `PAID`、尚未到期、缺少过期时间或已不存在时直接跳过，不释放座位、不恢复余票，也不抛出影响整批任务的业务异常。
+
+满足超时条件时，复用 Step 8.8 的取消核心：一次读取全部订单明细，按 `showtime_id + seatIds + status=HELD_BY_UNPAID_ORDER + lock_order_id=当前订单` 批量释放座位并严格校验释放行数，同一事务恢复 `available_seats` 且不允许超过 `total_seats`，最后以 `id + status=UNPAID + expire_time<=now` 条件将订单更新为 `CANCELED`。任一步失败均回滚该订单的全部变化。订单行锁保证超时任务与用户主动取消并发时只有一方真正释放资源，另一方读取最终状态后跳过或幂等成功。
+
+自动超时不增加 `EXPIRED` 状态、不新增 HTTP 接口，也不依赖或操作 Redis 临时锁；支付、出票、退款和 Redis Stream 仍不属于本 Step。
+
+Step 8.9 新增 10 项自动化测试，全量共 285 项，0 failure、0 error，Maven `clean package` 构建成功。测试覆盖正常超时取消、尚未到期跳过、已取消及已支付跳过、部分座位异常整体回滚、批量扫描筛选、单订单异常隔离，以及主动取消与超时任务并发时座位和余票只恢复一次；真实 MySQL/Redis 集成验证确认订单、座位和余票状态正确，扫描前后 Redis 临时锁集合保持不变。测试订单、明细、场次座位和 Redis 临时锁均已清理，本 Step 至此冻结。
+
 ## 6. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：

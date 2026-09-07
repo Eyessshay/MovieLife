@@ -14,6 +14,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -43,23 +44,45 @@ public class TicketOrderCancellationService {
             throw new BusinessException(ErrorCode.ORDER_STATUS_CONFLICT);
         }
 
+        releaseOrderResources(order);
+        if (ticketOrderMapper.cancelUnpaidOrder(orderId, userId) != 1) {
+            throw new BusinessException(ErrorCode.ORDER_STATUS_CONFLICT);
+        }
+    }
+
+    @Transactional
+    public void cancelExpiredOrder(Long orderId) {
+        if (orderId == null || orderId <= 0) {
+            return;
+        }
+        TicketOrder order = ticketOrderMapper.selectByIdForUpdate(orderId);
+        LocalDateTime now = LocalDateTime.now();
+        if (order == null
+                || !TicketOrderStatus.UNPAID.getDbValue().equals(order.getStatus())
+                || order.getExpireTime() == null
+                || order.getExpireTime().isAfter(now)) {
+            return;
+        }
+
+        releaseOrderResources(order);
+        if (ticketOrderMapper.cancelExpiredUnpaidOrder(orderId, now) != 1) {
+            throw new BusinessException(ErrorCode.ORDER_STATUS_CONFLICT);
+        }
+    }
+
+    private void releaseOrderResources(TicketOrder order) {
         List<TicketOrderItem> items = ticketOrderItemMapper.selectList(
                 new LambdaQueryWrapper<TicketOrderItem>()
-                        .eq(TicketOrderItem::getOrderId, orderId));
+                        .eq(TicketOrderItem::getOrderId, order.getId()));
         List<Long> seatIds = extractSeatIds(items);
 
         int released = showtimeSeatMapper.releaseSeatsByOrder(
-                order.getShowtimeId(), seatIds, orderId);
+                order.getShowtimeId(), seatIds, order.getId());
         if (released != seatIds.size()) {
             throw new BusinessException(ErrorCode.INTERNAL_ERROR);
         }
-
         if (showtimeMapper.increaseAvailableSeats(order.getShowtimeId(), seatIds.size()) != 1) {
             throw new BusinessException(ErrorCode.INTERNAL_ERROR);
-        }
-
-        if (ticketOrderMapper.cancelUnpaidOrder(orderId, userId) != 1) {
-            throw new BusinessException(ErrorCode.ORDER_STATUS_CONFLICT);
         }
     }
 
