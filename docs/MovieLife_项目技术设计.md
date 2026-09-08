@@ -1649,6 +1649,18 @@ Step 8.11 新增 9 项自动化测试，并扩展真实 HTTP 支付闭环为 cre
 
 Step 8.12 新增 13 项自动化测试，并将真实 HTTP 闭环扩展为 create → pay → issue → refund → detail → Seat Map。全量共 328 项，0 failure、0 error、0 skipped，Maven `clean package` 构建成功。验证正常与重复退款、用户隔离、非 PAID 与已开场拒绝、座位条件异常整体回滚、余票上界保护、并发退款和票码保留；测试结束后订单、明细、座位与 Redis 临时锁均无残留，本 Step 至此冻结。
 
+### 5.13 Step 8.13：阶段 8 订单模块最终冻结
+
+阶段 8 的已完成 HTTP 接口为 `POST /api/orders`、`GET /api/orders`、`GET /api/orders/{id}`、`POST /api/orders/{id}/cancel`、`POST /api/orders/{id}/pay`、`POST /api/orders/{id}/issue` 与 `POST /api/orders/{id}/refund`。订单状态机冻结为：`UNPAID → CANCELED`（主动或超时取消）、`UNPAID → PAID → REFUNDED`，其中已 CANCELED 的支付和退款、已 REFUNDED 的支付均为冲突；已 REFUNDED 的重复退款保持幂等成功。
+
+座位状态与余票规则冻结为：创建订单 `AVAILABLE → HELD_BY_UNPAID_ORDER` 并扣减 `available_seats`；支付 `HELD_BY_UNPAID_ORDER → SOLD`，余票不变；主动取消或超时取消 `HELD_BY_UNPAID_ORDER → AVAILABLE` 并恢复余票；退款 `SOLD → AVAILABLE`、清空 `lock_order_id` 并恢复余票。所有座位批量条件更新均以完整影响行数作为成功条件，递增 `version`；余票更新始终要求 `0 <= available_seats <= total_seats`，任一步异常则回滚整个订单事务。
+
+票券规则冻结为：创建时 `ticketCode=null`、`ticket_status=PENDING(0)`；出票为每张明细生成全局唯一的 32 位 UUID 票码并更新至 `VALID(1)`，重复出票保持票码不变；退款保留票码历史并更新为 `REFUNDED(3)`。`uk_ticket_code`、`uk_order_lock_token`、`uk_order_item_seat(order_id, seat_id)`、非空 `lock_token` 与 `expire_time` 是当前 SQL 和真实数据库共同遵守的关键约束。
+
+Redis 仅承担订单创建前的 5 分钟临时锁资格及数据库提交后的条件清理；订单 `lock_token` 插入成功后成为长期幂等事实，同 token 重试不依赖 Redis。订单查询、主动取消、超时取消、支付、出票和退款均不读取或写入 Redis。订单行锁及状态条件更新串行化并发创建、取消、超时、支付、出票和退款，回归覆盖确认每次竞争仅形成一种合法终态。
+
+本阶段最终不包含第三方支付或回调、Redis Stream/MQ、部分取消或部分退款、退款审核、验票核销及活动票务。阶段 8 的代码与文档在提交 `23fb9a2` 后进入最终验收；本 Step 仅追加冻结记录，不再新增业务能力。
+
 ## 6. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
