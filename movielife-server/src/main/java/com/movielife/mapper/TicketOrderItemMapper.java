@@ -33,4 +33,15 @@ public interface TicketOrderItemMapper extends BaseMapper<TicketOrderItem> {
                    @Param("items") List<TicketOrderItem> items,
                    @Param("pendingStatus") int pendingStatus,
                    @Param("issuedStatus") int issuedStatus);
+
+    @Update("<script>UPDATE tb_ticket_order_item SET ticket_status = #{refundedStatus} " +
+            "WHERE order_id = #{orderId} AND ticket_status IN " +
+            "<foreach collection='refundableStatuses' item='status' open='(' separator=',' close=')'>" +
+            "#{status}</foreach> AND id IN " +
+            "<foreach collection='itemIds' item='itemId' open='(' separator=',' close=')'>" +
+            "#{itemId}</foreach></script>")
+    int markRefundedByOrder(@Param("orderId") Long orderId,
+                            @Param("itemIds") List<Long> itemIds,
+                            @Param("refundableStatuses") List<Integer> refundableStatuses,
+                            @Param("refundedStatus") int refundedStatus);
 }

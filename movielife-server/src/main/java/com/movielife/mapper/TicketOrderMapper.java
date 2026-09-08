@@ -41,4 +41,8 @@ public interface TicketOrderMapper extends BaseMapper<TicketOrder> {
             "AND expire_time > #{payTime}")
     int payUnpaidOrder(@Param("orderId") Long orderId,
                        @Param("payTime") LocalDateTime payTime);
+
+    @Update("UPDATE tb_ticket_order SET status = 'REFUNDED' " +
+            "WHERE id = #{orderId} AND status = 'PAID'")
+    int refundPaidOrder(@Param("orderId") Long orderId);
 }

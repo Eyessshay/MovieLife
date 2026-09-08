@@ -34,6 +34,7 @@ public class TicketOrderServiceImpl implements TicketOrderService {
     private final TicketOrderCancellationService cancellationService;
     private final TicketOrderPaymentService paymentService;
     private final TicketOrderIssuanceService issuanceService;
+    private final TicketOrderRefundService refundService;
 
     @Override
     public List<IssueTicketVO> issueTickets(Long userId, Long orderId) {
@@ -83,6 +84,11 @@ public class TicketOrderServiceImpl implements TicketOrderService {
     @Override
     public PayTicketOrderVO payOrder(Long userId, Long orderId) {
         return paymentService.payOrder(userId, orderId);
+    }
+
+    @Override
+    public void refundOrder(Long userId, Long orderId) {
+        refundService.refundOrder(userId, orderId);
     }
 
     private void cleanupRedisBestEffort(Long orderId, TicketOrderCreationContext context) {

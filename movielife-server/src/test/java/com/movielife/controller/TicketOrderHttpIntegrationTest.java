@@ -490,6 +490,40 @@ class TicketOrderHttpIntegrationTest {
                 .isEqualTo(beforeIssueSeats);
         assertThat(showtimeMapper.selectById(showtimeId).getAvailableSeats()).isEqualTo(availableAfterCreate);
         assertThat(redisTemplate.keys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*")).isEqualTo(redisKeysBeforePayment);
+
+        ResponseEntity<String> foreignRefund = post("/api/orders/" + orderId + "/refund", null, anotherUser.token);
+        assertThat(foreignRefund.getStatusCodeValue()).isEqualTo(404);
+        assertThat(json(foreignRefund).path("code").asText()).isEqualTo("ORDER_NOT_FOUND");
+        ResponseEntity<String> refund = post("/api/orders/" + orderId + "/refund", null, owner.token);
+        assertThat(refund.getStatusCodeValue()).isEqualTo(200);
+        assertThat(json(refund).path("code").asText()).isEqualTo("OK");
+        assertThat(ticketOrderMapper.selectById(orderId).getStatus()).isEqualTo("REFUNDED");
+        assertThat(showtimeSeatMapper.selectList(new LambdaQueryWrapper<ShowtimeSeat>()
+                .eq(ShowtimeSeat::getShowtimeId, showtimeId)
+                .in(ShowtimeSeat::getSeatId, selectedSeatIds))).allSatisfy(state -> {
+                    assertThat(state.getStatus()).isZero();
+                    assertThat(state.getLockOrderId()).isNull();
+                });
+        assertThat(showtimeMapper.selectById(showtimeId).getAvailableSeats())
+                .isEqualTo(availableAfterCreate + selectedSeatIds.size());
+        ResponseEntity<String> refundedDetail = get("/api/orders/" + orderId, owner.token);
+        assertThat(json(refundedDetail).path("data").path("status").asText()).isEqualTo("REFUNDED");
+        for (JsonNode item : json(refundedDetail).path("data").path("items")) {
+            assertThat(codes).contains(item.path("ticketCode").asText());
+            assertThat(item.path("ticketStatus").asInt()).isEqualTo(3);
+        }
+        ResponseEntity<String> refundedSeatMap = get(
+                "/api/showtimes/" + showtimeId + "/seats", owner.token);
+        for (JsonNode seat : json(refundedSeatMap).path("data").path("seats")) {
+            if (selectedSeatIds.contains(seat.path("seatId").asLong())) {
+                assertThat(seat.path("status").asInt()).isZero();
+            }
+        }
+        assertThat(post("/api/orders/" + orderId + "/refund", null, owner.token)
+                .getStatusCodeValue()).isEqualTo(200);
+        assertThat(showtimeMapper.selectById(showtimeId).getAvailableSeats())
+                .isEqualTo(availableAfterCreate + selectedSeatIds.size());
+        assertThat(redisTemplate.keys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*")).isEqualTo(redisKeysBeforePayment);
     }
 
     private Long insertHistoricalOrder(Long userId, String status, int daysOffset) {

@@ -47,6 +47,8 @@ class TicketOrderServiceImplTest {
     private TicketOrderPaymentService paymentService;
     @Mock
     private TicketOrderIssuanceService issuanceService;
+    @Mock
+    private TicketOrderRefundService refundService;
 
     private TicketOrderServiceImpl service;
     private CreateTicketOrderDTO request;
@@ -55,7 +57,7 @@ class TicketOrderServiceImplTest {
     void setUp() {
         service = new TicketOrderServiceImpl(
                 creationValidator, transactionService, seatLockService,
-                queryService, cancellationService, paymentService, issuanceService);
+                queryService, cancellationService, paymentService, issuanceService, refundService);
         request = new CreateTicketOrderDTO();
         request.setLockToken("lock-token");
     }
@@ -204,6 +206,13 @@ class TicketOrderServiceImplTest {
 
         assertThat(service.payOrder(1L, 9001L)).isSameAs(paid);
         verify(paymentService).payOrder(1L, 9001L);
+    }
+
+    @Test
+    void refundShouldDelegateToTransactionalRefundService() {
+        service.refundOrder(1L, 9001L);
+
+        verify(refundService).refundOrder(1L, 9001L);
     }
 
     private TicketOrderCreationContext consumedContext(Long orderId) {

@@ -255,7 +255,7 @@ GET  /api/orders/{id}                  # 订单详情
 POST /api/orders/{id}/pay              # 发起支付
 POST /api/orders/{id}/issue            # PAID 订单出票（已实现，Step 8.11）
 POST /api/orders/{id}/cancel           # 取消未支付订单
-POST /api/orders/{id}/refund           # 申请退款
+POST /api/orders/{id}/refund           # 整单退款（已实现，Step 8.12）
 GET  /api/orders/{id}/tickets           # 查看票券/取票码
 ```
 
@@ -283,7 +283,7 @@ Redis 5 分钟 `lockExpireTime` 只决定能否首次创建订单。订单成功
 
 若并发创建命中 `uk_order_lock_token`，当前失败事务必须先回滚，再在事务外或新事务中按 `lockToken` 查询既有订单，校验 `userId`、`showtimeId` 和规范化 `seatIds` 后返回原订单；不得在已经被标记为 rollback-only 的事务中继续查询并返回。
 
-当前实现进度截至阶段 8 Step 8.11：`POST /api/orders` 已正式开放，要求登录并统一返回 HTTP 200 的 `Result<CreateTicketOrderVO>`；`userId` 只从服务端登录上下文获取，请求体不能提交用户、金额、状态、订单 ID 或过期时间。上述 MySQL 创建事务、唯一 token 冲突后的事务外幂等恢复，以及 COMMIT 后复用阶段 7 Lua 的 Redis 条件清理已经完整接入 HTTP 链路；订单 ID 沿用数据库自增策略。清理最多同步尝试两次，失败只记录已提交订单的上下文并继续返回成功；同 token HTTP 重试在 Redis Key 已删除后仍根据 MySQL 返回原订单，缺失 Key 按成功处理，其他 token 拥有的 seatKey 不会被删除。
+当前实现进度截至阶段 8 Step 8.12：`POST /api/orders` 已正式开放，要求登录并统一返回 HTTP 200 的 `Result<CreateTicketOrderVO>`；`userId` 只从服务端登录上下文获取，请求体不能提交用户、金额、状态、订单 ID 或过期时间。上述 MySQL 创建事务、唯一 token 冲突后的事务外幂等恢复，以及 COMMIT 后复用阶段 7 Lua 的 Redis 条件清理已经完整接入 HTTP 链路；订单 ID 沿用数据库自增策略。清理最多同步尝试两次，失败只记录已提交订单的上下文并继续返回成功；同 token HTTP 重试在 Redis Key 已删除后仍根据 MySQL 返回原订单，缺失 Key 按成功处理，其他 token 拥有的 seatKey 不会被删除。
 
 创建订单当前可能返回的业务错误包括：`400 INVALID_PARAM`、`400 INVALID_LOCK_TOKEN`、`403 LOCK_NOT_OWNED`、`403 ORDER_NOT_OWNED`、`404 SHOWTIME_NOT_FOUND`、`409 SEAT_NOT_AVAILABLE`、`409 ORDER_REQUEST_MISMATCH` 以及不暴露内部数据细节的 `500 INTERNAL_ERROR`。首次创建与幂等重试均返回 HTTP 200 和相同响应结构。
 
@@ -317,7 +317,11 @@ Redis 5 分钟 `lockExpireTime` 只决定能否首次创建订单。订单成功
 
 成功返回 HTTP 200，`Result.data` 为 `List<IssueTicketVO>`，每项包含 `seatId`、32 位 `ticketCode` 和 `ticketStatus`。沿用冻结枚举 `PENDING(0) → VALID(1)`，其中 VALID 表示已出票可用；不新增 ISSUED 枚举。每个票码使用去掉连字符的随机 UUID，数据库 `uk_ticket_code` 约束全局唯一。
 
-出票事务先锁订单行、校验全部明细，再通过单条批量条件 UPDATE 为待出票明细写入票码。条件包含当前订单、明细 ID、空票码和 PENDING 状态，影响行数必须等于待出票数量；唯一索引冲突或行数不足均回滚。全部已出票时直接返回原票码；部分已出票时仅补齐其余明细，票码与状态不一致时拒绝处理。出票后详情接口直接展示持久化票码；订单仍为 PAID，座位、lock_order_id、余票和 Redis 均不参与出票更新。验票、退款和真实支付平台尚未实现。
+出票事务先锁订单行、校验全部明细，再通过单条批量条件 UPDATE 为待出票明细写入票码。条件包含当前订单、明细 ID、空票码和 PENDING 状态，影响行数必须等于待出票数量；唯一索引冲突或行数不足均回滚。全部已出票时直接返回原票码；部分已出票时仅补齐其余明细，票码与状态不一致时拒绝处理。出票后详情接口直接展示持久化票码；订单仍为 PAID，座位、lock_order_id、余票和 Redis 均不参与出票更新。
+
+`POST /api/orders/{id}/refund` 已在 Step 8.12 实现。接口必须登录且只允许订单本人操作；订单不存在或非本人统一返回 `404 ORDER_NOT_FOUND`，仅 `PAID` 可退款，`UNPAID`、`CANCELED` 返回 `409 ORDER_STATUS_CONFLICT`，已 `REFUNDED` 则幂等返回 HTTP 200。事务取得订单行锁后必须确认 `Showtime.start_time > now`，否则返回 `409 REFUND_NOT_ALLOWED`。
+
+退款在一个 MySQL 事务内依次批量释放全部归属座位（`SOLD → AVAILABLE` 且 `lock_order_id` 清空）、恢复不超过 `total_seats` 的 `available_seats`、条件更新订单 `PAID → REFUNDED`，并把全部 PENDING 或 VALID 票明细更新为 `REFUNDED(3)`。所有批量更新均严格要求完整影响行数；异常时整体回滚。`ticketCode`、`pay_time`、`lock_token` 与订单明细历史均保留，退款不会读写 Redis，也不支持部分退款、验票核销或真实支付渠道退款。
 
 支付回调和退款回调仍预留内部接口：
 
@@ -326,7 +330,7 @@ POST /api/payment/notify               # 支付渠道异步通知
 POST /api/refund/notify                # 退款渠道异步通知
 ```
 
-客户端不得直接修改订单状态。订单状态为 `UNPAID`、`PAID`、`CANCELED`、`REFUNDED`；当前模拟支付、主动取消及票明细出票已经实现，真实支付平台、退款和验票核销仍留待后续阶段。
+客户端不得直接修改订单状态。订单状态为 `UNPAID`、`PAID`、`CANCELED`、`REFUNDED`；当前模拟支付、主动取消、票明细出票与整单退款已经实现，真实支付平台、部分退款和验票核销仍留待后续阶段。
 
 订单明细继续采用“一座一票”：`tb_ticket_order_item.ticket_code` 和 `ticket_status` 属于具体座位明细，`ticket_code` 在支付成功后的出票阶段生成。当前单场次订单通过 `order.showtime_id + item.seat_id` 唯一定位 `ShowtimeSeat`，不额外引入 `showtime_seat_id`。
 

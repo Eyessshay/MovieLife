@@ -409,6 +409,36 @@ class TicketOrderControllerTest {
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.code").value("ORDER_STATUS_CONFLICT"));
     }
 
+    @Test
+    void refundShouldRequireAuthenticationAndMapStableErrors() throws Exception {
+        mockMvc.perform(post("/api/orders/1/refund")).andExpect(status().isUnauthorized());
+        verify(ticketOrderService, never()).refundOrder(any(), any());
+
+        doThrow(new BusinessException(ErrorCode.INVALID_ID)).when(ticketOrderService).refundOrder(1L, 0L);
+        doThrow(new BusinessException(ErrorCode.ORDER_NOT_FOUND)).when(ticketOrderService).refundOrder(1L, 1L);
+        doThrow(new BusinessException(ErrorCode.ORDER_STATUS_CONFLICT)).when(ticketOrderService).refundOrder(1L, 2L);
+        doThrow(new BusinessException(ErrorCode.REFUND_NOT_ALLOWED)).when(ticketOrderService).refundOrder(1L, 3L);
+
+        mockMvc.perform(post("/api/orders/0/refund").header("Authorization", AUTHORIZATION))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("INVALID_ID"));
+        mockMvc.perform(post("/api/orders/1/refund").header("Authorization", AUTHORIZATION))
+                .andExpect(status().isNotFound()).andExpect(jsonPath("$.code").value("ORDER_NOT_FOUND"));
+        mockMvc.perform(post("/api/orders/2/refund").header("Authorization", AUTHORIZATION))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.code").value("ORDER_STATUS_CONFLICT"));
+        mockMvc.perform(post("/api/orders/3/refund").header("Authorization", AUTHORIZATION))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.code").value("REFUND_NOT_ALLOWED"));
+    }
+
+    @Test
+    void refundShouldUseCurrentUserAndAllowIdempotentRetry() throws Exception {
+        mockMvc.perform(post("/api/orders/9001/refund").header("Authorization", AUTHORIZATION))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.code").value("OK"));
+        mockMvc.perform(post("/api/orders/9001/refund").header("Authorization", AUTHORIZATION))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.code").value("OK"));
+
+        verify(ticketOrderService, org.mockito.Mockito.times(2)).refundOrder(1L, 9001L);
+    }
+
     private void assertBadRequest(String body) throws Exception {
         mockMvc.perform(post("/api/orders")
                         .header("Authorization", AUTHORIZATION)

@@ -746,6 +746,86 @@ class TicketOrderTransactionIntegrationTest {
         assertThat(issuanceItems(id)).isEqualTo(before);
     }
 
+    @Test
+    void refundShouldReleaseSoldSeatsRestoreCounterAndPreserveIssuedCodes() {
+        Long id = createPaidOrderForIssuance();
+        ticketOrderService.issueTickets(1L, id);
+        List<TicketOrderItem> beforeItems = issuanceItems(id);
+        List<String> codes = beforeItems.stream().map(TicketOrderItem::getTicketCode)
+                .collect(Collectors.toList());
+
+        ticketOrderService.refundOrder(1L, id);
+
+        assertThat(ticketOrderMapper.selectById(id).getStatus()).isEqualTo("REFUNDED");
+        assertThat(queryStates()).allSatisfy(state -> {
+            assertThat(state.getStatus()).isZero();
+            assertThat(state.getLockOrderId()).isNull();
+        });
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats()).isEqualTo(2);
+        assertThat(issuanceItems(id)).extracting(TicketOrderItem::getTicketCode).containsExactlyElementsOf(codes);
+        assertThat(issuanceItems(id)).allSatisfy(item -> assertThat(item.getTicketStatus()).isEqualTo(3));
+
+        ticketOrderService.refundOrder(1L, id);
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats()).isEqualTo(2);
+    }
+
+    @Test
+    void refundShouldRejectStartedShowtimeWithoutChangingPaidOrder() {
+        Long id = createPaidOrderForIssuance();
+        Showtime started = new Showtime();
+        started.setId(context.showtime.getId());
+        started.setStartTime(LocalDateTime.now().minusSeconds(1));
+        showtimeMapper.updateById(started);
+        List<ShowtimeSeat> before = queryStates();
+
+        assertThatThrownBy(() -> ticketOrderService.refundOrder(1L, id))
+                .isInstanceOfSatisfying(BusinessException.class, exception ->
+                        assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.REFUND_NOT_ALLOWED));
+
+        assertThat(ticketOrderMapper.selectById(id).getStatus()).isEqualTo("PAID");
+        assertThat(queryStates()).isEqualTo(before);
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats()).isZero();
+    }
+
+    @Test
+    void refundSeatOrCounterMismatchShouldRollbackEveryChange() {
+        Long id = createPaidOrderForIssuance();
+        ShowtimeSeat inconsistent = queryStates().get(1);
+        inconsistent.setStatus(0);
+        inconsistent.setLockOrderId(null);
+        showtimeSeatMapper.updateById(inconsistent);
+
+        assertThatThrownBy(() -> ticketOrderService.refundOrder(1L, id))
+                .isInstanceOfSatisfying(BusinessException.class, exception ->
+                        assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.INTERNAL_ERROR));
+        assertThat(ticketOrderMapper.selectById(id).getStatus()).isEqualTo("PAID");
+        assertThat(queryStates().get(0).getStatus()).isEqualTo(2);
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats()).isZero();
+    }
+
+    @Test
+    void concurrentRefundShouldRestoreResourcesOnlyOnce() throws Exception {
+        Long id = createPaidOrderForIssuance();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<?> first = executor.submit(() -> { await(start); ticketOrderService.refundOrder(1L, id); });
+            Future<?> second = executor.submit(() -> { await(start); ticketOrderService.refundOrder(1L, id); });
+            start.countDown();
+            first.get(10, TimeUnit.SECONDS);
+            second.get(10, TimeUnit.SECONDS);
+        } finally {
+            executor.shutdownNow();
+        }
+
+        assertThat(ticketOrderMapper.selectById(id).getStatus()).isEqualTo("REFUNDED");
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats()).isEqualTo(2);
+        assertThat(queryStates()).allSatisfy(state -> {
+            assertThat(state.getStatus()).isZero();
+            assertThat(state.getLockOrderId()).isNull();
+        });
+    }
+
     private Long createPaidOrderForIssuance() {
         context = insertShowtimeWithSeats(2, LocalDateTime.now().plusHours(2));
         Long id = ticketOrderService.createOrder(1L, lockAndBuildRequest(context).request).getOrderId();

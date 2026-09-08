@@ -70,4 +70,11 @@ public class TicketOrderController {
     public Result<PayTicketOrderVO> payOrder(@PathVariable Long id) {
         return Result.ok(ticketOrderService.payOrder(UserHolder.getUserId(), id));
     }
+
+    @PostMapping("/{id}/refund")
+    @LoginRequired
+    public Result<Void> refundOrder(@PathVariable Long id) {
+        ticketOrderService.refundOrder(UserHolder.getUserId(), id);
+        return Result.ok();
+    }
 }

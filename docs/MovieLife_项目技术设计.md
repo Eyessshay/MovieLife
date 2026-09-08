@@ -1639,6 +1639,16 @@ Step 8.10 新增 21 项自动化测试，全量共 306 项，0 failure、0 error
 
 Step 8.11 新增 9 项自动化测试，并扩展真实 HTTP 支付闭环为 create → pay → issue → detail。全量共 315 项，0 failure、0 error、0 skipped，Maven `clean package` 构建成功。验证正常及重复出票、部分补齐、非 PAID 拒绝、用户隔离、异常明细、并发一致性、批量行数不足异常传播和真实 MySQL 唯一冲突回滚。出票前后订单、座位及余票快照一致，Redis 临时锁集合不变，测试数据已清理，本 Step 至此冻结。
 
+### 5.12 Step 8.12：整单退款与已售座位释放
+
+正式开放 `POST /api/orders/{id}/refund`。Controller 仅传递登录用户与订单 ID；不存在或非本人统一返回 `404 ORDER_NOT_FOUND`。退款服务在独立事务中使用 `SELECT ... FOR UPDATE` 锁订单行：只有 `PAID` 可以推进为 `REFUNDED`，已经 `REFUNDED` 直接幂等成功，`UNPAID` 与 `CANCELED` 返回 `409 ORDER_STATUS_CONFLICT`。锁行后读取 Showtime 并严格要求 `start_time > now`；已开场返回 `409 REFUND_NOT_ALLOWED`，不改写任何数据。
+
+事务一次查询全部订单明细，按 `showtime_id + 完整 seatIds + status=SOLD + lock_order_id=当前订单` 批量执行 `SOLD → AVAILABLE`、清空 `lock_order_id` 并递增座位版本；影响行数必须等于明细数。随后使用既有上界保护恢复 `available_seats`（不得超过 `total_seats`），条件更新 `PAID → REFUNDED`，并批量将 PENDING 或 VALID 明细更新为 `TicketStatus.REFUNDED(3)`。任一条件更新数量异常都使整个事务回滚，因此不会出现部分释放或重复增加余票。
+
+退款保留 `pay_time`、`lock_token`、所有订单明细与既有 `ticketCode`，仅使票状态失效；不读取或写入 Redis。订单行锁和状态条件更新保证两个并发退款中仅一个实际释放资源，后到请求读取 `REFUNDED` 后幂等成功。本 Step 不实现真实支付平台退款、退款审核、部分退款、部分座位退款、验票核销或 Redis Stream。
+
+Step 8.12 新增 13 项自动化测试，并将真实 HTTP 闭环扩展为 create → pay → issue → refund → detail → Seat Map。全量共 328 项，0 failure、0 error、0 skipped，Maven `clean package` 构建成功。验证正常与重复退款、用户隔离、非 PAID 与已开场拒绝、座位条件异常整体回滚、余票上界保护、并发退款和票码保留；测试结束后订单、明细、座位与 Redis 临时锁均无残留，本 Step 至此冻结。
+
 ## 6. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：

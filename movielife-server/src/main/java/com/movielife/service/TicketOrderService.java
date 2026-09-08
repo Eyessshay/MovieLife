@@ -23,4 +23,6 @@ public interface TicketOrderService {
     void cancelOrder(Long userId, Long orderId);
 
     PayTicketOrderVO payOrder(Long userId, Long orderId);
+
+    void refundOrder(Long userId, Long orderId);
 }
