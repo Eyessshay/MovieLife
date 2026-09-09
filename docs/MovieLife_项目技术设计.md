@@ -1661,7 +1661,41 @@ Redis 仅承担订单创建前的 5 分钟临时锁资格及数据库提交后�
 
 本阶段最终不包含第三方支付或回调、Redis Stream/MQ、部分取消或部分退款、退款审核、验票核销及活动票务。阶段 8 的代码与文档在提交 `23fb9a2` 后进入最终验收；本 Step 仅追加冻结记录，不再新增业务能力。
 
-## 6. 服务端模块建议
+## 6. 阶段 9：验票核销设计
+
+### 6.1 Step 9.1：核销职责与数据契约
+
+阶段 9 只扩展票明细生命周期，不重新设计阶段 8 订单交易。单张已出票电影票的状态变化冻结为 `VALID(1) → USED(2)`；TicketOrder 仍为 `PAID`，对应 ShowtimeSeat 仍为 `SOLD` 并保留原 `lock_order_id`，Showtime.available_seats 不增不减。核销处理的是 MySQL 中已经成立的票券事实，不读取或写入 `seat:lock:*`、token Metadata 或其他 Redis 状态。
+
+管理端核销入口规划为 `POST /api/admin/tickets/verify`，Step 9.1 只冻结契约，尚不开放接口。请求只提交 `ticketCode`，不得提交用户、场馆、订单、状态或核销时间。Venue 必须由服务端沿 `TicketOrderItem → TicketOrder → Showtime` 关系推导，不能信任客户端场馆参数。票码作为核销凭证放在 JSON 请求体中，禁止放入 URL、Query 参数或普通访问日志；业务日志只记录掩码或不可逆摘要。
+
+普通登录态不代表核销权限。新增 `tb_venue_staff` 作为场馆工作人员授权事实，字段为 `user_id`、`venue_id`、`status` 及创建更新时间，使用 `uk_venue_staff_user_venue(user_id, venue_id)` 防止重复关系，并使用 `idx_venue_staff_venue_status(venue_id, status)` 支持按场馆和有效状态校验。只有关系存在且 `status=1` 时才允许核销该 Venue 下 Showtime 的票；停用关系不能继续核销。工作人员关系删除或停用不应抹除既有核销记录。
+
+`tb_ticket_order_item` 在现有 `ticket_code`、`ticket_status` 基础上增加 `used_time` 和 `used_by_user_id`。二者在 PENDING、VALID 和 REFUNDED 状态下均为 NULL；首次成功核销时与 `ticket_status=USED(2)` 同一事务写入，之后不可覆盖。`used_by_user_id` 外键指向 `tb_user.id`，不直接外键到可停用的工作人员关系；`idx_order_item_used_by_time(used_by_user_id, used_time)` 支持按核销人员和时间审计。`chk_order_item_ticket_status` 将票状态限制在 0～3，`chk_order_item_used_evidence` 保证 USED 必须同时具有核销时间和人员，而其他状态两项证据均为空。当前 SQL 文件冻结目标结构，Step 9.1 不执行真实数据库 ALTER，也不新增 Entity 或 Mapper，实际迁移与持久化验证属于后续独立 Step。
+
+### 6.2 Step 9.1：状态、权限与错误语义
+
+核销成功必须同时满足：关联 TicketOrder 为 `PAID`；目标 TicketOrderItem 为 `VALID(1)`；票码存在且唯一定位一条明细；当前登录用户与 Showtime 所属 Venue 存在有效工作人员关系。多座位订单允许逐张核销，每次只改变一个票码对应的明细，不批量改变同订单其他票。
+
+PENDING 票返回 `TICKET_NOT_ISSUED`，USED 票返回 `TICKET_ALREADY_USED`，REFUNDED 票返回 `TICKET_REFUNDED`，未知票码返回 `TICKET_NOT_FOUND`，非 PAID 订单返回 `ORDER_STATUS_CONFLICT`，无目标场馆权限返回 `TICKET_VERIFY_FORBIDDEN`。重复扫描 USED 票不算成功，不重复写入核销时间和人员。请求校验失败使用 `INVALID_PARAM`，未登录使用 `UNAUTHORIZED`，关联数据残缺或状态与核销证据矛盾时使用不暴露内部结构的 `INTERNAL_ERROR`。
+
+退款继续是整单操作，不支持部分退款。只要订单任一 TicketOrderItem 已为 USED，退款必须在任何座位释放、余票恢复、订单更新或票状态更新之前返回 `REFUND_NOT_ALLOWED`。这属于阶段 9 对既有退款前置校验的明确依赖，不改变阶段 8 的订单状态机，也不能把 USED 明细造成的批量更新行数不足当作普通 `INTERNAL_ERROR`。
+
+Step 9.1 不增加基于 Showtime 开始或结束时间的额外核销窗口；实现阶段不得自行发明时间限制。如后续确需提前入场窗口、迟到截止或散场后核销规则，必须另开独立设计 Step。当前也不实现二维码签名、离线核销、批量核销、核销撤销、设备管理、Activity 票务或 Redis 防重。
+
+### 6.3 核销与退款并发边界
+
+核销和退款必须共用 TicketOrder 行锁作为串行化边界，并固定采用“先订单、后明细”的锁顺序。核销入口可先按 `uk_ticket_code` 做一次不加锁的定位查询取得 orderId，但进入事务后必须先 `SELECT TicketOrder ... FOR UPDATE`，随后重新读取并锁定目标 TicketOrderItem，再校验 Showtime、工作人员关系、订单状态和票状态。不能先锁票明细再等待订单锁，否则会与现有退款的订单优先顺序形成反向锁序。
+
+首次核销使用单条条件更新，将目标明细从 VALID 改为 USED 并同时写入 `used_time`、`used_by_user_id`。WHERE 条件至少包含 `id`、`order_id`、`ticket_status=VALID`、`used_time IS NULL` 和 `used_by_user_id IS NULL`，影响行数必须严格为 1。影响行数为 0 时重新读取最终状态并映射成明确业务结果，禁止接受部分成功或覆盖首次核销证据。
+
+由于两条路径先竞争同一 TicketOrder 行锁，核销与退款并发只能形成两种终态：退款先获得锁时，整单完成 REFUNDED，随后核销看到退款票并拒绝；核销先获得锁时，目标票变为 USED，随后退款在写操作前检测到 USED 并返回 REFUND_NOT_ALLOWED。两种终态下都不修改 Redis，也不会出现座位已经释放但票仍 USED 的部分成功。
+
+### 6.4 Step 9.1 冻结范围
+
+本 Step 只修改 `sql/movielife.sql`、`docs/API接口设计.md` 和本文档，冻结 `tb_venue_staff`、TicketOrderItem 核销证据字段、管理端接口、DTO/VO、业务错误码、权限来源、状态变化和并发锁序。不创建或修改 Java Controller、Service、Mapper、Entity、DTO、VO、枚举或测试代码，不开放真实 HTTP 接口，不提前实现后续 Step。
+
+## 7. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
 
@@ -1681,7 +1715,7 @@ ai         评价总结的异步生成、持久化和读取
 common     统一响应、异常、鉴权、限流、幂等
 ```
 
-## 7. 关键非功能要求
+## 8. 关键非功能要求
 
 - 所有写接口校验当前用户和资源归属。
 - 订单、支付、锁座操作必须支持幂等。

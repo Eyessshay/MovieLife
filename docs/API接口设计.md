@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.2（接口清单修订版）
+- 版本：v0.3（阶段 9.1 验票核销契约冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -59,7 +59,7 @@ HTTP 状态码表达协议层结果，业务 `code` 表达具体错误类型。�
 
 - 公开：电影、活动、场馆、场次的查询接口。
 - 登录：个人信息、关注、评价、点赞、订单、选座锁定。
-- 管理端：排片、影厅座位、活动和内容审核接口，后续单独拆分 `/api/admin`。
+- 管理端：排片、影厅座位、活动、内容审核和验票核销接口，统一放在 `/api/admin`。管理端接口除登录外还必须校验具体业务权限；普通登录用户不能因持有有效 Token 而获得管理能力。
 
 ## 3. API 清单
 
@@ -256,7 +256,7 @@ POST /api/orders/{id}/pay              # 发起支付
 POST /api/orders/{id}/issue            # PAID 订单出票（已实现，Step 8.11）
 POST /api/orders/{id}/cancel           # 取消未支付订单
 POST /api/orders/{id}/refund           # 整单退款（已实现，Step 8.12）
-GET  /api/orders/{id}/tickets           # 查看票券/取票码
+GET  /api/orders/{id}/tickets           # 查看票券/取票码（预留，尚未开放）
 ```
 
 创建订单请求：
@@ -330,11 +330,70 @@ POST /api/payment/notify               # 支付渠道异步通知
 POST /api/refund/notify                # 退款渠道异步通知
 ```
 
-客户端不得直接修改订单状态。订单状态为 `UNPAID`、`PAID`、`CANCELED`、`REFUNDED`；当前模拟支付、主动取消、票明细出票与整单退款已经实现，真实支付平台、部分退款和验票核销仍留待后续阶段。
+客户端不得直接修改订单状态。订单状态为 `UNPAID`、`PAID`、`CANCELED`、`REFUNDED`；当前模拟支付、主动取消、票明细出票与整单退款已经实现，真实支付平台和部分退款仍留待后续阶段。验票核销的数据与接口契约在 Step 9.1 冻结，但接口尚未开放。
 
 订单明细继续采用“一座一票”：`tb_ticket_order_item.ticket_code` 和 `ticket_status` 属于具体座位明细，`ticket_code` 在支付成功后的出票阶段生成。当前单场次订单通过 `order.showtime_id + item.seat_id` 唯一定位 `ShowtimeSeat`，不额外引入 `showtime_seat_id`。
 
-### 3.10 AI 评价总结
+### 3.10 管理端验票核销
+
+```bash
+POST /api/admin/tickets/verify          # 单张票验票核销（Step 9.1 仅冻结契约，尚未开放）
+```
+
+接口必须登录，并要求当前用户在 `tb_venue_staff` 中与目标 Showtime 所属 Venue 存在 `status=1` 的有效工作人员关系。普通购票用户即使持有本人票码也不能调用。目标 Venue 必须由服务端通过 `ticketCode → TicketOrderItem.order_id → TicketOrder.showtime_id → Showtime.venue_id` 推导；请求体不得提交 `userId`、`venueId`、`orderId`、票状态或核销时间。
+
+请求 DTO 暂定为 `VerifyTicketDTO`：
+
+```json
+{
+  "ticketCode": "8f2c89e9f65d4c12b749f091b2db36cc"
+}
+```
+
+`ticketCode` 必填，去除首尾空白后长度为 1～64；不接受空串。当前出票生成 32 位无连字符 UUID，但核销请求不把这一实现长度固化为唯一合法格式，数据库唯一索引 `uk_ticket_code` 仍是票码身份约束。票码放在 JSON 请求体中，不放入 URL、Query 参数或普通访问日志；业务日志只允许记录掩码或不可逆摘要。
+
+成功响应使用 `VerifyTicketVO`，统一包在 `Result<VerifyTicketVO>` 中：
+
+```json
+{
+  "code": "SUCCESS",
+  "message": "success",
+  "data": {
+    "ticketCode": "8f2c89e9f65d4c12b749f091b2db36cc",
+    "ticketStatus": 2,
+    "usedTime": "2026-09-10T18:40:00",
+    "orderId": 9001,
+    "showtimeId": 1001,
+    "venueId": 1,
+    "hallId": 10,
+    "seatId": 101,
+    "seatNo": "A01"
+  },
+  "requestId": "..."
+}
+```
+
+仅当订单为 `PAID`、票明细为 `VALID(1)`，且当前工作人员对 Showtime 所属 Venue 具有有效关系时，才能将这一张 `TicketOrderItem` 更新为 `USED(2)`，同时写入首次 `used_time` 和 `used_by_user_id`。数据库通过 `chk_order_item_ticket_status` 限制票状态只能为 0～3，并通过 `chk_order_item_used_evidence` 保证只有 USED 同时具有两项核销证据，其他状态的两项证据必须同时为空。多座位订单按票码逐张核销；一次请求只能改变命中的一条明细，不改变同订单其他票。订单继续保持 `PAID`，ShowtimeSeat 继续保持 `SOLD` 并保留 `lock_order_id`，`available_seats` 不变，整个核销链路不读取或写入 Redis。
+
+业务错误契约冻结如下：
+
+- `400 INVALID_PARAM`：请求体缺失、票码为空或超过 64 位。
+- `401 UNAUTHORIZED`：未登录或登录态失效。
+- `403 TICKET_VERIFY_FORBIDDEN`：当前用户不是有效场馆工作人员，或只对其他场馆具有权限。
+- `404 TICKET_NOT_FOUND`：票码不存在。
+- `409 TICKET_NOT_ISSUED`：票明细仍为 `PENDING(0)`。
+- `409 TICKET_ALREADY_USED`：票明细已经为 `USED(2)`；必须保留首次核销事实，不得覆盖 `used_time` 或 `used_by_user_id`，本次请求不算核销成功。
+- `409 TICKET_REFUNDED`：票明细已经为 `REFUNDED(3)`。
+- `409 ORDER_STATUS_CONFLICT`：关联订单不是 `PAID`。
+- `500 INTERNAL_ERROR`：票码、订单、Showtime、Hall、Seat 或核销证据存在不应出现的数据不一致；响应不得暴露内部表结构。
+
+核销事务必须采用与退款一致的锁顺序。服务端可以先按唯一票码做不加锁的定位查询以取得 `orderId`，但正式判定必须在单个 MySQL 事务内先对 TicketOrder 执行 `SELECT ... FOR UPDATE`，再重新读取并锁定目标 TicketOrderItem，随后校验 Showtime、场馆工作人员关系和票状态。最终更新必须包含 `id + order_id + ticket_status=VALID + used_time IS NULL + used_by_user_id IS NULL` 条件，且严格要求 `affectedRows=1`；否则重新读取最终状态并映射为已核销、已退款、订单冲突或内部一致性错误，不能接受部分成功。
+
+退款继续先锁 TicketOrder，再读取订单全部 TicketOrderItem。只要任一明细为 `USED(2)`，整单退款必须在释放座位、恢复余票或修改任何票状态之前返回 `409 REFUND_NOT_ALLOWED`，不能依赖后续批量 UPDATE 行数不足再表现为 `INTERNAL_ERROR`。这样核销与退款并发时由同一订单行锁串行化，最终只能形成“先退款，票全部 REFUNDED”或“先核销，至少一张 USED 且整单不可退款”两种合法结果。
+
+Step 9.1 仅冻结 SQL、API 和事务契约，不创建 Controller、Service、Mapper、DTO、VO 或测试代码，也不开放该接口。本 Step 不包含二维码签名、离线核销、批量核销、核销撤销、核销设备管理、Activity 票务、Redis 防重或额外的核销时间窗规则。
+
+### 3.11 AI 评价总结
 
 ```bash
 GET /api/ai/summaries/{targetType}/{targetId} # 读取已有 AI 评价总结
@@ -342,7 +401,7 @@ GET /api/ai/summaries/{targetType}/{targetId} # 读取已有 AI 评价总结
 
 响应数据预留 `summary`、`pros`、`cons`、`suitableFor`、`warningPoints`、`sourceReviewCount` 和生成版本等字段。该接口只读取已生成结果，不在用户请求链路中同步调用模型。评价发生有效变化后，由异步任务重新生成并写入 MySQL，同时更新或失效 Redis 缓存。
 
-### 3.11 行为采集与推荐
+### 3.12 行为采集与推荐
 
 ```bash
 POST /api/behavior-events               # 上报浏览、搜索、收藏、购票等行为
@@ -737,4 +796,4 @@ WHERE id = #{movieId} AND score_count = 1;
 
 ## 6. 与数据库的对应关系
 
-核心资源对应 `sql/movielife.sql` 中的 `tb_user`、`tb_movie`、`tb_activity`、`tb_venue`、`tb_showtime`、`tb_showtime_seat`、`tb_ticket_order`、`tb_ticket_order_item`、`tb_review`、`tb_post`、`tb_follow`、`tb_collection`、`tb_ai_review_summary`、`tb_user_behavior` 和 `tb_recommendation`。评价点赞关系不单独建 MySQL 表，使用 Redis ZSet `review:like:{reviewId}`，点赞总数持久化在 `tb_review.like_count`。多态目标统一通过 `targetType/targetId` 或 `bizType/bizId` 表达，具体字段映射以后端 DTO 为准。
+核心资源对应 `sql/movielife.sql` 中的 `tb_user`、`tb_movie`、`tb_activity`、`tb_venue`、`tb_venue_staff`、`tb_showtime`、`tb_showtime_seat`、`tb_ticket_order`、`tb_ticket_order_item`、`tb_review`、`tb_post`、`tb_follow`、`tb_collection`、`tb_ai_review_summary`、`tb_user_behavior` 和 `tb_recommendation`。`tb_venue_staff` 是场馆级管理权限事实，不等同于普通登录态；TicketOrderItem 的 `used_time` 和 `used_by_user_id` 保存首次成功核销证据。评价点赞关系不单独建 MySQL 表，使用 Redis ZSet `review:like:{reviewId}`，点赞总数持久化在 `tb_review.like_count`。多态目标统一通过 `targetType/targetId` 或 `bizType/bizId` 表达，具体字段映射以后端 DTO 为准。

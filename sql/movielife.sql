@@ -72,6 +72,21 @@ CREATE TABLE IF NOT EXISTS tb_venue (
   KEY idx_venue_status (status)
 ) ENGINE=InnoDB COMMENT='venues';
 
+CREATE TABLE IF NOT EXISTS tb_venue_staff (
+  id BIGINT NOT NULL AUTO_INCREMENT,
+  user_id BIGINT NOT NULL,
+  venue_id BIGINT NOT NULL,
+  status TINYINT NOT NULL DEFAULT 1 COMMENT '0 disabled, 1 active',
+  create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_venue_staff_user_venue (user_id, venue_id),
+  KEY idx_venue_staff_venue_status (venue_id, status),
+  CONSTRAINT fk_venue_staff_user FOREIGN KEY (user_id) REFERENCES tb_user (id),
+  CONSTRAINT fk_venue_staff_venue FOREIGN KEY (venue_id) REFERENCES tb_venue (id),
+  CONSTRAINT chk_venue_staff_status CHECK (status IN (0, 1))
+) ENGINE=InnoDB COMMENT='venue staff authorization for ticket verification';
+
 CREATE TABLE IF NOT EXISTS tb_activity (
   id BIGINT NOT NULL AUTO_INCREMENT,
   title VARCHAR(128) NOT NULL,
@@ -180,13 +195,22 @@ CREATE TABLE IF NOT EXISTS tb_ticket_order_item (
   price DECIMAL(10,2) NOT NULL DEFAULT 0.00,
   ticket_code VARCHAR(64) NULL,
   ticket_status TINYINT NOT NULL DEFAULT 0 COMMENT '0 pending, 1 valid, 2 used, 3 refunded',
+  used_time DATETIME NULL COMMENT 'first successful verification time; immutable after use',
+  used_by_user_id BIGINT NULL COMMENT 'venue staff user who first verified the ticket',
   PRIMARY KEY (id),
   UNIQUE KEY uk_order_item_seat (order_id, seat_id),
   UNIQUE KEY uk_ticket_code (ticket_code),
   KEY idx_order_item_seat (seat_id),
   KEY idx_order_item_ticket_status (ticket_status),
+  KEY idx_order_item_used_by_time (used_by_user_id, used_time),
   CONSTRAINT fk_order_item_order FOREIGN KEY (order_id) REFERENCES tb_ticket_order (id),
-  CONSTRAINT fk_order_item_seat FOREIGN KEY (seat_id) REFERENCES tb_seat (id)
+  CONSTRAINT fk_order_item_seat FOREIGN KEY (seat_id) REFERENCES tb_seat (id),
+  CONSTRAINT fk_order_item_used_by_user FOREIGN KEY (used_by_user_id) REFERENCES tb_user (id),
+  CONSTRAINT chk_order_item_ticket_status CHECK (ticket_status IN (0, 1, 2, 3)),
+  CONSTRAINT chk_order_item_used_evidence CHECK (
+    (ticket_status = 2 AND used_time IS NOT NULL AND used_by_user_id IS NOT NULL)
+    OR (ticket_status <> 2 AND used_time IS NULL AND used_by_user_id IS NULL)
+  )
 ) ENGINE=InnoDB COMMENT='order seats';
 
 CREATE TABLE IF NOT EXISTS tb_review (
