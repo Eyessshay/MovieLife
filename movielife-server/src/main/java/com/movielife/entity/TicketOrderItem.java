@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 
 @Data
 @TableName("tb_ticket_order_item")
@@ -18,4 +19,6 @@ public class TicketOrderItem {
     private BigDecimal price;
     private String ticketCode;
     private Integer ticketStatus;
+    private LocalDateTime usedTime;
+    private Long usedByUserId;
 }

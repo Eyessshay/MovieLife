@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -19,6 +20,7 @@ import java.time.LocalDateTime;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.NONE,
@@ -95,5 +97,25 @@ class TicketOrderPersistenceIntegrationTest {
         assertThat(persistedItem.getPrice()).isEqualByComparingTo("68.50");
         assertThat(persistedItem.getTicketCode()).isNull();
         assertThat(persistedItem.getTicketStatus()).isEqualTo(0);
+        assertThat(persistedItem.getUsedTime()).isNull();
+        assertThat(persistedItem.getUsedByUserId()).isNull();
+
+        item.setTicketStatus(TicketStatus.USED.getCode());
+        assertThatThrownBy(() -> ticketOrderItemMapper.updateById(item))
+                .isInstanceOf(DataAccessException.class);
+
+        LocalDateTime usedTime = LocalDateTime.now().withNano(0);
+        order.setStatus(TicketOrderStatus.PAID.getDbValue());
+        order.setPayTime(usedTime.minusMinutes(1));
+        assertThat(ticketOrderMapper.updateById(order)).isEqualTo(1);
+        item.setTicketCode(UUID.randomUUID().toString().replace("-", ""));
+        item.setUsedTime(usedTime);
+        item.setUsedByUserId(user.getId());
+        assertThat(ticketOrderItemMapper.updateById(item)).isEqualTo(1);
+
+        TicketOrderItem usedItem = ticketOrderItemMapper.selectById(item.getId());
+        assertThat(usedItem.getTicketStatus()).isEqualTo(TicketStatus.USED.getCode());
+        assertThat(usedItem.getUsedTime()).isEqualTo(usedTime);
+        assertThat(usedItem.getUsedByUserId()).isEqualTo(user.getId());
     }
 }

@@ -788,6 +788,32 @@ class TicketOrderTransactionIntegrationTest {
     }
 
     @Test
+    void refundShouldRejectUsedTicketBeforeChangingOrderSeatsOrCounter() {
+        Long id = createPaidOrderForIssuance();
+        ticketOrderService.issueTickets(1L, id);
+        TicketOrderItem used = issuanceItems(id).get(0);
+        used.setTicketStatus(2);
+        used.setUsedTime(LocalDateTime.now().minusMinutes(1).withNano(0));
+        used.setUsedByUserId(1L);
+        assertThat(ticketOrderItemMapper.updateById(used)).isEqualTo(1);
+
+        TicketOrder beforeOrder = ticketOrderMapper.selectById(id);
+        List<TicketOrderItem> beforeItems = issuanceItems(id);
+        List<ShowtimeSeat> beforeSeats = queryStates();
+        Integer beforeAvailableSeats = showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats();
+
+        assertThatThrownBy(() -> ticketOrderService.refundOrder(1L, id))
+                .isInstanceOfSatisfying(BusinessException.class, exception ->
+                        assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.REFUND_NOT_ALLOWED));
+
+        assertThat(ticketOrderMapper.selectById(id)).isEqualTo(beforeOrder);
+        assertThat(issuanceItems(id)).isEqualTo(beforeItems);
+        assertThat(queryStates()).isEqualTo(beforeSeats);
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats())
+                .isEqualTo(beforeAvailableSeats);
+    }
+
+    @Test
     void refundSeatOrCounterMismatchShouldRollbackEveryChange() {
         Long id = createPaidOrderForIssuance();
         ShowtimeSeat inconsistent = queryStates().get(1);

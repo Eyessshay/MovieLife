@@ -1,6 +1,5 @@
 package com.movielife.service.impl;
 
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.movielife.entity.Showtime;
 import com.movielife.entity.TicketOrder;
 import com.movielife.entity.TicketOrderItem;
@@ -47,6 +46,9 @@ public class TicketOrderRefundService {
             throw new BusinessException(ErrorCode.ORDER_STATUS_CONFLICT);
         }
 
+        List<TicketOrderItem> items = ticketOrderItemMapper.selectByOrderIdForUpdate(orderId);
+        RefundItems refundItems = validateItems(items);
+
         Showtime showtime = showtimeMapper.selectById(order.getShowtimeId());
         LocalDateTime now = LocalDateTime.now();
         if (showtime == null || showtime.getStartTime() == null) {
@@ -55,11 +57,6 @@ public class TicketOrderRefundService {
         if (!showtime.getStartTime().isAfter(now)) {
             throw new BusinessException(ErrorCode.REFUND_NOT_ALLOWED);
         }
-
-        List<TicketOrderItem> items = ticketOrderItemMapper.selectList(
-                new LambdaQueryWrapper<TicketOrderItem>()
-                        .eq(TicketOrderItem::getOrderId, orderId));
-        RefundItems refundItems = validateItems(items);
 
         if (showtimeSeatMapper.releaseSoldSeatsByOrder(
                 order.getShowtimeId(), refundItems.seatIds, orderId) != refundItems.seatIds.size()) {
@@ -98,6 +95,17 @@ public class TicketOrderRefundService {
         for (TicketOrderItem item : items) {
             if (item == null || item.getId() == null || item.getSeatId() == null
                     || !uniqueItemIds.add(item.getId()) || !uniqueSeatIds.add(item.getSeatId())) {
+                throw new BusinessException(ErrorCode.INTERNAL_ERROR);
+            }
+            Integer ticketStatus = item.getTicketStatus();
+            if (ticketStatus == null) {
+                throw new BusinessException(ErrorCode.INTERNAL_ERROR);
+            }
+            if (TicketStatus.USED.getCode() == ticketStatus) {
+                throw new BusinessException(ErrorCode.REFUND_NOT_ALLOWED);
+            }
+            if (TicketStatus.PENDING.getCode() != ticketStatus
+                    && TicketStatus.VALID.getCode() != ticketStatus) {
                 throw new BusinessException(ErrorCode.INTERNAL_ERROR);
             }
             itemIds.add(item.getId());

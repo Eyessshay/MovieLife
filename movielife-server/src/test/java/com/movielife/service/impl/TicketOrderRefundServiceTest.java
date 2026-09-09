@@ -13,6 +13,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.mockito.InOrder;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.LocalDateTime;
@@ -24,6 +25,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -47,7 +49,7 @@ class TicketOrderRefundServiceTest {
     void paidOrderShouldRefundEveryOwnedSoldSeatAndTicket() {
         when(ticketOrderMapper.selectByIdForUpdate(9001L)).thenReturn(order("PAID"));
         when(showtimeMapper.selectById(1001L)).thenReturn(showtime(LocalDateTime.now().plusHours(1)));
-        when(ticketOrderItemMapper.selectList(any())).thenReturn(items());
+        when(ticketOrderItemMapper.selectByOrderIdForUpdate(9001L)).thenReturn(items());
         when(showtimeSeatMapper.releaseSoldSeatsByOrder(1001L, Arrays.asList(101L, 102L), 9001L))
                 .thenReturn(2);
         when(showtimeMapper.increaseAvailableSeats(1001L, 2)).thenReturn(1);
@@ -57,6 +59,9 @@ class TicketOrderRefundServiceTest {
 
         service.refundOrder(1L, 9001L);
 
+        InOrder lockOrder = inOrder(ticketOrderMapper, ticketOrderItemMapper);
+        lockOrder.verify(ticketOrderMapper).selectByIdForUpdate(9001L);
+        lockOrder.verify(ticketOrderItemMapper).selectByOrderIdForUpdate(9001L);
         verify(showtimeSeatMapper).releaseSoldSeatsByOrder(1001L, Arrays.asList(101L, 102L), 9001L);
         verify(showtimeMapper).increaseAvailableSeats(1001L, 2);
         verify(ticketOrderMapper).refundPaidOrder(9001L);
@@ -70,7 +75,7 @@ class TicketOrderRefundServiceTest {
         service.refundOrder(1L, 9001L);
 
         verify(showtimeMapper, never()).selectById(anyLong());
-        verify(ticketOrderItemMapper, never()).selectList(any());
+        verify(ticketOrderItemMapper, never()).selectByOrderIdForUpdate(anyLong());
         verify(showtimeSeatMapper, never()).releaseSoldSeatsByOrder(any(), any(), any());
     }
 
@@ -88,6 +93,7 @@ class TicketOrderRefundServiceTest {
     @Test
     void startedShowtimeShouldRejectRefundBeforeAnySeatWrite() {
         when(ticketOrderMapper.selectByIdForUpdate(9001L)).thenReturn(order("PAID"));
+        when(ticketOrderItemMapper.selectByOrderIdForUpdate(9001L)).thenReturn(items());
         when(showtimeMapper.selectById(1001L)).thenReturn(showtime(LocalDateTime.now().minusSeconds(1)));
 
         assertError(() -> service.refundOrder(1L, 9001L), ErrorCode.REFUND_NOT_ALLOWED);
@@ -97,10 +103,28 @@ class TicketOrderRefundServiceTest {
     }
 
     @Test
+    void usedTicketShouldRejectRefundBeforeAnyBusinessWrite() {
+        java.util.List<TicketOrderItem> items = items();
+        items.get(0).setTicketStatus(2);
+        items.get(0).setUsedTime(LocalDateTime.now().minusMinutes(1));
+        items.get(0).setUsedByUserId(1L);
+        when(ticketOrderMapper.selectByIdForUpdate(9001L)).thenReturn(order("PAID"));
+        when(ticketOrderItemMapper.selectByOrderIdForUpdate(9001L)).thenReturn(items);
+
+        assertError(() -> service.refundOrder(1L, 9001L), ErrorCode.REFUND_NOT_ALLOWED);
+
+        verify(showtimeMapper, never()).selectById(anyLong());
+        verify(showtimeSeatMapper, never()).releaseSoldSeatsByOrder(any(), any(), any());
+        verify(showtimeMapper, never()).increaseAvailableSeats(anyLong(), any(Integer.class));
+        verify(ticketOrderMapper, never()).refundPaidOrder(anyLong());
+        verify(ticketOrderItemMapper, never()).markRefundedByOrder(anyLong(), anyList(), anyList(), any(Integer.class));
+    }
+
+    @Test
     void seatOrCounterOrTicketUpdateMismatchShouldFail() {
         when(ticketOrderMapper.selectByIdForUpdate(anyLong())).thenReturn(order("PAID"));
         when(showtimeMapper.selectById(1001L)).thenReturn(showtime(LocalDateTime.now().plusHours(1)));
-        when(ticketOrderItemMapper.selectList(any())).thenReturn(items());
+        when(ticketOrderItemMapper.selectByOrderIdForUpdate(anyLong())).thenReturn(items());
         when(showtimeSeatMapper.releaseSoldSeatsByOrder(anyLong(), anyList(), anyLong())).thenReturn(1);
         assertError(() -> service.refundOrder(1L, 9001L), ErrorCode.INTERNAL_ERROR);
 
@@ -120,8 +144,7 @@ class TicketOrderRefundServiceTest {
         assertError(() -> service.refundOrder(null, 9001L), ErrorCode.UNAUTHORIZED);
         assertError(() -> service.refundOrder(1L, 0L), ErrorCode.INVALID_ID);
         when(ticketOrderMapper.selectByIdForUpdate(9001L)).thenReturn(order("PAID"));
-        when(showtimeMapper.selectById(1001L)).thenReturn(showtime(LocalDateTime.now().plusHours(1)));
-        when(ticketOrderItemMapper.selectList(any())).thenReturn(Collections.emptyList());
+        when(ticketOrderItemMapper.selectByOrderIdForUpdate(9001L)).thenReturn(Collections.emptyList());
         assertError(() -> service.refundOrder(1L, 9001L), ErrorCode.INTERNAL_ERROR);
     }
 
@@ -144,8 +167,10 @@ class TicketOrderRefundServiceTest {
     }
 
     private java.util.List<TicketOrderItem> items() {
-        TicketOrderItem first = new TicketOrderItem(); first.setId(1L); first.setSeatId(101L);
-        TicketOrderItem second = new TicketOrderItem(); second.setId(2L); second.setSeatId(102L);
+        TicketOrderItem first = new TicketOrderItem();
+        first.setId(1L); first.setSeatId(101L); first.setTicketStatus(0);
+        TicketOrderItem second = new TicketOrderItem();
+        second.setId(2L); second.setSeatId(102L); second.setTicketStatus(1);
         return Arrays.asList(first, second);
     }
 

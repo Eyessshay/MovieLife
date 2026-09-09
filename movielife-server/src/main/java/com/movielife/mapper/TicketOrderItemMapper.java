@@ -5,12 +5,17 @@ import com.movielife.entity.TicketOrderItem;
 import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 import java.util.List;
 
 @Mapper
 public interface TicketOrderItemMapper extends BaseMapper<TicketOrderItem> {
+
+    @Select("SELECT * FROM tb_ticket_order_item " +
+            "WHERE order_id = #{orderId} ORDER BY id ASC FOR UPDATE")
+    List<TicketOrderItem> selectByOrderIdForUpdate(@Param("orderId") Long orderId);
 
     @Insert("<script>" +
             "INSERT INTO tb_ticket_order_item " +
