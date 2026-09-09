@@ -8,14 +8,35 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 @Mapper
 public interface TicketOrderItemMapper extends BaseMapper<TicketOrderItem> {
 
+    @Select("SELECT * FROM tb_ticket_order_item WHERE ticket_code = #{ticketCode}")
+    TicketOrderItem selectByTicketCode(@Param("ticketCode") String ticketCode);
+
+    @Select("SELECT * FROM tb_ticket_order_item " +
+            "WHERE id = #{itemId} AND order_id = #{orderId} FOR UPDATE")
+    TicketOrderItem selectByIdAndOrderIdForUpdate(@Param("itemId") Long itemId,
+                                                   @Param("orderId") Long orderId);
+
     @Select("SELECT * FROM tb_ticket_order_item " +
             "WHERE order_id = #{orderId} ORDER BY id ASC FOR UPDATE")
     List<TicketOrderItem> selectByOrderIdForUpdate(@Param("orderId") Long orderId);
+
+    @Update("UPDATE tb_ticket_order_item SET ticket_status = #{usedStatus}, " +
+            "used_time = #{usedTime}, used_by_user_id = #{usedByUserId} " +
+            "WHERE id = #{itemId} AND order_id = #{orderId} " +
+            "AND ticket_status = #{validStatus} " +
+            "AND used_time IS NULL AND used_by_user_id IS NULL")
+    int markUsed(@Param("itemId") Long itemId,
+                 @Param("orderId") Long orderId,
+                 @Param("validStatus") int validStatus,
+                 @Param("usedStatus") int usedStatus,
+                 @Param("usedTime") LocalDateTime usedTime,
+                 @Param("usedByUserId") Long usedByUserId);
 
     @Insert("<script>" +
             "INSERT INTO tb_ticket_order_item " +

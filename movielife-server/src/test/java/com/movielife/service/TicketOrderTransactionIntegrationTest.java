@@ -14,6 +14,7 @@ import com.movielife.entity.TicketOrder;
 import com.movielife.entity.TicketOrderItem;
 import com.movielife.entity.User;
 import com.movielife.entity.Venue;
+import com.movielife.entity.VenueStaff;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.mapper.HallMapper;
@@ -25,11 +26,14 @@ import com.movielife.mapper.TicketOrderItemMapper;
 import com.movielife.mapper.TicketOrderMapper;
 import com.movielife.mapper.UserMapper;
 import com.movielife.mapper.VenueMapper;
+import com.movielife.mapper.VenueStaffMapper;
 import com.movielife.utils.UserHolder;
 import com.movielife.vo.CreateTicketOrderVO;
 import com.movielife.vo.PayTicketOrderVO;
 import com.movielife.vo.SeatLockVO;
 import com.movielife.service.impl.TicketOrderCancellationService;
+import com.movielife.service.impl.TicketVerificationService;
+import com.movielife.service.TicketVerificationResult;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -63,6 +67,7 @@ class TicketOrderTransactionIntegrationTest {
     @Autowired private UserMapper userMapper;
     @Autowired private MovieMapper movieMapper;
     @Autowired private VenueMapper venueMapper;
+    @Autowired private VenueStaffMapper venueStaffMapper;
     @Autowired private HallMapper hallMapper;
     @Autowired private SeatMapper seatMapper;
     @Autowired private ShowtimeMapper showtimeMapper;
@@ -70,6 +75,7 @@ class TicketOrderTransactionIntegrationTest {
     @Autowired private TicketOrderMapper ticketOrderMapper;
     @Autowired private TicketOrderItemMapper ticketOrderItemMapper;
     @Autowired private TicketOrderCancellationService cancellationService;
+    @Autowired private TicketVerificationService ticketVerificationService;
     @Autowired private org.springframework.transaction.PlatformTransactionManager transactionManager;
 
     private final Set<String> cleanupKeys = new LinkedHashSet<>();
@@ -91,6 +97,8 @@ class TicketOrderTransactionIntegrationTest {
             redisTemplate.delete(cleanupKeys);
         }
         if (context != null) {
+            venueStaffMapper.delete(new LambdaQueryWrapper<VenueStaff>()
+                    .eq(VenueStaff::getVenueId, context.venueId));
             List<TicketOrder> orders = ticketOrderMapper.selectList(
                     new LambdaQueryWrapper<TicketOrder>()
                             .eq(TicketOrder::getShowtimeId, context.showtime.getId()));
@@ -814,6 +822,116 @@ class TicketOrderTransactionIntegrationTest {
     }
 
     @Test
+    void verificationShouldUseOneTicketOnlyAndPreserveFirstEvidenceOnRetry() {
+        Long id = createPaidOrderForIssuance();
+        ticketOrderService.issueTickets(1L, id);
+        grantVenueStaff(1L, 1);
+        List<TicketOrderItem> beforeItems = issuanceItems(id);
+        List<ShowtimeSeat> beforeSeats = queryStates();
+        Integer beforeAvailableSeats = showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats();
+
+        TicketVerificationResult result = ticketVerificationService.verifyTicket(
+                1L, beforeItems.get(0).getTicketCode());
+
+        assertThat(result.getTicketStatus()).isEqualTo(2);
+        assertThat(result.getOrderId()).isEqualTo(id);
+        assertThat(result.getShowtimeId()).isEqualTo(context.showtime.getId());
+        assertThat(result.getVenueId()).isEqualTo(context.venueId);
+        assertThat(result.getHallId()).isEqualTo(context.hallId);
+        assertThat(result.getSeatId()).isEqualTo(beforeItems.get(0).getSeatId());
+        assertThat(result.getUsedTime()).isNotNull();
+
+        List<TicketOrderItem> afterItems = issuanceItems(id);
+        TicketOrderItem used = afterItems.get(0);
+        assertThat(used.getTicketStatus()).isEqualTo(2);
+        assertThat(used.getUsedTime()).isEqualTo(result.getUsedTime());
+        assertThat(used.getUsedByUserId()).isEqualTo(1L);
+        assertThat(afterItems.get(1).getTicketStatus()).isEqualTo(1);
+        assertThat(afterItems.get(1).getUsedTime()).isNull();
+        assertThat(ticketOrderMapper.selectById(id).getStatus()).isEqualTo("PAID");
+        assertThat(queryStates()).isEqualTo(beforeSeats);
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats())
+                .isEqualTo(beforeAvailableSeats);
+
+        assertThatThrownBy(() -> ticketVerificationService.verifyTicket(1L, used.getTicketCode()))
+                .isInstanceOfSatisfying(BusinessException.class, exception ->
+                        assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.TICKET_ALREADY_USED));
+        TicketOrderItem retried = issuanceItems(id).get(0);
+        assertThat(retried.getUsedTime()).isEqualTo(used.getUsedTime());
+        assertThat(retried.getUsedByUserId()).isEqualTo(used.getUsedByUserId());
+    }
+
+    @Test
+    void verificationShouldRejectInactiveVenueStaffWithoutChangingTicket() {
+        Long id = createPaidOrderForIssuance();
+        ticketOrderService.issueTickets(1L, id);
+        grantVenueStaff(1L, 0);
+        List<TicketOrderItem> before = issuanceItems(id);
+
+        assertThatThrownBy(() -> ticketVerificationService.verifyTicket(
+                1L, before.get(0).getTicketCode()))
+                .isInstanceOfSatisfying(BusinessException.class, exception ->
+                        assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.TICKET_VERIFY_FORBIDDEN));
+
+        assertThat(issuanceItems(id)).isEqualTo(before);
+        assertThat(ticketOrderMapper.selectById(id).getStatus()).isEqualTo("PAID");
+        assertThat(queryStates()).allSatisfy(state -> assertThat(state.getStatus()).isEqualTo(2));
+        assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats()).isZero();
+    }
+
+    @Test
+    void concurrentVerificationAndRefundShouldProduceOnlyAValidTerminalState() throws Exception {
+        Long id = createPaidOrderForIssuance();
+        ticketOrderService.issueTickets(1L, id);
+        grantVenueStaff(1L, 1);
+        String ticketCode = issuanceItems(id).get(0).getTicketCode();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<String> verification = executor.submit(() -> {
+                await(start);
+                try {
+                    ticketVerificationService.verifyTicket(1L, ticketCode);
+                    return "VERIFIED";
+                } catch (BusinessException exception) {
+                    return exception.getErrorCode().name();
+                }
+            });
+            Future<String> refund = executor.submit(() -> {
+                await(start);
+                try {
+                    ticketOrderService.refundOrder(1L, id);
+                    return "REFUNDED";
+                } catch (BusinessException exception) {
+                    return exception.getErrorCode().name();
+                }
+            });
+            start.countDown();
+            String verificationOutcome = verification.get(10, TimeUnit.SECONDS);
+            String refundOutcome = refund.get(10, TimeUnit.SECONDS);
+
+            TicketOrder order = ticketOrderMapper.selectById(id);
+            List<TicketOrderItem> items = issuanceItems(id);
+            if ("REFUNDED".equals(order.getStatus())) {
+                assertThat(refundOutcome).isEqualTo("REFUNDED");
+                assertThat(verificationOutcome).isEqualTo(ErrorCode.TICKET_REFUNDED.name());
+                assertThat(items).allSatisfy(item -> assertThat(item.getTicketStatus()).isEqualTo(3));
+                assertThat(queryStates()).allSatisfy(state -> assertThat(state.getStatus()).isZero());
+                assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats()).isEqualTo(2);
+            } else {
+                assertThat(order.getStatus()).isEqualTo("PAID");
+                assertThat(verificationOutcome).isEqualTo("VERIFIED");
+                assertThat(refundOutcome).isEqualTo(ErrorCode.REFUND_NOT_ALLOWED.name());
+                assertThat(items).extracting(TicketOrderItem::getTicketStatus).containsExactly(2, 1);
+                assertThat(queryStates()).allSatisfy(state -> assertThat(state.getStatus()).isEqualTo(2));
+                assertThat(showtimeMapper.selectById(context.showtime.getId()).getAvailableSeats()).isZero();
+            }
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
     void refundSeatOrCounterMismatchShouldRollbackEveryChange() {
         Long id = createPaidOrderForIssuance();
         ShowtimeSeat inconsistent = queryStates().get(1);
@@ -857,6 +975,14 @@ class TicketOrderTransactionIntegrationTest {
         Long id = ticketOrderService.createOrder(1L, lockAndBuildRequest(context).request).getOrderId();
         ticketOrderService.payOrder(1L, id);
         return id;
+    }
+
+    private void grantVenueStaff(Long userId, int status) {
+        VenueStaff staff = new VenueStaff();
+        staff.setUserId(userId);
+        staff.setVenueId(context.venueId);
+        staff.setStatus(status);
+        venueStaffMapper.insert(staff);
     }
 
     private List<TicketOrderItem> issuanceItems(Long id) {
