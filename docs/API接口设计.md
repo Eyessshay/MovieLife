@@ -356,8 +356,8 @@ POST /api/admin/tickets/verify          # 单张票验票核销（Step 9.1 仅�
 
 ```json
 {
-  "code": "SUCCESS",
-  "message": "success",
+  "code": "OK",
+  "message": "ok",
   "data": {
     "ticketCode": "8f2c89e9f65d4c12b749f091b2db36cc",
     "ticketStatus": 2,

@@ -9,11 +9,13 @@ import com.movielife.entity.Showtime;
 import com.movielife.entity.ShowtimeSeat;
 import com.movielife.entity.TicketOrder;
 import com.movielife.entity.TicketOrderItem;
+import com.movielife.entity.VenueStaff;
 import com.movielife.mapper.SeatMapper;
 import com.movielife.mapper.ShowtimeMapper;
 import com.movielife.mapper.ShowtimeSeatMapper;
 import com.movielife.mapper.TicketOrderItemMapper;
 import com.movielife.mapper.TicketOrderMapper;
+import com.movielife.mapper.VenueStaffMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -54,11 +56,13 @@ class TicketOrderHttpIntegrationTest {
     @Autowired private ShowtimeSeatMapper showtimeSeatMapper;
     @Autowired private TicketOrderMapper ticketOrderMapper;
     @Autowired private TicketOrderItemMapper ticketOrderItemMapper;
+    @Autowired private VenueStaffMapper venueStaffMapper;
 
     private final List<Long> selectedSeatIds = new ArrayList<>();
     private final Set<String> loginTokens = new LinkedHashSet<>();
     private final Set<String> loginPhones = new LinkedHashSet<>();
     private final Set<String> lockTokens = new LinkedHashSet<>();
+    private final List<Long> venueStaffIds = new ArrayList<>();
     private Long showtimeId;
 
     @BeforeEach
@@ -105,6 +109,9 @@ class TicketOrderHttpIntegrationTest {
 
     @AfterEach
     void cleanUp() {
+        if (!venueStaffIds.isEmpty()) {
+            venueStaffMapper.deleteBatchIds(venueStaffIds);
+        }
         if (showtimeId != null) {
             List<TicketOrder> orders = ticketOrderMapper.selectList(
                     new LambdaQueryWrapper<TicketOrder>()
@@ -524,6 +531,84 @@ class TicketOrderHttpIntegrationTest {
         assertThat(showtimeMapper.selectById(showtimeId).getAvailableSeats())
                 .isEqualTo(availableAfterCreate + selectedSeatIds.size());
         assertThat(redisTemplate.keys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*")).isEqualTo(redisKeysBeforePayment);
+    }
+
+    @Test
+    void ticketVerificationHttpFlowShouldEnforceVenuePermissionAndPreserveBusinessState() throws Exception {
+        LoginSession user = login("13800000009", "987654");
+        String seatJson = selectedSeatIds.get(0) + "," + selectedSeatIds.get(1);
+        ResponseEntity<String> lockResponse = post(
+                "/api/showtimes/" + showtimeId + "/seats/lock",
+                "{\"seatIds\":[" + seatJson + "]}", user.token);
+        assertThat(lockResponse.getStatusCodeValue()).isEqualTo(200);
+        String lockToken = json(lockResponse).path("data").path("lockToken").asText();
+        lockTokens.add(lockToken);
+        ResponseEntity<String> createResponse = post("/api/orders",
+                "{\"showtimeId\":" + showtimeId + ",\"seatIds\":[" + seatJson
+                        + "],\"lockToken\":\"" + lockToken + "\"}", user.token);
+        assertThat(createResponse.getStatusCodeValue()).isEqualTo(200);
+        long orderId = json(createResponse).path("data").path("orderId").asLong();
+        assertThat(post("/api/orders/" + orderId + "/pay", null, user.token)
+                .getStatusCodeValue()).isEqualTo(200);
+        ResponseEntity<String> issueResponse = post(
+                "/api/orders/" + orderId + "/issue", null, user.token);
+        assertThat(issueResponse.getStatusCodeValue()).isEqualTo(200);
+        JsonNode tickets = json(issueResponse).path("data");
+        String ticketCode = tickets.get(0).path("ticketCode").asText();
+
+        List<ShowtimeSeat> beforeSeats = showtimeSeatMapper.selectList(
+                new LambdaQueryWrapper<ShowtimeSeat>()
+                        .eq(ShowtimeSeat::getShowtimeId, showtimeId)
+                        .orderByAsc(ShowtimeSeat::getSeatId));
+        int beforeAvailableSeats = showtimeMapper.selectById(showtimeId).getAvailableSeats();
+        ResponseEntity<String> forbidden = post("/api/admin/tickets/verify",
+                "{\"ticketCode\":\"" + ticketCode + "\"}", user.token);
+        assertThat(forbidden.getStatusCodeValue()).isEqualTo(403);
+        assertThat(json(forbidden).path("code").asText()).isEqualTo("TICKET_VERIFY_FORBIDDEN");
+
+        VenueStaff staff = new VenueStaff();
+        staff.setUserId(user.userId);
+        staff.setVenueId(1L);
+        staff.setStatus(1);
+        assertThat(venueStaffMapper.insert(staff)).isEqualTo(1);
+        venueStaffIds.add(staff.getId());
+
+        ResponseEntity<String> verified = post("/api/admin/tickets/verify",
+                "{\"ticketCode\":\"  " + ticketCode + "  \"}", user.token);
+        assertThat(verified.getStatusCodeValue()).isEqualTo(200);
+        JsonNode verifiedBody = json(verified);
+        assertThat(verifiedBody.path("code").asText()).isEqualTo("OK");
+        assertThat(verifiedBody.path("data").path("ticketCode").asText()).isEqualTo(ticketCode);
+        assertThat(verifiedBody.path("data").path("ticketStatus").asInt()).isEqualTo(2);
+        assertThat(verifiedBody.path("data").path("orderId").asLong()).isEqualTo(orderId);
+        assertThat(verifiedBody.path("data").path("showtimeId").asLong()).isEqualTo(showtimeId);
+        assertThat(verifiedBody.path("data").path("venueId").asLong()).isEqualTo(1L);
+        assertThat(verifiedBody.path("data").path("hallId").asLong()).isEqualTo(1L);
+        assertThat(verifiedBody.path("data").path("seatId").asLong())
+                .isEqualTo(tickets.get(0).path("seatId").asLong());
+        LocalDateTime firstUsedTime = LocalDateTime.parse(
+                verifiedBody.path("data").path("usedTime").asText());
+
+        ResponseEntity<String> repeated = post("/api/admin/tickets/verify",
+                "{\"ticketCode\":\"" + ticketCode + "\"}", user.token);
+        assertThat(repeated.getStatusCodeValue()).isEqualTo(409);
+        assertThat(json(repeated).path("code").asText()).isEqualTo("TICKET_ALREADY_USED");
+        TicketOrderItem usedItem = ticketOrderItemMapper.selectByTicketCode(ticketCode);
+        assertThat(usedItem.getUsedTime()).isEqualTo(firstUsedTime);
+        assertThat(usedItem.getUsedByUserId()).isEqualTo(user.userId);
+
+        ResponseEntity<String> unknown = post("/api/admin/tickets/verify",
+                "{\"ticketCode\":\"unknown-ticket-code\"}", user.token);
+        assertThat(unknown.getStatusCodeValue()).isEqualTo(404);
+        assertThat(json(unknown).path("code").asText()).isEqualTo("TICKET_NOT_FOUND");
+
+        assertThat(ticketOrderMapper.selectById(orderId).getStatus()).isEqualTo("PAID");
+        assertThat(showtimeSeatMapper.selectList(new LambdaQueryWrapper<ShowtimeSeat>()
+                .eq(ShowtimeSeat::getShowtimeId, showtimeId)
+                .orderByAsc(ShowtimeSeat::getSeatId))).isEqualTo(beforeSeats);
+        assertThat(showtimeMapper.selectById(showtimeId).getAvailableSeats())
+                .isEqualTo(beforeAvailableSeats);
+        assertThat(redisTemplate.keys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*")).isEmpty();
     }
 
     private Long insertHistoricalOrder(Long userId, String status, int daysOffset) {
