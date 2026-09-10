@@ -373,6 +373,15 @@ VALUES (1, 1, 1, 1, '1排1座', 'NORMAL'),
        (6, 1, 2, 3, '2排3座', 'VIP')
 ON DUPLICATE KEY UPDATE seat_type = VALUES(seat_type), base_status = 1;
 
+INSERT INTO tb_seat (hall_id, row_no, col_no, seat_no, seat_type)
+VALUES (3, 1, 1, 'A01', 'NORMAL'),
+       (3, 1, 2, 'A02', 'NORMAL'),
+       (3, 1, 3, 'A03', 'VIP'),
+       (3, 2, 1, 'B01', 'NORMAL'),
+       (3, 2, 2, 'B02', 'NORMAL'),
+       (3, 2, 3, 'B03', 'VIP')
+ON DUPLICATE KEY UPDATE seat_type = VALUES(seat_type), base_status = 1;
+
 INSERT INTO tb_movie (id, title, original_title, category, region, language, release_date, duration, director, actors, summary, avg_score, score_count, status)
 VALUES (1, '示例电影', 'Sample Movie', '剧情/喜剧', '中国大陆', '中文', '2026-08-01', 120, '示例导演', '示例演员A,示例演员B', 'MovieLife 初始化示例电影数据。', 4.50, 1, 1)
 ON DUPLICATE KEY UPDATE title = VALUES(title), summary = VALUES(summary), avg_score = VALUES(avg_score), score_count = VALUES(score_count), status = VALUES(status);
@@ -383,13 +392,23 @@ ON DUPLICATE KEY UPDATE title = VALUES(title), description = VALUES(description)
 
 INSERT INTO tb_showtime (id, biz_type, biz_id, venue_id, hall_id, start_time, end_time, language_version, base_price, total_seats, available_seats, status)
 VALUES (1, 'MOVIE', 1, 1, 1, '2026-09-01 19:30:00', '2026-09-01 21:30:00', '国语 2D', 45.00, 6, 6, 1),
-       (2, 'ACTIVITY', 1, 2, 3, '2026-09-06 19:00:00', '2026-09-06 21:00:00', NULL, 199.00, 0, 0, 1)
-ON DUPLICATE KEY UPDATE start_time = VALUES(start_time), end_time = VALUES(end_time), status = VALUES(status);
+       (2, 'ACTIVITY', 1, 2, 3,
+        DATE_ADD(DATE_ADD(CURDATE(), INTERVAL 30 DAY), INTERVAL 19 HOUR),
+        DATE_ADD(DATE_ADD(CURDATE(), INTERVAL 30 DAY), INTERVAL 21 HOUR),
+        NULL, 199.00, 6, 6, 1)
+ON DUPLICATE KEY UPDATE start_time = VALUES(start_time), end_time = VALUES(end_time),
+                        total_seats = VALUES(total_seats),
+                        status = VALUES(status);
 
 INSERT INTO tb_showtime_seat (showtime_id, seat_id, status, price)
 SELECT 1, id, 0, CASE WHEN seat_type = 'VIP' THEN 60.00 ELSE 45.00 END
 FROM tb_seat WHERE hall_id = 1
 ON DUPLICATE KEY UPDATE price = VALUES(price), status = 0;
+
+INSERT INTO tb_showtime_seat (showtime_id, seat_id, status, price)
+SELECT 2, id, 0, CASE WHEN seat_type = 'VIP' THEN 299.00 ELSE 199.00 END
+FROM tb_seat WHERE hall_id = 3 AND base_status = 1
+ON DUPLICATE KEY UPDATE price = VALUES(price);
 
 INSERT INTO tb_follow (user_id, follow_user_id)
 VALUES (2, 3)

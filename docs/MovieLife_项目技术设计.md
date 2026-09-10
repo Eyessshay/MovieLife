@@ -1725,7 +1725,7 @@ TicketVerificationService 已实现单票核销。服务先按唯一票码做不
 
 阶段 10 只把现有固定座位票务能力扩展到 `ACTIVITY`，不重新设计阶段 1～9。适用活动必须落在既有 `Activity → Showtime → Venue/Hall → Seat/ShowtimeSeat` 关系中，并按具体物理座位售票。站票、通票、票档库存、多日票、套票和不选座活动需要不同库存模型，本阶段明确排除，不允许通过虚拟 Seat 套用现有交易流程。
 
-现有 `tb_activity`、`tb_showtime.biz_type/biz_id`、`tb_showtime_seat`、`tb_ticket_order.showtime_id` 和 TicketOrderItem 已足以表达固定座位活动订单，Step 10.1 不新增活动订单表、不增加 `ticket_mode` 字段，也不复制锁座、订单、支付、出票、退款或核销状态机。当前 SQL 中 `total_seats=0` 的 Activity 示例场次只属于历史预留数据；在后续持久化 Step 为活动场次建立有效 Hall、启用 Seat 和完整 ShowtimeSeat 前，它不得进入固定座位购票链路。
+现有 `tb_activity`、`tb_showtime.biz_type/biz_id`、`tb_showtime_seat`、`tb_ticket_order.showtime_id` 和 TicketOrderItem 已足以表达固定座位活动订单，Step 10.1 不新增活动订单表、不增加 `ticket_mode` 字段，也不复制锁座、订单、支付、出票、退款或核销状态机。Step 10.1 设计时 SQL 中 `total_seats=0` 的 Activity 示例场次只属于历史预留数据，在建立有效 Hall、启用 Seat 和完整 ShowtimeSeat 前不得进入固定座位购票链路；该数据缺口已由下述 Step 10.2 修正。
 
 公开活动查询冻结为 `GET /api/activities`、`GET /api/activities/{id}` 和 `GET /api/activities/{id}/showtimes`。列表与详情只暴露 `status=1` 的 Activity；`priceMin/priceMax` 只是发现页展示范围，不能参与订单计价。场次查询同时要求 Activity 有效、`biz_type=ACTIVITY`、`biz_id` 匹配、Showtime 有效且未开场、Venue 有效、Hall 归属正确，并按开始时间和 ID 稳定排序；跨场馆结果必须批量补齐 Venue 与 Hall，禁止 N+1。无匹配场次返回空列表；活动不存在、草稿或下线统一返回 `ACTIVITY_NOT_FOUND`。本 Step 不顺带开放 Activity 收藏、评价、附近活动或管理端写接口。
 
@@ -1737,7 +1737,19 @@ TicketVerificationService 已实现单票核销。服务先按唯一票码做不
 
 主动取消、自动超时、模拟支付、出票、整单退款和单票核销不新增 Activity 分支状态，只根据订单关联的 Showtime 和现有 MySQL 事实工作。订单与明细继续采用“先订单、后明细”的锁顺序，条件 UPDATE 和严格 affectedRows 校验不变；查询、取消、超时、支付、出票、退款和核销不读取或写入新的 Redis 状态。活动核销权限仍由 Showtime.venue_id 与 `tb_venue_staff.status=1` 推导，不接受客户端提交 Venue。
 
-Step 10.1 只修改 API 与技术设计文档并冻结上述契约，不新增或修改 Java、测试和数据库结构，不开放真实 HTTP 接口，不提前实现后续 Step。下一小步应单独处理 Activity 持久化映射、合法固定座位测试数据及基础查询；只有该 Step 完成自动化测试、真实 MySQL/HTTP 联调、Maven BUILD SUCCESS、独立 commit 并冻结后，才能扩展通用场次、锁座和订单链路。
+Step 10.1 只修改 API 与技术设计文档并冻结上述契约，不新增或修改 Java、测试和数据库结构，不开放真实 HTTP 接口，不提前实现后续 Step。其指定的下一小步是单独处理 Activity 持久化映射、合法固定座位测试数据及基础查询；只有该 Step 完成自动化测试、真实 MySQL/HTTP 联调、Maven BUILD SUCCESS、独立 commit 并冻结后，才能扩展通用场次、锁座和订单链路。该小步的完成状态记录如下。
+
+### 7.2 Step 10.2：Activity 持久化与基础查询
+
+本 Step 已增加 `Activity` Entity、Mapper、Service、Controller、查询 DTO/VO 和 `ACTIVITY_NOT_FOUND` 错误码，开放 `GET /api/activities`、`GET /api/activities/{id}`、`GET /api/activities/{id}/showtimes` 三项无需登录的只读接口。列表只查询 `status=1`，支持城市、类型、标题关键字与受限分页；详情将不存在、草稿和下线统一隐藏。活动场次只查询未来有效的 `ACTIVITY` Showtime，并按 `start_time ASC, id ASC` 稳定排序。
+
+场次补充信息继续沿 `Activity → Showtime → Venue/Hall` 关系读取，不向 Activity 增加场馆字段。实现先取得一批 Showtime，再批量查询 Venue 和 Hall，避免 N+1；场次主键、Venue/Hall 外键、时间范围、价格、座位计数及 Hall 归属不完整时统一失败关闭为 `INTERNAL_ERROR`，停用 Venue 的场次不对外展示。三项查询不读取或写入 Redis，也不修改 TicketOrder、TicketOrderItem、ShowtimeSeat 或 `available_seats`。
+
+`sql/movielife.sql` 已将初始化活动场次补成 Hall 3 下 6 个启用物理 Seat 和完整 ShowtimeSeat；增量脚本 `V10_2__seated_activity_seed.sql` 可重复执行，并按 ShowtimeSeat 现有状态重算 `total_seats` 与 `available_seats`，不会在冲突更新中把已售座位恢复为 AVAILABLE。该数据只建立固定座位活动的合法查询前提，不改变阶段 7～9 的 Redis 临时资格和 MySQL 最终事实边界。
+
+自动化测试覆盖 Controller 参数与错误映射、Service 过滤排序/批量关联/异常数据、真实持久化以及随机端口 HTTP 列表 → 详情 → 场次链路。迁移在隔离 MySQL 8.0.17 连续执行两次后仍保持 1 个有效活动场次、6 个启用 Seat、6 条 ShowtimeSeat 和一致余票；真实 HTTP 测试同时确认 MySQL 记录与 Redis `seat:lock:*` 前后不变。全量 359 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功，Step 10.2 至此冻结。
+
+本 Step 不扩展通用 Showtime 详情或 Seat Map，不接入 Activity 锁座、订单、支付、出票、退款、核销，也不实现附近活动、收藏、评价、管理端、非固定座位库存、Redis Stream、MQ、第三方支付、部分退款、核销撤销或 AI。后续只能另开一个小 Step，并继续执行设计、实现、自动化测试、真实联调、BUILD SUCCESS、commit、冻结。
 
 ## 8. 服务端模块建议
 
@@ -1774,4 +1786,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.5，阶段 10 Step 10.1 已冻结固定座位 Activity 的范围、公开查询、兼容字段及复用既有票务事实的边界，尚未开放任何 Activity HTTP 实现。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.6，阶段 10 Step 10.2 已冻结 Activity 持久化、合法固定座位种子数据及三项公开只读查询，通用场次、Seat Map 与交易链路的 Activity 兼容尚未实现。

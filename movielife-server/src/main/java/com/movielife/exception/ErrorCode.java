@@ -28,6 +28,7 @@ public enum ErrorCode {
     INVALID_VENUE_TYPE("INVALID_VENUE_TYPE", "场馆类型不合法", HttpStatus.BAD_REQUEST),
     INVALID_BIZ_TYPE("INVALID_BIZ_TYPE", "业务类型不合法", HttpStatus.BAD_REQUEST),
     MOVIE_NOT_FOUND("MOVIE_NOT_FOUND", "电影不存在", HttpStatus.NOT_FOUND),
+    ACTIVITY_NOT_FOUND("ACTIVITY_NOT_FOUND", "活动不存在", HttpStatus.NOT_FOUND),
     VENUE_NOT_FOUND("VENUE_NOT_FOUND", "场馆不存在", HttpStatus.NOT_FOUND),
     SHOWTIME_NOT_FOUND("SHOWTIME_NOT_FOUND", "场次不存在", HttpStatus.NOT_FOUND),
     SEAT_ALREADY_LOCKED("SEAT_ALREADY_LOCKED", "所选座位已被锁定", HttpStatus.CONFLICT),
