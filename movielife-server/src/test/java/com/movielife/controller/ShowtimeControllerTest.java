@@ -65,6 +65,7 @@ class ShowtimeControllerTest {
         detail.setVenueName("MovieLife影城");
         detail.setHallId(2L);
         detail.setHallName("2号厅");
+        detail.setBizType("MOVIE");
         detail.setMovieId(3L);
         detail.setMovieName("示例电影");
         detail.setStartTime(LocalDateTime.of(2026, 9, 4, 19, 30));
@@ -77,8 +78,34 @@ class ShowtimeControllerTest {
                 .andExpect(jsonPath("$.data.id").value(101))
                 .andExpect(jsonPath("$.data.venueName").value("MovieLife影城"))
                 .andExpect(jsonPath("$.data.hallName").value("2号厅"))
+                .andExpect(jsonPath("$.data.bizType").value("MOVIE"))
                 .andExpect(jsonPath("$.data.movieName").value("示例电影"))
                 .andExpect(jsonPath("$.data.basePrice").value(45.00));
+    }
+
+    @Test
+    void shouldReturnPublicActivityShowtimeDetail() throws Exception {
+        ShowtimeDetailVO detail = new ShowtimeDetailVO();
+        detail.setId(202L);
+        detail.setVenueId(2L);
+        detail.setVenueName("MovieLife剧场");
+        detail.setHallId(3L);
+        detail.setHallName("主剧场");
+        detail.setBizType("ACTIVITY");
+        detail.setActivityId(8L);
+        detail.setActivityName("固定座位话剧");
+        detail.setStartTime(LocalDateTime.of(2026, 10, 4, 19, 30));
+        detail.setEndTime(LocalDateTime.of(2026, 10, 4, 21, 30));
+        detail.setBasePrice(new BigDecimal("199.00"));
+        when(showtimeService.queryShowtimeDetail(202L)).thenReturn(detail);
+
+        mockMvc.perform(get("/api/showtimes/202"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.bizType").value("ACTIVITY"))
+                .andExpect(jsonPath("$.data.activityId").value(8))
+                .andExpect(jsonPath("$.data.activityName").value("固定座位话剧"))
+                .andExpect(jsonPath("$.data.movieId").doesNotExist())
+                .andExpect(jsonPath("$.data.movieName").doesNotExist());
     }
 
     @Test

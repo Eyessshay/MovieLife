@@ -1,5 +1,6 @@
 package com.movielife.service;
 
+import com.movielife.entity.Activity;
 import com.movielife.entity.Hall;
 import com.movielife.entity.Movie;
 import com.movielife.entity.Seat;
@@ -8,6 +9,7 @@ import com.movielife.entity.ShowtimeSeat;
 import com.movielife.entity.Venue;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
+import com.movielife.mapper.ActivityMapper;
 import com.movielife.mapper.HallMapper;
 import com.movielife.mapper.MovieMapper;
 import com.movielife.mapper.SeatMapper;
@@ -15,6 +17,7 @@ import com.movielife.mapper.ShowtimeMapper;
 import com.movielife.mapper.ShowtimeSeatMapper;
 import com.movielife.mapper.VenueMapper;
 import com.movielife.service.impl.ShowtimeServiceImpl;
+import com.movielife.vo.ShowtimeDetailVO;
 import com.movielife.vo.ShowtimeSeatMapVO;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,6 +48,8 @@ class ShowtimeServiceImplTest {
     @Mock
     private MovieMapper movieMapper;
     @Mock
+    private ActivityMapper activityMapper;
+    @Mock
     private SeatMapper seatMapper;
     @Mock
     private ShowtimeSeatMapper showtimeSeatMapper;
@@ -58,6 +63,7 @@ class ShowtimeServiceImplTest {
                 venueMapper,
                 hallMapper,
                 movieMapper,
+                activityMapper,
                 seatMapper,
                 showtimeSeatMapper
         );
@@ -111,6 +117,47 @@ class ShowtimeServiceImplTest {
     }
 
     @Test
+    void activityDetailShouldUseActivityContextAndKeepMovieFieldsNull() {
+        Showtime showtime = validActivityShowtime();
+        Activity activity = activity(1);
+        activity.setId(8L);
+        activity.setTitle("固定座位话剧");
+        showtime.setBizId(8L);
+        when(showtimeMapper.selectById(1L)).thenReturn(showtime);
+        when(venueMapper.selectById(1L)).thenReturn(enabledVenue());
+        when(hallMapper.selectById(1L)).thenReturn(hall(1L));
+        when(activityMapper.selectById(8L)).thenReturn(activity);
+
+        ShowtimeDetailVO result = showtimeService.queryShowtimeDetail(1L);
+
+        assertThat(result.getBizType()).isEqualTo("ACTIVITY");
+        assertThat(result.getActivityId()).isEqualTo(8L);
+        assertThat(result.getActivityName()).isEqualTo("固定座位话剧");
+        assertThat(result.getMovieId()).isNull();
+        assertThat(result.getMovieName()).isNull();
+    }
+
+    @Test
+    void disabledActivityShouldNotBeAvailable() {
+        Showtime showtime = validActivityShowtime();
+        when(showtimeMapper.selectById(1L)).thenReturn(showtime);
+        when(venueMapper.selectById(1L)).thenReturn(enabledVenue());
+        when(hallMapper.selectById(1L)).thenReturn(hall(1L));
+        when(activityMapper.selectById(1L)).thenReturn(activity(0));
+
+        assertShowtimeNotFound(() -> showtimeService.queryShowtimeDetail(1L));
+    }
+
+    @Test
+    void unknownBusinessTypeShouldNotBeAvailable() {
+        Showtime showtime = validShowtime();
+        showtime.setBizType("UNKNOWN");
+        when(showtimeMapper.selectById(1L)).thenReturn(showtime);
+
+        assertShowtimeNotFound(() -> showtimeService.queryShowtimeDetail(1L));
+    }
+
+    @Test
     void seatMapShouldBatchLoadSeatTemplateAndShowtimeStatesOnce() {
         Showtime showtime = validShowtime();
         Seat first = seat(1L, 1, 1);
@@ -132,6 +179,48 @@ class ShowtimeServiceImplTest {
         verify(showtimeSeatMapper, times(1)).selectList(any());
     }
 
+    @Test
+    void activitySeatMapShouldValidateFixedSeatCounts() {
+        Showtime showtime = validActivityShowtime();
+        showtime.setTotalSeats(2);
+        showtime.setAvailableSeats(1);
+        Seat first = seat(1L, 1, 1);
+        Seat second = seat(2L, 1, 2);
+        ShowtimeSeat firstState = state(1L, 0, "199.00");
+        firstState.setShowtimeId(1L);
+        ShowtimeSeat secondState = state(2L, 2, "299.00");
+        secondState.setShowtimeId(1L);
+        when(showtimeMapper.selectById(1L)).thenReturn(showtime);
+        when(venueMapper.selectById(1L)).thenReturn(enabledVenue());
+        when(hallMapper.selectById(1L)).thenReturn(hall(1L));
+        when(activityMapper.selectById(1L)).thenReturn(activity(1));
+        when(seatMapper.selectList(any())).thenReturn(Arrays.asList(first, second));
+        when(showtimeSeatMapper.selectList(any())).thenReturn(Arrays.asList(firstState, secondState));
+
+        ShowtimeSeatMapVO result = showtimeService.querySeatMap(1L);
+
+        assertThat(result.getSeats()).extracting("seatId").containsExactly(1L, 2L);
+    }
+
+    @Test
+    void activitySeatMapCountMismatchShouldReturnInternalError() {
+        Showtime showtime = validActivityShowtime();
+        showtime.setTotalSeats(1);
+        showtime.setAvailableSeats(1);
+        Seat seat = seat(1L, 1, 1);
+        ShowtimeSeat state = state(1L, 0, "199.00");
+        state.setShowtimeId(1L);
+        when(showtimeMapper.selectById(1L)).thenReturn(showtime);
+        when(venueMapper.selectById(1L)).thenReturn(enabledVenue());
+        when(hallMapper.selectById(1L)).thenReturn(hall(1L));
+        when(activityMapper.selectById(1L)).thenReturn(activity(1));
+        when(seatMapper.selectList(any())).thenReturn(Arrays.asList(seat));
+        when(showtimeSeatMapper.selectList(any())).thenReturn(Arrays.asList(state));
+        showtime.setAvailableSeats(0);
+
+        assertInternalError(() -> showtimeService.querySeatMap(1L));
+    }
+
     private Showtime validShowtime() {
         Showtime showtime = new Showtime();
         showtime.setId(1L);
@@ -144,6 +233,19 @@ class ShowtimeServiceImplTest {
         showtime.setBasePrice(new BigDecimal("45.00"));
         showtime.setStatus(1);
         return showtime;
+    }
+
+    private Showtime validActivityShowtime() {
+        Showtime showtime = validShowtime();
+        showtime.setBizType("ACTIVITY");
+        return showtime;
+    }
+
+    private Activity activity(int status) {
+        Activity activity = new Activity();
+        activity.setId(1L);
+        activity.setStatus(status);
+        return activity;
     }
 
     private Venue enabledVenue() {

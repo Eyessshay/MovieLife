@@ -1,11 +1,13 @@
 package com.movielife.service;
 
+import com.movielife.entity.Activity;
 import com.movielife.entity.Hall;
 import com.movielife.entity.Movie;
 import com.movielife.entity.Showtime;
 import com.movielife.entity.Venue;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
+import com.movielife.mapper.ActivityMapper;
 import com.movielife.mapper.HallMapper;
 import com.movielife.mapper.MovieMapper;
 import com.movielife.mapper.ShowtimeMapper;
@@ -50,6 +52,8 @@ class ShowtimeServiceIntegrationTest {
     private HallMapper hallMapper;
     @Autowired
     private MovieMapper movieMapper;
+    @Autowired
+    private ActivityMapper activityMapper;
 
     @Test
     void shouldReturnFutureMovieShowtimeWithRelatedDetails() {
@@ -72,15 +76,18 @@ class ShowtimeServiceIntegrationTest {
         assertThat(result.getVenueName()).isEqualTo("场次详情影院");
         assertThat(result.getHallId()).isEqualTo(hall.getId());
         assertThat(result.getHallName()).isEqualTo("详情测试厅");
+        assertThat(result.getBizType()).isEqualTo("MOVIE");
         assertThat(result.getMovieId()).isEqualTo(movie.getId());
         assertThat(result.getMovieName()).isEqualTo("场次详情电影");
+        assertThat(result.getActivityId()).isNull();
+        assertThat(result.getActivityName()).isNull();
         assertThat(result.getStartTime()).isEqualTo(showtime.getStartTime());
         assertThat(result.getEndTime()).isEqualTo(showtime.getEndTime());
         assertThat(result.getBasePrice()).isEqualByComparingTo("45.00");
     }
 
     @Test
-    void shouldHideMissingStoppedExpiredAndNonMovieShowtimes() {
+    void shouldHideMissingStoppedExpiredAndUnknownShowtimes() {
         Movie movie = insertMovie("不可用场次电影");
         Venue venue = insertVenue(1, "不可用场次影院");
         Hall hall = insertHall(venue, "不可用测试厅");
@@ -90,14 +97,38 @@ class ShowtimeServiceIntegrationTest {
         Showtime expired = insertShowtime(
                 venue, hall, movie, "MOVIE", LocalDateTime.now().minusHours(1), 1
         );
-        Showtime activity = insertShowtime(
-                venue, hall, movie, "ACTIVITY", LocalDateTime.now().plusDays(1), 1
+        Showtime unknown = insertShowtime(
+                venue, hall, movie, "UNKNOWN", LocalDateTime.now().plusDays(1), 1
         );
 
         assertError(() -> showtimeService.queryShowtimeDetail(999999999L), ErrorCode.SHOWTIME_NOT_FOUND);
         assertError(() -> showtimeService.queryShowtimeDetail(stopped.getId()), ErrorCode.SHOWTIME_NOT_FOUND);
         assertError(() -> showtimeService.queryShowtimeDetail(expired.getId()), ErrorCode.SHOWTIME_NOT_FOUND);
-        assertError(() -> showtimeService.queryShowtimeDetail(activity.getId()), ErrorCode.SHOWTIME_NOT_FOUND);
+        assertError(() -> showtimeService.queryShowtimeDetail(unknown.getId()), ErrorCode.SHOWTIME_NOT_FOUND);
+    }
+
+    @Test
+    void shouldReturnFutureActivityShowtimeAndHideDisabledActivity() {
+        Activity active = insertActivity("场次详情话剧", 1);
+        Activity disabled = insertActivity("已下线话剧", 0);
+        Venue venue = insertVenue(1, "活动详情剧场");
+        Hall hall = insertHall(venue, "活动详情厅");
+        Showtime activeShowtime = insertShowtime(
+                venue, hall, active.getId(), "ACTIVITY", LocalDateTime.now().plusDays(1), 1
+        );
+        Showtime disabledShowtime = insertShowtime(
+                venue, hall, disabled.getId(), "ACTIVITY", LocalDateTime.now().plusDays(2), 1
+        );
+
+        ShowtimeDetailVO result = showtimeService.queryShowtimeDetail(activeShowtime.getId());
+
+        assertThat(result.getBizType()).isEqualTo("ACTIVITY");
+        assertThat(result.getActivityId()).isEqualTo(active.getId());
+        assertThat(result.getActivityName()).isEqualTo("场次详情话剧");
+        assertThat(result.getMovieId()).isNull();
+        assertThat(result.getMovieName()).isNull();
+        assertError(() -> showtimeService.queryShowtimeDetail(disabledShowtime.getId()),
+                ErrorCode.SHOWTIME_NOT_FOUND);
     }
 
     @Test
@@ -121,6 +152,19 @@ class ShowtimeServiceIntegrationTest {
         movie.setStatus(1);
         movieMapper.insert(movie);
         return movie;
+    }
+
+    private Activity insertActivity(String title, int status) {
+        Activity activity = new Activity();
+        activity.setTitle(title);
+        activity.setType("drama");
+        activity.setCity("上海");
+        activity.setDescription("场次详情测试活动");
+        activity.setPriceMin(new BigDecimal("199.00"));
+        activity.setPriceMax(new BigDecimal("299.00"));
+        activity.setStatus(status);
+        activityMapper.insert(activity);
+        return activity;
     }
 
     private Venue insertVenue(int status, String name) {
@@ -149,9 +193,18 @@ class ShowtimeServiceIntegrationTest {
                                     String bizType,
                                     LocalDateTime startTime,
                                     int status) {
+        return insertShowtime(venue, hall, movie.getId(), bizType, startTime, status);
+    }
+
+    private Showtime insertShowtime(Venue venue,
+                                    Hall hall,
+                                    Long bizId,
+                                    String bizType,
+                                    LocalDateTime startTime,
+                                    int status) {
         Showtime showtime = new Showtime();
         showtime.setBizType(bizType);
-        showtime.setBizId(movie.getId());
+        showtime.setBizId(bizId);
         showtime.setVenueId(venue.getId());
         showtime.setHallId(hall.getId());
         showtime.setStartTime(startTime);

@@ -1751,6 +1751,18 @@ Step 10.1 只修改 API 与技术设计文档并冻结上述契约，不新增�
 
 本 Step 不扩展通用 Showtime 详情或 Seat Map，不接入 Activity 锁座、订单、支付、出票、退款、核销，也不实现附近活动、收藏、评价、管理端、非固定座位库存、Redis Stream、MQ、第三方支付、部分退款、核销撤销或 AI。后续只能另开一个小 Step，并继续执行设计、实现、自动化测试、真实联调、BUILD SUCCESS、commit、冻结。
 
+### 7.3 Step 10.3：通用场次详情与 Seat Map 兼容
+
+本 Step 将 `ShowtimeServiceImpl` 的 MOVIE 专用上下文收敛为受控的 MOVIE/ACTIVITY 上下文，既有 `GET /api/showtimes/{id}` 和 `GET /api/showtimes/{id}/seats` 无需复制 Activity 专用入口。公共校验继续要求场次有效、尚未开场、Venue 有效且 Hall 归属正确；MOVIE 读取 Movie，ACTIVITY 读取 Activity。业务资源或结构关系缺失返回 `INTERNAL_ERROR`，Venue 或 Activity 停用以及未知业务类型对外返回 `SHOWTIME_NOT_FOUND`。
+
+`ShowtimeDetailVO` 采用只增不删的兼容扩展，新增 `bizType`、`activityId`、`activityName`。MOVIE 继续返回原 `movieId/movieName`，活动字段为 null；ACTIVITY 返回活动字段，电影字段为 null。Seat Map 的 URL、VO 和座位排序保持不变，没有增加 Activity 专用 DTO、Controller 或 Redis 状态。
+
+Activity Seat Map 在阶段 6 的批量座位读取上增加固定座位完整性校验：必须至少存在一个启用物理 Seat，`total_seats` 必须等于启用 Seat 数，每个启用 Seat 必须恰好关联一条同场次 ShowtimeSeat，状态只允许 AVAILABLE、HELD、SOLD，价格不得为空或为负，`available_seats` 必须等于启用座位中 AVAILABLE 的数量。任何缺失、重复、跨场次状态或计数不一致都失败关闭为 `INTERNAL_ERROR`。MOVIE 分支不改变阶段 6 行为，尤其保留“没有启用物理座位返回空列表”。
+
+实现没有数据库结构或迁移变更，复用 Step 10.2 的 6 座活动数据。自动化测试覆盖 MOVIE 响应兼容、ACTIVITY 详情、停用 Activity、未知业务类型、合法活动 Seat Map、空座位和计数不一致。真实 MySQL 8.0.17、Redis 与随机端口 HTTP 联调验证动态 2 座 Activity 及初始化 6 座 Activity 均可查询，并确认 Activity、Showtime 和 `seat:lock:*` 前后不变。全量 370 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功，Step 10.3 至此冻结。
+
+本 Step 不修改 SeatLockService、TicketOrder、支付、出票、退款或核销，也不让 Activity 进入交易写链路。后续若继续，应另开小 Step 处理 Activity 锁座与首次创建订单兼容，并继续遵守 Redis 只提供订单前临时资格、MySQL 保存订单后最终事实以及单事务全成全败边界。
+
 ## 8. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -1786,4 +1798,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.6，阶段 10 Step 10.2 已冻结 Activity 持久化、合法固定座位种子数据及三项公开只读查询，通用场次、Seat Map 与交易链路的 Activity 兼容尚未实现。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.7，阶段 10 Step 10.3 已冻结固定座位 Activity 的通用场次详情与 Seat Map 只读兼容，锁座及订单交易链路的 Activity 兼容尚未实现。

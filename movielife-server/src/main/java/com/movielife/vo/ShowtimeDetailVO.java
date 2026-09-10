@@ -13,8 +13,11 @@ public class ShowtimeDetailVO {
     private String venueName;
     private Long hallId;
     private String hallName;
+    private String bizType;
     private Long movieId;
     private String movieName;
+    private Long activityId;
+    private String activityName;
     private LocalDateTime startTime;
     private LocalDateTime endTime;
     private BigDecimal basePrice;

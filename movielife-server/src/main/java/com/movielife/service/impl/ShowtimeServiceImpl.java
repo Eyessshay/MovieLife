@@ -1,6 +1,7 @@
 package com.movielife.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.movielife.entity.Activity;
 import com.movielife.entity.Hall;
 import com.movielife.entity.Movie;
 import com.movielife.entity.Seat;
@@ -9,6 +10,7 @@ import com.movielife.entity.ShowtimeSeat;
 import com.movielife.entity.Venue;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
+import com.movielife.mapper.ActivityMapper;
 import com.movielife.mapper.HallMapper;
 import com.movielife.mapper.MovieMapper;
 import com.movielife.mapper.SeatMapper;
@@ -36,24 +38,27 @@ import java.util.stream.Collectors;
 public class ShowtimeServiceImpl implements ShowtimeService {
 
     private static final String MOVIE_BIZ_TYPE = "MOVIE";
+    private static final String ACTIVITY_BIZ_TYPE = "ACTIVITY";
+    private static final int AVAILABLE_SEAT_STATUS = 0;
     private static final int ENABLED_STATUS = 1;
 
     private final ShowtimeMapper showtimeMapper;
     private final VenueMapper venueMapper;
     private final HallMapper hallMapper;
     private final MovieMapper movieMapper;
+    private final ActivityMapper activityMapper;
     private final SeatMapper seatMapper;
     private final ShowtimeSeatMapper showtimeSeatMapper;
 
     @Override
     public ShowtimeDetailVO queryShowtimeDetail(Long id) {
-        ShowtimeContext context = getValidMovieShowtimeContext(id);
-        return toDetailVO(context.showtime, context.venue, context.hall, context.movie);
+        ShowtimeContext context = getValidShowtimeContext(id);
+        return toDetailVO(context);
     }
 
     @Override
     public ShowtimeSeatMapVO querySeatMap(Long showtimeId) {
-        ShowtimeContext context = getValidMovieShowtimeContext(showtimeId);
+        ShowtimeContext context = getValidShowtimeContext(showtimeId);
         List<Seat> seats = seatMapper.selectList(
                 new LambdaQueryWrapper<Seat>()
                         .eq(Seat::getHallId, context.hall.getId())
@@ -62,6 +67,9 @@ public class ShowtimeServiceImpl implements ShowtimeService {
                         .orderByAsc(Seat::getColNo)
         );
         if (seats.isEmpty()) {
+            if (context.isActivity()) {
+                throw invalidSeatMap(showtimeId, "activity hall has no enabled physical seat");
+            }
             return toSeatMapVO(context, Collections.emptyList());
         }
 
@@ -72,13 +80,16 @@ public class ShowtimeServiceImpl implements ShowtimeService {
                         .in(ShowtimeSeat::getSeatId, seatIds)
         );
         Map<Long, ShowtimeSeat> stateBySeatId = indexShowtimeSeats(showtimeId, seats, showtimeSeats);
+        if (context.isActivity()) {
+            validateActivitySeatMap(context.showtime, seats, stateBySeatId);
+        }
         List<SeatVO> seatVOs = seats.stream()
                 .map(seat -> toSeatVO(seat, stateBySeatId.get(seat.getId())))
                 .collect(Collectors.toList());
         return toSeatMapVO(context, seatVOs);
     }
 
-    private ShowtimeContext getValidMovieShowtimeContext(Long showtimeId) {
+    private ShowtimeContext getValidShowtimeContext(Long showtimeId) {
         if (showtimeId == null || showtimeId <= 0) {
             throw new BusinessException(ErrorCode.INVALID_ID);
         }
@@ -87,48 +98,113 @@ public class ShowtimeServiceImpl implements ShowtimeService {
         if (!isPubliclyAvailable(showtime)) {
             throw new BusinessException(ErrorCode.SHOWTIME_NOT_FOUND);
         }
+        if (showtime.getBizId() == null
+                || showtime.getVenueId() == null
+                || showtime.getHallId() == null) {
+            log.error("Invalid showtime identifiers, showtimeId={}", showtimeId);
+            throw new BusinessException(ErrorCode.INTERNAL_ERROR);
+        }
 
         Venue venue = venueMapper.selectById(showtime.getVenueId());
         Hall hall = hallMapper.selectById(showtime.getHallId());
-        Movie movie = movieMapper.selectById(showtime.getBizId());
-        if (!isRelationValid(showtime, venue, hall, movie)) {
+        Movie movie = null;
+        Activity activity = null;
+        if (MOVIE_BIZ_TYPE.equals(showtime.getBizType())) {
+            movie = movieMapper.selectById(showtime.getBizId());
+        } else if (ACTIVITY_BIZ_TYPE.equals(showtime.getBizType())) {
+            activity = activityMapper.selectById(showtime.getBizId());
+        }
+        if (!isRelationValid(showtime, venue, hall, movie, activity)) {
             log.error("Invalid showtime relation, showtimeId={}", showtimeId);
             throw new BusinessException(ErrorCode.INTERNAL_ERROR);
         }
-        if (!Integer.valueOf(ENABLED_STATUS).equals(venue.getStatus())) {
+        if (!Integer.valueOf(ENABLED_STATUS).equals(venue.getStatus())
+                || (activity != null
+                && !Integer.valueOf(ENABLED_STATUS).equals(activity.getStatus()))) {
             throw new BusinessException(ErrorCode.SHOWTIME_NOT_FOUND);
         }
-        return new ShowtimeContext(showtime, venue, hall, movie);
+        return new ShowtimeContext(showtime, venue, hall, movie, activity);
     }
 
     private boolean isPubliclyAvailable(Showtime showtime) {
         return showtime != null
-                && MOVIE_BIZ_TYPE.equals(showtime.getBizType())
+                && (MOVIE_BIZ_TYPE.equals(showtime.getBizType())
+                || ACTIVITY_BIZ_TYPE.equals(showtime.getBizType()))
                 && Integer.valueOf(ENABLED_STATUS).equals(showtime.getStatus())
                 && showtime.getStartTime() != null
                 && showtime.getStartTime().isAfter(LocalDateTime.now());
     }
 
-    private boolean isRelationValid(Showtime showtime, Venue venue, Hall hall, Movie movie) {
+    private boolean isRelationValid(Showtime showtime,
+                                    Venue venue,
+                                    Hall hall,
+                                    Movie movie,
+                                    Activity activity) {
         return venue != null
                 && hall != null
-                && movie != null
-                && showtime.getVenueId().equals(hall.getVenueId());
+                && showtime.getVenueId() != null
+                && showtime.getVenueId().equals(hall.getVenueId())
+                && ((MOVIE_BIZ_TYPE.equals(showtime.getBizType()) && movie != null && activity == null)
+                || (ACTIVITY_BIZ_TYPE.equals(showtime.getBizType()) && activity != null && movie == null));
     }
 
-    private ShowtimeDetailVO toDetailVO(Showtime showtime, Venue venue, Hall hall, Movie movie) {
+    private ShowtimeDetailVO toDetailVO(ShowtimeContext context) {
         ShowtimeDetailVO vo = new ShowtimeDetailVO();
-        vo.setId(showtime.getId());
-        vo.setVenueId(venue.getId());
-        vo.setVenueName(venue.getName());
-        vo.setHallId(hall.getId());
-        vo.setHallName(hall.getName());
-        vo.setMovieId(movie.getId());
-        vo.setMovieName(movie.getTitle());
-        vo.setStartTime(showtime.getStartTime());
-        vo.setEndTime(showtime.getEndTime());
-        vo.setBasePrice(showtime.getBasePrice());
+        vo.setId(context.showtime.getId());
+        vo.setVenueId(context.venue.getId());
+        vo.setVenueName(context.venue.getName());
+        vo.setHallId(context.hall.getId());
+        vo.setHallName(context.hall.getName());
+        vo.setBizType(context.showtime.getBizType());
+        if (context.movie != null) {
+            vo.setMovieId(context.movie.getId());
+            vo.setMovieName(context.movie.getTitle());
+        } else {
+            vo.setActivityId(context.activity.getId());
+            vo.setActivityName(context.activity.getTitle());
+        }
+        vo.setStartTime(context.showtime.getStartTime());
+        vo.setEndTime(context.showtime.getEndTime());
+        vo.setBasePrice(context.showtime.getBasePrice());
         return vo;
+    }
+
+    private void validateActivitySeatMap(Showtime showtime,
+                                         List<Seat> seats,
+                                         Map<Long, ShowtimeSeat> stateBySeatId) {
+        if (showtime.getTotalSeats() == null || showtime.getTotalSeats() != seats.size()) {
+            throw invalidSeatMap(showtime.getId(), "activity total seat count mismatch");
+        }
+
+        int availableSeats = 0;
+        for (Seat seat : seats) {
+            ShowtimeSeat state = stateBySeatId.get(seat.getId());
+            boolean invalid = state == null
+                    || state.getShowtimeId() == null
+                    || !showtime.getId().equals(state.getShowtimeId())
+                    || state.getSeatId() == null
+                    || !seat.getId().equals(state.getSeatId())
+                    || state.getStatus() == null
+                    || state.getStatus() < 0
+                    || state.getStatus() > 2
+                    || state.getPrice() == null
+                    || state.getPrice().signum() < 0;
+            if (invalid) {
+                throw invalidSeatMap(showtime.getId(), "invalid activity showtime seat state");
+            }
+            if (state.getStatus() == AVAILABLE_SEAT_STATUS) {
+                availableSeats++;
+            }
+        }
+        if (showtime.getAvailableSeats() == null
+                || showtime.getAvailableSeats() != availableSeats) {
+            throw invalidSeatMap(showtime.getId(), "activity available seat count mismatch");
+        }
+    }
+
+    private BusinessException invalidSeatMap(Long showtimeId, String reason) {
+        log.error("Invalid fixed-seat activity map, showtimeId={}, reason={}", showtimeId, reason);
+        return new BusinessException(ErrorCode.INTERNAL_ERROR);
     }
 
     private Map<Long, ShowtimeSeat> indexShowtimeSeats(Long showtimeId,
@@ -178,12 +254,22 @@ public class ShowtimeServiceImpl implements ShowtimeService {
         private final Venue venue;
         private final Hall hall;
         private final Movie movie;
+        private final Activity activity;
 
-        private ShowtimeContext(Showtime showtime, Venue venue, Hall hall, Movie movie) {
+        private ShowtimeContext(Showtime showtime,
+                                Venue venue,
+                                Hall hall,
+                                Movie movie,
+                                Activity activity) {
             this.showtime = showtime;
             this.venue = venue;
             this.hall = hall;
             this.movie = movie;
+            this.activity = activity;
+        }
+
+        private boolean isActivity() {
+            return activity != null;
         }
     }
 }

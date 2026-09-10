@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.6（阶段 10 Step 10.2 Activity 持久化与基础查询冻结版）
+- 版本：v0.7（阶段 10 Step 10.3 通用场次与 Seat Map 兼容冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -138,9 +138,15 @@ POST /api/admin/tickets/verify
 
 Activity 首次下单与电影订单遵守完全相同的交易事实：Redis `TEMP_LOCKED` 只提供创建前资格，MySQL 中的 TicketOrder、TicketOrderItem、ShowtimeSeat 和 `available_seats` 是订单后的最终事实；lockToken 只能消费一次，已存在订单时先按 MySQL 幂等返回。取消、超时、支付、出票、退款和核销继续复用阶段 8～9 的事务、锁顺序、条件 UPDATE、affectedRows 校验和 Redis 边界，不增加 Activity 专属状态。
 
-Step 10.2 已增加 Activity Entity、Mapper、Service、Controller、DTO、VO、`ACTIVITY_NOT_FOUND` 错误码及三项公开 HTTP 查询。场次查询只读取 MySQL，按一批场次批量补齐 Venue/Hall，并对场次核心字段和归属关系做失败关闭校验；本 Step 不读取或写入任何 Redis 活动状态，也不修改订单、票明细、ShowtimeSeat 或 `available_seats`。活动收藏、活动评价、附近活动、活动管理端、通用场次详情/Seat Map 的 Activity 兼容、活动下单交易、非固定座位票务、第三方支付、部分退款、核销撤销、Redis Stream、MQ 和 AI 均留待后续独立 Step。
+Step 10.2 已增加 Activity Entity、Mapper、Service、Controller、DTO、VO、`ACTIVITY_NOT_FOUND` 错误码及三项公开 HTTP 查询。活动场次列表只读取 MySQL，按一批场次批量补齐 Venue/Hall，并对场次核心字段和归属关系做失败关闭校验；该 Step 不读取或写入任何 Redis 活动状态，也不修改订单、票明细、ShowtimeSeat 或 `available_seats`。
 
 Step 10.2 冻结证据：迁移在隔离 MySQL 8.0.17 上连续执行两次后仍为 1 个有效 Activity 场次、6 个启用物理 Seat 和 6 条 ShowtimeSeat；真实 HTTP 测试完成活动列表 → 详情 → 场次查询，并确认 MySQL 对应记录及 `seat:lock:*` 集合前后不变。全量 359 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功。
+
+Step 10.3 已让既有 `GET /api/showtimes/{id}` 和 `GET /api/showtimes/{id}/seats` 支持固定座位 Activity，不增加活动专用路径。Showtime 详情兼容增加 `bizType`、`activityId`、`activityName`：MOVIE 保留 `movieId/movieName` 且活动字段为 `null`，ACTIVITY 的电影字段为 `null`；Venue、Hall 或对应业务资源关系缺失返回 `INTERNAL_ERROR`，停用 Venue/Activity、无效或已开场场次返回 `SHOWTIME_NOT_FOUND`，未知 `bizType` 不对外暴露。
+
+Activity Seat Map 继续返回既有 `ShowtimeSeatMapVO/SeatVO` 字段，但额外要求至少一个启用物理 Seat、`total_seats` 等于启用 Seat 数、全部启用 Seat 均具有合法且唯一的 ShowtimeSeat、`available_seats` 等于其中 AVAILABLE 数量；状态范围、价格或关联不合法统一返回 `INTERNAL_ERROR`，不能补默认可售状态。MOVIE 保持阶段 6 冻结行为，包括没有启用物理 Seat 时返回空列表。本 Step 全程只读 MySQL，不读取或写入 Redis，不修改任何库存或订单事实。
+
+Step 10.3 冻结证据：真实 HTTP 验证动态 2 座 Activity 和初始化 6 座 Activity 的通用场次详情与 Seat Map，查询前后 Activity、Showtime 和 `seat:lock:*` 均不变；全量 370 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功。活动锁座、创建订单、订单展示及后续交易兼容仍未实现；活动收藏、评价、附近活动、管理端、非固定座位票务、第三方支付、部分退款、核销撤销、Redis Stream、MQ 和 AI 继续留待后续独立 Step。
 
 ### 3.4 社区动态
 

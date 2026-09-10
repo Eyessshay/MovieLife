@@ -155,6 +155,28 @@ class ActivityHttpIntegrationTest {
         assertThat(detail.path("data").path("title").asText())
                 .isEqualTo("Step102Http固定座位活动");
 
+        ResponseEntity<String> genericDetailResponse = restTemplate.getForEntity(
+                "/api/showtimes/" + showtimeId, String.class);
+        assertThat(genericDetailResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode genericDetail = objectMapper.readTree(genericDetailResponse.getBody());
+        assertThat(genericDetail.path("data").path("bizType").asText())
+                .isEqualTo("ACTIVITY");
+        assertThat(genericDetail.path("data").path("activityId").asLong())
+                .isEqualTo(activityId);
+        assertThat(genericDetail.path("data").path("activityName").asText())
+                .isEqualTo("Step102Http固定座位活动");
+        assertThat(genericDetail.path("data").path("movieId").isNull()).isTrue();
+
+        ResponseEntity<String> seatMapResponse = restTemplate.getForEntity(
+                "/api/showtimes/" + showtimeId + "/seats", String.class);
+        assertThat(seatMapResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode seatMap = objectMapper.readTree(seatMapResponse.getBody());
+        assertThat(seatMap.path("data").path("showtimeId").asLong())
+                .isEqualTo(showtimeId);
+        assertThat(seatMap.path("data").path("seats")).hasSize(2);
+        assertThat(seatMap.path("data").path("seats").get(0).path("status").asInt())
+                .isEqualTo(0);
+
         String date = LocalDate.now().plusDays(3).toString();
         ResponseEntity<String> showtimeResponse = restTemplate.getForEntity(
                 "/api/activities/" + activityId + "/showtimes?date=" + date
@@ -171,6 +193,30 @@ class ActivityHttpIntegrationTest {
 
         assertThat(activityMapper.selectById(activityId)).isEqualTo(activityBefore);
         assertThat(showtimeMapper.selectById(showtimeId)).isEqualTo(showtimeBefore);
+        assertThat(redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*")).isEqualTo(locksBefore);
+    }
+
+    @Test
+    void seededActivityShowtimeShouldExposeSixPhysicalSeatsWithoutWrites() throws Exception {
+        Showtime seededBefore = showtimeMapper.selectById(2L);
+        Activity seededActivityBefore = activityMapper.selectById(1L);
+        Set<String> locksBefore = redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*");
+
+        ResponseEntity<String> detailResponse = restTemplate.getForEntity(
+                "/api/showtimes/2", String.class);
+        assertThat(detailResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode detail = objectMapper.readTree(detailResponse.getBody());
+        assertThat(detail.path("data").path("bizType").asText()).isEqualTo("ACTIVITY");
+        assertThat(detail.path("data").path("activityId").asLong()).isEqualTo(1L);
+
+        ResponseEntity<String> seatMapResponse = restTemplate.getForEntity(
+                "/api/showtimes/2/seats", String.class);
+        assertThat(seatMapResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode seatMap = objectMapper.readTree(seatMapResponse.getBody());
+        assertThat(seatMap.path("data").path("seats")).hasSize(6);
+
+        assertThat(showtimeMapper.selectById(2L)).isEqualTo(seededBefore);
+        assertThat(activityMapper.selectById(1L)).isEqualTo(seededActivityBefore);
         assertThat(redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*")).isEqualTo(locksBefore);
     }
 

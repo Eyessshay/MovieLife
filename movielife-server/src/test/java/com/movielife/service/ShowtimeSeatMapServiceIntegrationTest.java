@@ -1,5 +1,6 @@
 package com.movielife.service;
 
+import com.movielife.entity.Activity;
 import com.movielife.entity.Hall;
 import com.movielife.entity.Movie;
 import com.movielife.entity.Seat;
@@ -8,6 +9,7 @@ import com.movielife.entity.ShowtimeSeat;
 import com.movielife.entity.Venue;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
+import com.movielife.mapper.ActivityMapper;
 import com.movielife.mapper.HallMapper;
 import com.movielife.mapper.MovieMapper;
 import com.movielife.mapper.SeatMapper;
@@ -49,6 +51,8 @@ class ShowtimeSeatMapServiceIntegrationTest {
     private ShowtimeService showtimeService;
     @Autowired
     private MovieMapper movieMapper;
+    @Autowired
+    private ActivityMapper activityMapper;
     @Autowired
     private VenueMapper venueMapper;
     @Autowired
@@ -123,6 +127,46 @@ class ShowtimeSeatMapServiceIntegrationTest {
         assertError(() -> showtimeService.querySeatMap(disabledVenue.showtime.getId()), ErrorCode.SHOWTIME_NOT_FOUND);
     }
 
+    @Test
+    void activitySeatMapShouldRequireConsistentPhysicalSeatFacts() {
+        Context context = insertActivityContext(2, 1);
+        Seat available = insertSeat(context.hall, 1, 1, "A01", "NORMAL", 1);
+        Seat sold = insertSeat(context.hall, 1, 2, "A02", "VIP", 1);
+        insertShowtimeSeat(context.showtime, available, 0, "199.00");
+        insertShowtimeSeat(context.showtime, sold, 2, "299.00");
+
+        ShowtimeSeatMapVO result = showtimeService.querySeatMap(context.showtime.getId());
+
+        assertThat(result.getSeats()).extracting(SeatVO::getSeatNo)
+                .containsExactly("A01", "A02");
+        assertThat(result.getSeats()).extracting(SeatVO::getStatus)
+                .containsExactly(0, 2);
+    }
+
+    @Test
+    void activityHallWithoutEnabledSeatsShouldReturnInternalError() {
+        Context context = insertActivityContext(1, 1);
+
+        assertError(() -> showtimeService.querySeatMap(context.showtime.getId()),
+                ErrorCode.INTERNAL_ERROR);
+    }
+
+    @Test
+    void activitySeatOrAvailableCountMismatchShouldReturnInternalError() {
+        Context seatCountMismatch = insertActivityContext(2, 1);
+        Seat onlySeat = insertSeat(seatCountMismatch.hall, 1, 1, "M01", "NORMAL", 1);
+        insertShowtimeSeat(seatCountMismatch.showtime, onlySeat, 0, "199.00");
+
+        Context availableCountMismatch = insertActivityContext(1, 0);
+        Seat available = insertSeat(availableCountMismatch.hall, 1, 1, "M02", "NORMAL", 1);
+        insertShowtimeSeat(availableCountMismatch.showtime, available, 0, "199.00");
+
+        assertError(() -> showtimeService.querySeatMap(seatCountMismatch.showtime.getId()),
+                ErrorCode.INTERNAL_ERROR);
+        assertError(() -> showtimeService.querySeatMap(availableCountMismatch.showtime.getId()),
+                ErrorCode.INTERNAL_ERROR);
+    }
+
     private Context insertContext(int venueStatus, int showtimeStatus, LocalDateTime startTime) {
         Movie movie = new Movie();
         movie.setTitle("座位图测试电影");
@@ -156,6 +200,46 @@ class ShowtimeSeatMapServiceIntegrationTest {
         showtime.setTotalSeats(10);
         showtime.setAvailableSeats(10);
         showtime.setStatus(showtimeStatus);
+        showtimeMapper.insert(showtime);
+        return new Context(hall, showtime);
+    }
+
+    private Context insertActivityContext(int totalSeats, int availableSeats) {
+        Activity activity = new Activity();
+        activity.setTitle("座位图测试活动");
+        activity.setType("drama");
+        activity.setCity("上海");
+        activity.setPriceMin(new BigDecimal("199.00"));
+        activity.setPriceMax(new BigDecimal("299.00"));
+        activity.setStatus(1);
+        activityMapper.insert(activity);
+
+        Venue venue = new Venue();
+        venue.setName("座位图测试剧场");
+        venue.setType("theater");
+        venue.setCity("上海");
+        venue.setAddress("活动座位图测试地址");
+        venue.setAvgScore(BigDecimal.ZERO);
+        venue.setStatus(1);
+        venueMapper.insert(venue);
+
+        Hall hall = new Hall();
+        hall.setVenueId(venue.getId());
+        hall.setName("活动座位图测试厅");
+        hallMapper.insert(hall);
+
+        LocalDateTime startTime = LocalDateTime.now().plusDays(1).withNano(0);
+        Showtime showtime = new Showtime();
+        showtime.setBizType("ACTIVITY");
+        showtime.setBizId(activity.getId());
+        showtime.setVenueId(venue.getId());
+        showtime.setHallId(hall.getId());
+        showtime.setStartTime(startTime);
+        showtime.setEndTime(startTime.plusHours(2));
+        showtime.setBasePrice(new BigDecimal("199.00"));
+        showtime.setTotalSeats(totalSeats);
+        showtime.setAvailableSeats(availableSeats);
+        showtime.setStatus(1);
         showtimeMapper.insert(showtime);
         return new Context(hall, showtime);
     }
