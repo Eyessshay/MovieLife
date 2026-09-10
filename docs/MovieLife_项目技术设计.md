@@ -1719,7 +1719,27 @@ TicketVerificationService 已实现单票核销。服务先按唯一票码做不
 
 本阶段不包含二维码签名、离线核销、批量核销、核销撤销、设备管理、工作人员管理接口、Activity 票务或 Redis 防重。后续阶段不得改变阶段 8 订单事实边界及本阶段“先订单、后明细”的核销与退款锁顺序。
 
-## 7. 服务端模块建议
+## 7. 阶段 10：固定座位活动票务
+
+### 7.1 Step 10.1：业务范围与兼容契约
+
+阶段 10 只把现有固定座位票务能力扩展到 `ACTIVITY`，不重新设计阶段 1～9。适用活动必须落在既有 `Activity → Showtime → Venue/Hall → Seat/ShowtimeSeat` 关系中，并按具体物理座位售票。站票、通票、票档库存、多日票、套票和不选座活动需要不同库存模型，本阶段明确排除，不允许通过虚拟 Seat 套用现有交易流程。
+
+现有 `tb_activity`、`tb_showtime.biz_type/biz_id`、`tb_showtime_seat`、`tb_ticket_order.showtime_id` 和 TicketOrderItem 已足以表达固定座位活动订单，Step 10.1 不新增活动订单表、不增加 `ticket_mode` 字段，也不复制锁座、订单、支付、出票、退款或核销状态机。当前 SQL 中 `total_seats=0` 的 Activity 示例场次只属于历史预留数据；在后续持久化 Step 为活动场次建立有效 Hall、启用 Seat 和完整 ShowtimeSeat 前，它不得进入固定座位购票链路。
+
+公开活动查询冻结为 `GET /api/activities`、`GET /api/activities/{id}` 和 `GET /api/activities/{id}/showtimes`。列表与详情只暴露 `status=1` 的 Activity；`priceMin/priceMax` 只是发现页展示范围，不能参与订单计价。场次查询同时要求 Activity 有效、`biz_type=ACTIVITY`、`biz_id` 匹配、Showtime 有效且未开场、Venue 有效、Hall 归属正确，并按开始时间和 ID 稳定排序；跨场馆结果必须批量补齐 Venue 与 Hall，禁止 N+1。无匹配场次返回空列表；活动不存在、草稿或下线统一返回 `ACTIVITY_NOT_FOUND`。本 Step 不顺带开放 Activity 收藏、评价、附近活动或管理端写接口。
+
+场次详情、Seat Map、Redis 锁座及订单写链路继续使用已有通用 URL。实现阶段需要把当前 `ShowtimeServiceImpl` 的 MOVIE 专用上下文扩展为受控的 MOVIE/ACTIVITY 分支，但必须保持阶段 6 的电影查询契约不变：电影仍校验 Movie，活动改为校验 Activity；两类场次都严格校验 Venue、Hall 关系、未来有效场次以及完整 ShowtimeSeat。固定座位 Activity 必须具有至少一个启用 Seat，`total_seats` 与启用 Seat 数量一致；任何关联或数量不一致都返回不暴露内部细节的 `INTERNAL_ERROR`，不能按空座位、默认 AVAILABLE 或普通无票状态处理。
+
+为避免破坏已冻结客户端契约，ShowtimeDetailVO、TicketOrderListItemVO 和 TicketOrderDetailVO 采用只增不删的兼容扩展：保留 `movieId/movieName`，新增 `bizType/activityId/activityName`。MOVIE 返回原电影字段且活动字段为 null；ACTIVITY 返回活动字段且电影字段为 null。订单查询必须根据一页订单关联 Showtime 的 `biz_type` 分组，分别批量读取 Movie 与 Activity 后恢复原订单顺序，禁止引入 N+1。CreateTicketOrderVO、PayTicketOrderVO、IssueTicketVO、VerifyTicketVO 和 Seat Map 当前不依赖电影标题，无需为 Activity 复制响应类型。
+
+固定座位 Activity 首次创建订单继续从服务端读取 ShowtimeSeat.price，使用相同的 1～6 座限制、Redis Lua 原子锁、5 分钟 lockToken 资格和 15 分钟订单支付窗口。MySQL 已存在相同 lockToken 订单时必须优先校验并返回原订单，不再要求 Redis Metadata 或 seatKey 存在。首次创建仍在单个 MySQL 事务内依次插入 TicketOrder、批量插入 TicketOrderItem、条件占用全部 ShowtimeSeat 并扣减 `available_seats`；所有 affectedRows 必须完整匹配，COMMIT 后才按 token 条件清理 Redis。
+
+主动取消、自动超时、模拟支付、出票、整单退款和单票核销不新增 Activity 分支状态，只根据订单关联的 Showtime 和现有 MySQL 事实工作。订单与明细继续采用“先订单、后明细”的锁顺序，条件 UPDATE 和严格 affectedRows 校验不变；查询、取消、超时、支付、出票、退款和核销不读取或写入新的 Redis 状态。活动核销权限仍由 Showtime.venue_id 与 `tb_venue_staff.status=1` 推导，不接受客户端提交 Venue。
+
+Step 10.1 只修改 API 与技术设计文档并冻结上述契约，不新增或修改 Java、测试和数据库结构，不开放真实 HTTP 接口，不提前实现后续 Step。下一小步应单独处理 Activity 持久化映射、合法固定座位测试数据及基础查询；只有该 Step 完成自动化测试、真实 MySQL/HTTP 联调、Maven BUILD SUCCESS、独立 commit 并冻结后，才能扩展通用场次、锁座和订单链路。
+
+## 8. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
 
@@ -1739,7 +1759,7 @@ ai         评价总结的异步生成、持久化和读取
 common     统一响应、异常、鉴权、限流、幂等
 ```
 
-## 8. 关键非功能要求
+## 9. 关键非功能要求
 
 - 所有写接口校验当前用户和资源归属。
 - 订单、支付、锁座操作必须支持幂等。
@@ -1754,4 +1774,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.2，Venue + Redis GEO 查询契约已在阶段 5 冻结，其余尚未实现模块的字段级契约将在后续阶段继续补齐。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.5，阶段 10 Step 10.1 已冻结固定座位 Activity 的范围、公开查询、兼容字段及复用既有票务事实的边界，尚未开放任何 Activity HTTP 实现。

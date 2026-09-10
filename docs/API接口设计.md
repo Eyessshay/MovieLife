@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.4（阶段 9 验票核销实现冻结版）
+- 版本：v0.5（阶段 10 Step 10.1 固定座位活动票务契约冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -106,6 +106,39 @@ GET /api/activities/nearby              # 附近活动
 GET /api/activities/{id}/reviews        # 活动评价
 GET /api/activities/{id}/showtimes      # 活动场次
 ```
+
+阶段 10 仅接入“固定座位活动”，即使用既有 Venue、Hall、Seat、Showtime 和 ShowtimeSeat 表达的演出、脱口秀、话剧等活动。站票、通票、按票档扣减库存、多日票、套票以及不选座活动均不属于本阶段；不得用不存在的 Seat 或虚拟 Seat 伪装这些票型。
+
+Step 10.1 冻结以下公开查询契约，当前只完成设计，不开放真实 HTTP 接口：
+
+1. `GET /api/activities`：无需登录。Query 参数为 `city`、`type`、`keyword`、`page` 和 `pageSize`；`page` 默认 1 且必须大于等于 1，`pageSize` 默认 20 且范围为 1～100。只返回 `tb_activity.status=1` 的活动，`keyword` 对 `title` 做包含匹配，结果按 `create_time DESC, id DESC` 稳定排序。响应列表项包含 `id`、`title`、`coverUrl`、`type`、`city`、`priceMin` 和 `priceMax`。无匹配数据返回空分页，不返回 `ACTIVITY_NOT_FOUND`。`priceMin/priceMax` 只用于活动发现页展示，锁座和订单金额始终以具体 ShowtimeSeat.price 为准。
+2. `GET /api/activities/{id}`：无需登录。只返回 `status=1` 的活动；不存在、草稿或已下线统一返回 `404 ACTIVITY_NOT_FOUND`。响应包含列表字段及 `description`，本 Step 不附带收藏、评价或 AI 总结状态。
+3. `GET /api/activities/{id}/showtimes`：无需登录。Query 参数为可选 `date=yyyy-MM-dd` 和 `venueId`；非法日期或非正数 venueId 返回 `400 INVALID_PARAM`。只返回活动有效、`biz_type=ACTIVITY`、`biz_id=活动 ID`、`status=1`、`start_time>NOW()`，且 Venue 有效、Hall 属于该 Venue 的场次；有日期时限定当地自然日范围。每项包含 `showtimeId`、`venueId`、`venueName`、`hallId`、`hallName`、`startTime`、`endTime`、`basePrice` 和 `availableSeats`，实现时批量读取 Venue 与 Hall，禁止 N+1。结果按 `start_time ASC, id ASC` 排序，无匹配数据返回 `[]`。
+
+固定座位活动场次进入 Seat Map 和购票链路前，必须具有至少一个启用物理 Seat，并为全部启用 Seat 建立同场次 ShowtimeSeat；`total_seats` 必须与启用座位数量一致，`available_seats` 仍是由 ShowtimeSeat 状态派生的计数。关联缺失、重复或数量不一致属于 `500 INTERNAL_ERROR`，不能默认补成 AVAILABLE。当前 SQL 中 `total_seats=0` 的 Activity 示例场次不满足该契约，在后续持久化 Step 完成有效座位数据前不得进入活动购票链路。
+
+活动票务复用现有通用路径，不复制 `/api/activity-orders` 或活动专用锁座接口：
+
+```bash
+GET  /api/showtimes/{id}
+GET  /api/showtimes/{id}/seats
+POST /api/showtimes/{id}/seats/lock
+POST /api/showtimes/{id}/seats/release
+POST /api/orders
+GET  /api/orders
+GET  /api/orders/{id}
+POST /api/orders/{id}/cancel
+POST /api/orders/{id}/pay
+POST /api/orders/{id}/issue
+POST /api/orders/{id}/refund
+POST /api/admin/tickets/verify
+```
+
+`GET /api/showtimes/{id}` 对电影保持原 `movieId/movieName` 字段和语义，兼容增加 `bizType`、`activityId`、`activityName`：电影场次返回 `bizType=MOVIE` 且活动字段为 `null`；活动场次返回 `bizType=ACTIVITY`、活动字段有值且电影字段为 `null`。Seat Map 的既有字段不变。订单列表与详情采用相同的兼容扩展规则，保留电影字段并增加 `bizType`、`activityId`、`activityName`；查询实现必须按本页 Showtime 的业务类型分别批量读取 Movie 和 Activity，禁止逐订单查询。
+
+Activity 首次下单与电影订单遵守完全相同的交易事实：Redis `TEMP_LOCKED` 只提供创建前资格，MySQL 中的 TicketOrder、TicketOrderItem、ShowtimeSeat 和 `available_seats` 是订单后的最终事实；lockToken 只能消费一次，已存在订单时先按 MySQL 幂等返回。取消、超时、支付、出票、退款和核销继续复用阶段 8～9 的事务、锁顺序、条件 UPDATE、affectedRows 校验和 Redis 边界，不增加 Activity 专属状态。
+
+Step 10.1 只冻结上述范围、接口和兼容策略，不创建 Activity Entity、Mapper、Service、Controller、DTO、VO 或测试，不修改既有 Java 代码，也不执行真实数据库迁移。活动收藏、活动评价、附近活动、活动管理端、非固定座位票务、第三方支付、部分退款、核销撤销、Redis Stream、MQ 和 AI 均留待其他独立阶段。
 
 ### 3.4 社区动态
 
