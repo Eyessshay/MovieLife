@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.3（阶段 9.1 验票核销契约冻结版）
+- 版本：v0.4（阶段 9 验票核销实现冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -321,7 +321,7 @@ Redis 5 分钟 `lockExpireTime` 只决定能否首次创建订单。订单成功
 
 `POST /api/orders/{id}/refund` 已在 Step 8.12 实现。接口必须登录且只允许订单本人操作；订单不存在或非本人统一返回 `404 ORDER_NOT_FOUND`，仅 `PAID` 可退款，`UNPAID`、`CANCELED` 返回 `409 ORDER_STATUS_CONFLICT`，已 `REFUNDED` 则幂等返回 HTTP 200。事务取得订单行锁后必须确认 `Showtime.start_time > now`，否则返回 `409 REFUND_NOT_ALLOWED`。
 
-退款在一个 MySQL 事务内依次批量释放全部归属座位（`SOLD → AVAILABLE` 且 `lock_order_id` 清空）、恢复不超过 `total_seats` 的 `available_seats`、条件更新订单 `PAID → REFUNDED`，并把全部 PENDING 或 VALID 票明细更新为 `REFUNDED(3)`。所有批量更新均严格要求完整影响行数；异常时整体回滚。`ticketCode`、`pay_time`、`lock_token` 与订单明细历史均保留，退款不会读写 Redis，也不支持部分退款、验票核销或真实支付渠道退款。
+退款在一个 MySQL 事务内先锁订单，再按明细 ID 顺序锁定全部 TicketOrderItem。任一明细为 `USED(2)` 时，在任何写入前返回 `409 REFUND_NOT_ALLOWED`；否则依次批量释放全部归属座位（`SOLD → AVAILABLE` 且 `lock_order_id` 清空）、恢复不超过 `total_seats` 的 `available_seats`、条件更新订单 `PAID → REFUNDED`，并把全部 PENDING 或 VALID 票明细更新为 `REFUNDED(3)`。所有批量更新均严格要求完整影响行数；异常时整体回滚。`ticketCode`、`pay_time`、`lock_token` 与订单明细历史均保留，退款不会读写 Redis，也不支持部分退款或真实支付渠道退款。
 
 支付回调和退款回调仍预留内部接口：
 
@@ -330,19 +330,19 @@ POST /api/payment/notify               # 支付渠道异步通知
 POST /api/refund/notify                # 退款渠道异步通知
 ```
 
-客户端不得直接修改订单状态。订单状态为 `UNPAID`、`PAID`、`CANCELED`、`REFUNDED`；当前模拟支付、主动取消、票明细出票与整单退款已经实现，真实支付平台和部分退款仍留待后续阶段。验票核销的数据与接口契约在 Step 9.1 冻结，但接口尚未开放。
+客户端不得直接修改订单状态。订单状态为 `UNPAID`、`PAID`、`CANCELED`、`REFUNDED`；当前模拟支付、主动取消、票明细出票、单票核销与整单退款已经实现，真实支付平台和部分退款仍留待后续阶段。
 
 订单明细继续采用“一座一票”：`tb_ticket_order_item.ticket_code` 和 `ticket_status` 属于具体座位明细，`ticket_code` 在支付成功后的出票阶段生成。当前单场次订单通过 `order.showtime_id + item.seat_id` 唯一定位 `ShowtimeSeat`，不额外引入 `showtime_seat_id`。
 
 ### 3.10 管理端验票核销
 
 ```bash
-POST /api/admin/tickets/verify          # 单张票验票核销（Step 9.1 仅冻结契约，尚未开放）
+POST /api/admin/tickets/verify          # 单张票验票核销（已实现，Step 9.4）
 ```
 
 接口必须登录，并要求当前用户在 `tb_venue_staff` 中与目标 Showtime 所属 Venue 存在 `status=1` 的有效工作人员关系。普通购票用户即使持有本人票码也不能调用。目标 Venue 必须由服务端通过 `ticketCode → TicketOrderItem.order_id → TicketOrder.showtime_id → Showtime.venue_id` 推导；请求体不得提交 `userId`、`venueId`、`orderId`、票状态或核销时间。
 
-请求 DTO 暂定为 `VerifyTicketDTO`：
+请求 DTO 为 `VerifyTicketDTO`：
 
 ```json
 {
@@ -375,7 +375,7 @@ POST /api/admin/tickets/verify          # 单张票验票核销（Step 9.1 仅�
 
 仅当订单为 `PAID`、票明细为 `VALID(1)`，且当前工作人员对 Showtime 所属 Venue 具有有效关系时，才能将这一张 `TicketOrderItem` 更新为 `USED(2)`，同时写入首次 `used_time` 和 `used_by_user_id`。数据库通过 `chk_order_item_ticket_status` 限制票状态只能为 0～3，并通过 `chk_order_item_used_evidence` 保证只有 USED 同时具有两项核销证据，其他状态的两项证据必须同时为空。多座位订单按票码逐张核销；一次请求只能改变命中的一条明细，不改变同订单其他票。订单继续保持 `PAID`，ShowtimeSeat 继续保持 `SOLD` 并保留 `lock_order_id`，`available_seats` 不变，整个核销链路不读取或写入 Redis。
 
-业务错误契约冻结如下：
+业务错误码如下：
 
 - `400 INVALID_PARAM`：请求体缺失、票码为空或超过 64 位。
 - `401 UNAUTHORIZED`：未登录或登录态失效。
@@ -392,6 +392,8 @@ POST /api/admin/tickets/verify          # 单张票验票核销（Step 9.1 仅�
 退款继续先锁 TicketOrder，再读取订单全部 TicketOrderItem。只要任一明细为 `USED(2)`，整单退款必须在释放座位、恢复余票或修改任何票状态之前返回 `409 REFUND_NOT_ALLOWED`，不能依赖后续批量 UPDATE 行数不足再表现为 `INTERNAL_ERROR`。这样核销与退款并发时由同一订单行锁串行化，最终只能形成“先退款，票全部 REFUNDED”或“先核销，至少一张 USED 且整单不可退款”两种合法结果。
 
 Step 9.1 仅冻结 SQL、API 和事务契约，不创建 Controller、Service、Mapper、DTO、VO 或测试代码，也不开放该接口。本 Step 不包含二维码签名、离线核销、批量核销、核销撤销、核销设备管理、Activity 票务、Redis 防重或额外的核销时间窗规则。
+
+Step 9.2 已完成增量迁移、VenueStaff 与票明细持久化映射，并把退款调整为“先锁订单、再锁全部明细”，在写入前拒绝包含 USED 明细的整单退款。Step 9.3 已完成核销事务服务、权限校验、首次核销证据写入、重复扫描语义及核销与退款并发收敛。Step 9.4 已开放 Controller、DTO 和 VO；票码只从 JSON 请求体读取。阶段 9 最终回归共 345 项自动化测试，覆盖真实 HTTP、MySQL 和 Redis 边界，Maven `clean package` 构建成功。
 
 ### 3.11 AI 评价总结
 

@@ -1695,6 +1695,30 @@ Step 9.1 不增加基于 Showtime 开始或结束时间的额外核销窗口；�
 
 本 Step 只修改 `sql/movielife.sql`、`docs/API接口设计.md` 和本文档，冻结 `tb_venue_staff`、TicketOrderItem 核销证据字段、管理端接口、DTO/VO、业务错误码、权限来源、状态变化和并发锁序。不创建或修改 Java Controller、Service、Mapper、Entity、DTO、VO、枚举或测试代码，不开放真实 HTTP 接口，不提前实现后续 Step。
 
+### 6.5 Step 9.2 持久化与退款保护
+
+增量迁移 `V9_2__ticket_verification_persistence.sql` 已安全应用到现有 MySQL，并验证可重复执行。迁移创建 `tb_venue_staff`，为 TicketOrderItem 增加 `used_time`、`used_by_user_id`、审计索引、外键和两项 CHECK 约束；迁移前先拒绝未知票状态或不一致的核销证据。Java 侧增加 VenueStaff 实体与 Mapper 映射，并补齐 TicketOrderItem 的核销证据字段。
+
+退款事务已改为先锁 TicketOrder，再按 ID 顺序锁定订单全部 TicketOrderItem。服务在释放座位、恢复余票、更新订单或票状态之前检查 USED 明细；存在任一 USED 时直接返回 `REFUND_NOT_ALLOWED`。数据层和事务测试确认拒绝退款时订单、票、座位与余票全部不变。
+
+### 6.6 Step 9.3 核销事务服务
+
+TicketVerificationService 已实现单票核销。服务先按唯一票码做不加锁定位，再锁 TicketOrder 和目标 TicketOrderItem，随后读取 Showtime、Seat，并使用 `tb_venue_staff.status=1` 校验工作人员对目标 Venue 的权限。只有 PAID 订单中的 VALID 票可以通过条件更新写为 USED；同一更新同时写入秒级 `used_time` 和 `used_by_user_id`，并严格要求 `affectedRows=1`。
+
+服务明确映射未知票码、未出票、已核销、已退款、订单状态冲突、场馆权限不足和数据不一致。重复扫描不会覆盖首次核销证据。核销与退款共同竞争订单行锁，因此并发结果只会收敛为“退款成功、核销拒绝”或“核销成功、退款拒绝”。核销不增加时间窗，也不改变订单、座位、余票或 Redis。
+
+### 6.7 Step 9.4 HTTP 接口
+
+`POST /api/admin/tickets/verify` 已开放并要求登录。VerifyTicketDTO 只接收 `ticketCode`，去除首尾空白后校验非空且最长 64 位；票码不进入 URL 或 Query 参数。Controller 从登录上下文取得核销人员，不接受客户端提交的用户、场馆、订单、状态或核销时间。
+
+成功响应使用 `Result<VerifyTicketVO>`，返回票码、USED 状态、首次核销时间、订单、场次、场馆、影厅、座位 ID 和座位号。Controller 测试与真实 HTTP 测试覆盖登录、参数校验、成功响应和各业务错误的 HTTP 映射。
+
+### 6.8 阶段 9 最终冻结
+
+阶段 9 共完成 9.1 契约、9.2 持久化与退款保护、9.3 核销事务服务、9.4 HTTP 接口以及 9.5 最终验收。全量 345 项自动化测试通过，0 failure、0 error、0 skipped；真实 MySQL、Redis 与 HTTP 联调通过，测试结束后订单、票明细、HELD 或 SOLD 座位、工作人员授权测试数据和 `seat:lock:*` 均无残留。Maven `clean package` 为 `BUILD SUCCESS`，阶段 9 至此冻结。
+
+本阶段不包含二维码签名、离线核销、批量核销、核销撤销、设备管理、工作人员管理接口、Activity 票务或 Redis 防重。后续阶段不得改变阶段 8 订单事实边界及本阶段“先订单、后明细”的核销与退款锁顺序。
+
 ## 7. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
