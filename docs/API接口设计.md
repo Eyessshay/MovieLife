@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.9（阶段 10 Step 10.5 Activity 订单查询兼容冻结版）
+- 版本：v0.10（阶段 10 Step 10.6 Activity 订单取消兼容冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -157,6 +157,12 @@ Step 10.4 真实 HTTP 闭环已验证 Activity 锁座、主动释放、再次锁
 Step 10.5 已让既有 `GET /api/orders` 和 `GET /api/orders/{id}` 展示固定座位 Activity 订单。`TicketOrderListItemVO` 与 `TicketOrderDetailVO` 兼容增加 `bizType`、`activityId`、`activityName`：ACTIVITY 返回活动字段且 `movieId/movieName` 为 null；MOVIE 保留原电影字段且活动字段为 null。列表按本页 Showtime 的业务类型分组，分别批量读取 Movie 和 Activity 后恢复原订单顺序；Activity 下线不隐藏已经成立的历史订单，关联记录物理缺失或未知 `bizType` 返回 `INTERNAL_ERROR`。
 
 Step 10.5 真实 HTTP 联调沿用 Activity 锁座与创建订单闭环，继续查询订单列表和详情，验证活动名称、场次、场馆、影厅、座位、价格快照和票状态，并确认查询前后 TicketOrder、TicketOrderItem、ShowtimeSeat、`available_seats` 和 Redis 临时锁集合完全不变。全量 378 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功。本 Step 不修改 SQL，不扩展取消、超时、支付、出票、退款或核销的 Activity 验证，也不新增 Redis 状态或后续阶段能力。
+
+Step 10.6 已确认既有 `POST /api/orders/{id}/cancel` 与后台 `TicketOrderTimeoutJob` 可直接处理固定座位 Activity 订单，不增加 Activity 专用 Controller、Service、状态或定时任务。两条入口都以 TicketOrder 行锁串行化，随后按订单明细中的完整 seatId 集合条件释放 `HELD_BY_UNPAID_ORDER` 且 `lock_order_id=当前订单` 的 ShowtimeSeat，严格要求 affectedRows 等于明细数，再恢复不超过 `total_seats` 的 `available_seats` 并将订单条件更新为 `CANCELED`；任何一步失败均回滚整个订单事务。Activity 是否下线不影响已经成立订单的资源释放。
+
+主动取消继续只允许订单本人操作；`CANCELED` 重复请求幂等成功，非 `UNPAID/CANCELED` 状态冲突，且不因为 `expireTime` 已过而拒绝数据库中仍为 `UNPAID` 的订单。超时任务继续限量扫描到期 UNPAID 订单并逐单独立事务复核；已取消、已支付、未到期或不存在的订单跳过，单订单失败不阻断后续订单，不新增 `EXPIRED` 状态。主动取消和超时取消竞争时只能有一方实际释放座位并恢复余票。
+
+Step 10.6 真实联调覆盖 Activity 锁座 → 创建 UNPAID 订单 → 主动取消、重复主动取消、下线 Activity 历史订单取消、定时超时取消、重复任务、主动与超时并发竞争，以及部分座位状态异常时的事务全回滚。成功取消后 TicketOrderItem 价格和票状态保持不变，ShowtimeSeat 全部恢复 AVAILABLE、清空 `lock_order_id`，`available_seats` 只恢复一次；取消前后 Redis `seat:lock:*` 集合不变。全量 382 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功。本 Step 不修改生产 Java、SQL 或 Redis，不提前扩展 Activity 支付、出票、退款和核销。
 
 ### 3.4 社区动态
 
