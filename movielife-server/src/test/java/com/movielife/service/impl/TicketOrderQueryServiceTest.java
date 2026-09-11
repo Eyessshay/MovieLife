@@ -2,6 +2,7 @@ package com.movielife.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.movielife.entity.Activity;
 import com.movielife.entity.Hall;
 import com.movielife.entity.Movie;
 import com.movielife.entity.Seat;
@@ -11,6 +12,7 @@ import com.movielife.entity.TicketOrderItem;
 import com.movielife.entity.Venue;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
+import com.movielife.mapper.ActivityMapper;
 import com.movielife.mapper.HallMapper;
 import com.movielife.mapper.MovieMapper;
 import com.movielife.mapper.SeatMapper;
@@ -48,6 +50,7 @@ class TicketOrderQueryServiceTest {
     @Mock private TicketOrderItemMapper ticketOrderItemMapper;
     @Mock private ShowtimeMapper showtimeMapper;
     @Mock private MovieMapper movieMapper;
+    @Mock private ActivityMapper activityMapper;
     @Mock private VenueMapper venueMapper;
     @Mock private HallMapper hallMapper;
     @Mock private SeatMapper seatMapper;
@@ -57,7 +60,7 @@ class TicketOrderQueryServiceTest {
     @BeforeEach
     void setUp() {
         service = new TicketOrderQueryService(ticketOrderMapper, ticketOrderItemMapper,
-                showtimeMapper, movieMapper, venueMapper, hallMapper, seatMapper);
+                showtimeMapper, movieMapper, activityMapper, venueMapper, hallMapper, seatMapper);
     }
 
     @Test
@@ -74,10 +77,14 @@ class TicketOrderQueryServiceTest {
                 item(101L, 11L, "40.00", null, 0),
                 item(101L, 12L, "45.00", "TICKET-12", 1)));
         when(showtimeMapper.selectBatchIds(any())).thenReturn(Arrays.asList(
-                showtime(12L, 202L, 302L, 402L),
+                showtime(12L, "ACTIVITY", 202L, 302L, 402L),
                 showtime(11L, 201L, 301L, 401L)));
-        when(movieMapper.selectBatchIds(any())).thenReturn(Arrays.asList(
-                movie(201L, "Movie A"), movie(202L, "Movie B")));
+        when(movieMapper.selectBatchIds(any())).thenReturn(
+                Collections.singletonList(movie(201L, "Movie A")));
+        Activity offlineActivity = activity(202L, "Activity B");
+        offlineActivity.setStatus(0);
+        when(activityMapper.selectBatchIds(any())).thenReturn(
+                Collections.singletonList(offlineActivity));
         when(venueMapper.selectBatchIds(any())).thenReturn(Arrays.asList(
                 venue(301L, "Venue A"), venue(302L, "Venue B")));
         when(hallMapper.selectBatchIds(any())).thenReturn(Arrays.asList(
@@ -92,12 +99,19 @@ class TicketOrderQueryServiceTest {
                 .containsExactly(102L, 101L);
         assertThat(result.getList()).extracting(TicketOrderListItemVO::getSeatCount)
                 .containsExactly(1, 2);
-        assertThat(result.getList().get(0).getMovieName()).isEqualTo("Movie B");
+        assertThat(result.getList().get(0).getBizType()).isEqualTo("ACTIVITY");
+        assertThat(result.getList().get(0).getActivityId()).isEqualTo(202L);
+        assertThat(result.getList().get(0).getActivityName()).isEqualTo("Activity B");
+        assertThat(result.getList().get(0).getMovieId()).isNull();
+        assertThat(result.getList().get(1).getBizType()).isEqualTo("MOVIE");
+        assertThat(result.getList().get(1).getMovieName()).isEqualTo("Movie A");
+        assertThat(result.getList().get(1).getActivityId()).isNull();
         assertThat(result.getList().get(1).getVenueName()).isEqualTo("Venue A");
         assertThat(result.getList().get(1).getHallName()).isEqualTo("Hall A");
         verify(ticketOrderItemMapper, times(1)).selectList(any());
         verify(showtimeMapper, times(1)).selectBatchIds(any());
         verify(movieMapper, times(1)).selectBatchIds(any());
+        verify(activityMapper, times(1)).selectBatchIds(any());
         verify(venueMapper, times(1)).selectBatchIds(any());
         verify(hallMapper, times(1)).selectBatchIds(any());
     }
@@ -139,6 +153,24 @@ class TicketOrderQueryServiceTest {
     }
 
     @Test
+    void listShouldFailWhenActivityRecordIsMissing() {
+        Page<TicketOrder> databasePage = new Page<>(1, 20);
+        databasePage.setRecords(Collections.singletonList(order(101L, 7L, 11L, "UNPAID")));
+        databasePage.setTotal(1);
+        when(ticketOrderMapper.selectPage(any(Page.class), any(Wrapper.class)))
+                .thenReturn(databasePage);
+        when(ticketOrderItemMapper.selectList(any())).thenReturn(
+                Collections.singletonList(item(101L, 11L, "120.00", null, 0)));
+        when(showtimeMapper.selectBatchIds(any())).thenReturn(
+                Collections.singletonList(showtime(11L, "ACTIVITY", 201L, 301L, 401L)));
+        when(activityMapper.selectBatchIds(any())).thenReturn(Collections.emptyList());
+
+        assertError(() -> service.queryMyOrders(7L, 1, 20), ErrorCode.INTERNAL_ERROR);
+
+        verify(movieMapper, never()).selectBatchIds(any());
+    }
+
+    @Test
     void detailShouldReturnSnapshotItemsSortedByPhysicalSeat() {
         TicketOrder order = order(101L, 7L, 11L, "PAID");
         order.setPayTime(LocalDateTime.of(2026, 9, 4, 12, 0));
@@ -160,6 +192,8 @@ class TicketOrderQueryServiceTest {
 
         assertThat(result.getOrderId()).isEqualTo(101L);
         assertThat(result.getMovieName()).isEqualTo("Movie A");
+        assertThat(result.getBizType()).isEqualTo("MOVIE");
+        assertThat(result.getActivityId()).isNull();
         assertThat(result.getVenueName()).isEqualTo("Venue A");
         assertThat(result.getHallName()).isEqualTo("Hall A");
         assertThat(result.getStatus()).isEqualTo("PAID");
@@ -172,6 +206,46 @@ class TicketOrderQueryServiceTest {
         assertThat(result.getItems().get(0).getTicketCode()).isEqualTo("T-12");
         assertThat(result.getItems().get(0).getTicketStatus()).isEqualTo(2);
         verify(seatMapper, times(1)).selectBatchIds(any());
+    }
+
+    @Test
+    void activityDetailShouldReturnOfflineActivityAndKeepMovieFieldsEmpty() {
+        TicketOrder order = order(101L, 7L, 11L, "UNPAID");
+        when(ticketOrderMapper.selectById(101L)).thenReturn(order);
+        when(showtimeMapper.selectById(11L))
+                .thenReturn(showtime(11L, "ACTIVITY", 201L, 301L, 401L));
+        Activity offlineActivity = activity(201L, "Offline Activity");
+        offlineActivity.setStatus(0);
+        when(activityMapper.selectById(201L)).thenReturn(offlineActivity);
+        when(venueMapper.selectById(301L)).thenReturn(venue(301L, "Venue A"));
+        when(hallMapper.selectById(401L)).thenReturn(hall(401L, "Hall A"));
+        when(ticketOrderItemMapper.selectList(any())).thenReturn(
+                Collections.singletonList(item(101L, 11L, "120.00", null, 0)));
+        when(seatMapper.selectBatchIds(any())).thenReturn(
+                Collections.singletonList(seat(11L, 1, 1, "A1")));
+
+        TicketOrderDetailVO result = service.queryOrderDetail(7L, 101L);
+
+        assertThat(result.getBizType()).isEqualTo("ACTIVITY");
+        assertThat(result.getActivityId()).isEqualTo(201L);
+        assertThat(result.getActivityName()).isEqualTo("Offline Activity");
+        assertThat(result.getMovieId()).isNull();
+        assertThat(result.getMovieName()).isNull();
+        verify(movieMapper, never()).selectById(any());
+    }
+
+    @Test
+    void unknownBusinessTypeShouldFailWithoutBusinessResourceQuery() {
+        TicketOrder order = order(101L, 7L, 11L, "UNPAID");
+        when(ticketOrderMapper.selectById(101L)).thenReturn(order);
+        when(showtimeMapper.selectById(11L))
+                .thenReturn(showtime(11L, "UNKNOWN", 201L, 301L, 401L));
+
+        assertError(() -> service.queryOrderDetail(7L, 101L), ErrorCode.INTERNAL_ERROR);
+
+        verify(movieMapper, never()).selectById(any());
+        verify(activityMapper, never()).selectById(any());
+        verify(ticketOrderItemMapper, never()).selectList(any());
     }
 
     @Test
@@ -236,15 +310,28 @@ class TicketOrderQueryServiceTest {
     }
 
     private Showtime showtime(Long id, Long movieId, Long venueId, Long hallId) {
+        return showtime(id, "MOVIE", movieId, venueId, hallId);
+    }
+
+    private Showtime showtime(Long id, String bizType, Long bizId,
+                              Long venueId, Long hallId) {
         Showtime showtime = new Showtime();
         showtime.setId(id);
-        showtime.setBizType("MOVIE");
-        showtime.setBizId(movieId);
+        showtime.setBizType(bizType);
+        showtime.setBizId(bizId);
         showtime.setVenueId(venueId);
         showtime.setHallId(hallId);
         showtime.setStartTime(LocalDateTime.of(2026, 9, 5, 16, 0));
         showtime.setEndTime(LocalDateTime.of(2026, 9, 5, 18, 0));
         return showtime;
+    }
+
+    private Activity activity(Long id, String title) {
+        Activity activity = new Activity();
+        activity.setId(id);
+        activity.setTitle(title);
+        activity.setStatus(1);
+        return activity;
     }
 
     private Movie movie(Long id, String title) {

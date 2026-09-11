@@ -2,6 +2,7 @@ package com.movielife.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.movielife.entity.Activity;
 import com.movielife.entity.Hall;
 import com.movielife.entity.Movie;
 import com.movielife.entity.Seat;
@@ -11,6 +12,7 @@ import com.movielife.entity.TicketOrderItem;
 import com.movielife.entity.Venue;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
+import com.movielife.mapper.ActivityMapper;
 import com.movielife.mapper.HallMapper;
 import com.movielife.mapper.MovieMapper;
 import com.movielife.mapper.SeatMapper;
@@ -42,11 +44,13 @@ public class TicketOrderQueryService {
 
     private static final int MAX_PAGE_SIZE = 100;
     private static final String MOVIE_BIZ_TYPE = "MOVIE";
+    private static final String ACTIVITY_BIZ_TYPE = "ACTIVITY";
 
     private final TicketOrderMapper ticketOrderMapper;
     private final TicketOrderItemMapper ticketOrderItemMapper;
     private final ShowtimeMapper showtimeMapper;
     private final MovieMapper movieMapper;
+    private final ActivityMapper activityMapper;
     private final VenueMapper venueMapper;
     private final HallMapper hallMapper;
     private final SeatMapper seatMapper;
@@ -89,21 +93,36 @@ public class TicketOrderQueryService {
         requireAll(showtimes, showtimeIds);
 
         Set<Long> movieIds = new LinkedHashSet<>();
+        Set<Long> activityIds = new LinkedHashSet<>();
         Set<Long> venueIds = new LinkedHashSet<>();
         Set<Long> hallIds = new LinkedHashSet<>();
         for (Showtime showtime : showtimes.values()) {
-            if (!MOVIE_BIZ_TYPE.equals(showtime.getBizType())) {
+            if (showtime.getBizId() == null || showtime.getBizId() <= 0
+                    || showtime.getVenueId() == null || showtime.getVenueId() <= 0
+                    || showtime.getHallId() == null || showtime.getHallId() <= 0) {
                 throw internalError();
             }
-            movieIds.add(showtime.getBizId());
+            if (MOVIE_BIZ_TYPE.equals(showtime.getBizType())) {
+                movieIds.add(showtime.getBizId());
+            } else if (ACTIVITY_BIZ_TYPE.equals(showtime.getBizType())) {
+                activityIds.add(showtime.getBizId());
+            } else {
+                throw internalError();
+            }
             venueIds.add(showtime.getVenueId());
             hallIds.add(showtime.getHallId());
         }
 
-        Map<Long, Movie> movies = mapById(movieMapper.selectBatchIds(movieIds), Movie::getId);
+        Map<Long, Movie> movies = movieIds.isEmpty()
+                ? Collections.emptyMap()
+                : mapById(movieMapper.selectBatchIds(movieIds), Movie::getId);
+        Map<Long, Activity> activities = activityIds.isEmpty()
+                ? Collections.emptyMap()
+                : mapById(activityMapper.selectBatchIds(activityIds), Activity::getId);
         Map<Long, Venue> venues = mapById(venueMapper.selectBatchIds(venueIds), Venue::getId);
         Map<Long, Hall> halls = mapById(hallMapper.selectBatchIds(hallIds), Hall::getId);
         requireAll(movies, movieIds);
+        requireAll(activities, activityIds);
         requireAll(venues, venueIds);
         requireAll(halls, hallIds);
 
@@ -111,6 +130,7 @@ public class TicketOrderQueryService {
         for (TicketOrder order : orders) {
             Showtime showtime = showtimes.get(order.getShowtimeId());
             result.add(toListItem(order, showtime, movies.get(showtime.getBizId()),
+                    activities.get(showtime.getBizId()),
                     venues.get(showtime.getVenueId()), halls.get(showtime.getHallId()),
                     seatCounts.get(order.getId())));
         }
@@ -128,13 +148,26 @@ public class TicketOrderQueryService {
             throw new BusinessException(ErrorCode.ORDER_NOT_FOUND);
         }
         Showtime showtime = showtimeMapper.selectById(order.getShowtimeId());
-        if (showtime == null || !MOVIE_BIZ_TYPE.equals(showtime.getBizType())) {
+        if (showtime == null) {
             throw internalError();
         }
-        Movie movie = movieMapper.selectById(showtime.getBizId());
+        if (showtime.getBizId() == null || showtime.getBizId() <= 0
+                || showtime.getVenueId() == null || showtime.getVenueId() <= 0
+                || showtime.getHallId() == null || showtime.getHallId() <= 0) {
+            throw internalError();
+        }
+        Movie movie = null;
+        Activity activity = null;
+        if (MOVIE_BIZ_TYPE.equals(showtime.getBizType())) {
+            movie = movieMapper.selectById(showtime.getBizId());
+        } else if (ACTIVITY_BIZ_TYPE.equals(showtime.getBizType())) {
+            activity = activityMapper.selectById(showtime.getBizId());
+        } else {
+            throw internalError();
+        }
         Venue venue = venueMapper.selectById(showtime.getVenueId());
         Hall hall = hallMapper.selectById(showtime.getHallId());
-        if (movie == null || venue == null || hall == null) {
+        if ((movie == null && activity == null) || venue == null || hall == null) {
             throw internalError();
         }
 
@@ -155,7 +188,7 @@ public class TicketOrderQueryService {
                 .sorted(Comparator.comparing(TicketOrderItemVO::getRowNo)
                         .thenComparing(TicketOrderItemVO::getColNo))
                 .collect(Collectors.toList());
-        return toDetail(order, showtime, movie, venue, hall, itemVOs);
+        return toDetail(order, showtime, movie, activity, venue, hall, itemVOs);
     }
 
     private void validateUser(Long userId) {
@@ -174,13 +207,12 @@ public class TicketOrderQueryService {
     }
 
     private TicketOrderListItemVO toListItem(
-            TicketOrder order, Showtime showtime, Movie movie, Venue venue,
+            TicketOrder order, Showtime showtime, Movie movie, Activity activity, Venue venue,
             Hall hall, Integer seatCount) {
         TicketOrderListItemVO vo = new TicketOrderListItemVO();
         vo.setOrderId(order.getId());
         vo.setShowtimeId(showtime.getId());
-        vo.setMovieId(movie.getId());
-        vo.setMovieName(movie.getTitle());
+        populateBusinessFields(vo, showtime, movie, activity);
         vo.setVenueId(venue.getId());
         vo.setVenueName(venue.getName());
         vo.setHallId(hall.getId());
@@ -208,13 +240,12 @@ public class TicketOrderQueryService {
     }
 
     private TicketOrderDetailVO toDetail(
-            TicketOrder order, Showtime showtime, Movie movie, Venue venue,
+            TicketOrder order, Showtime showtime, Movie movie, Activity activity, Venue venue,
             Hall hall, List<TicketOrderItemVO> items) {
         TicketOrderDetailVO vo = new TicketOrderDetailVO();
         vo.setOrderId(order.getId());
         vo.setShowtimeId(showtime.getId());
-        vo.setMovieId(movie.getId());
-        vo.setMovieName(movie.getTitle());
+        populateBusinessFields(vo, showtime, movie, activity);
         vo.setVenueId(venue.getId());
         vo.setVenueName(venue.getName());
         vo.setHallId(hall.getId());
@@ -228,6 +259,30 @@ public class TicketOrderQueryService {
         vo.setPayTime(order.getPayTime());
         vo.setItems(items);
         return vo;
+    }
+
+    private void populateBusinessFields(TicketOrderListItemVO vo, Showtime showtime,
+                                        Movie movie, Activity activity) {
+        vo.setBizType(showtime.getBizType());
+        if (MOVIE_BIZ_TYPE.equals(showtime.getBizType())) {
+            vo.setMovieId(movie.getId());
+            vo.setMovieName(movie.getTitle());
+        } else {
+            vo.setActivityId(activity.getId());
+            vo.setActivityName(activity.getTitle());
+        }
+    }
+
+    private void populateBusinessFields(TicketOrderDetailVO vo, Showtime showtime,
+                                        Movie movie, Activity activity) {
+        vo.setBizType(showtime.getBizType());
+        if (MOVIE_BIZ_TYPE.equals(showtime.getBizType())) {
+            vo.setMovieId(movie.getId());
+            vo.setMovieName(movie.getTitle());
+        } else {
+            vo.setActivityId(activity.getId());
+            vo.setActivityName(activity.getTitle());
+        }
     }
 
     private <T> Map<Long, T> mapById(List<T> records, Function<T, Long> idGetter) {

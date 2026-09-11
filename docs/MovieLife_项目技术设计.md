@@ -1775,6 +1775,18 @@ Activity 首次创建订单在既有 `TicketOrderTransactionService` 单事务�
 
 本 Step 不修改 SQL，不实现 Activity 订单列表/详情展示兼容，不为取消、超时、支付、出票、退款或核销增加 Activity 分支验证，也不新增 Redis 状态、Redis Stream、MQ、第三方支付、部分退款、核销撤销、非固定座位库存、活动收藏/评价或 AI。下一步尚未指定，必须另行设计并拆成独立小 Step。
 
+### 7.5 Step 10.5：Activity 订单列表与详情展示兼容
+
+本 Step 只扩展既有 `GET /api/orders` 和 `GET /api/orders/{id}`。`TicketOrderListItemVO`、`TicketOrderDetailVO` 采用与 ShowtimeDetailVO 一致的只增不删兼容结构，新增 `bizType`、`activityId`、`activityName`，保留 `movieId/movieName`。MOVIE 订单继续返回电影字段且活动字段为 null；ACTIVITY 订单返回活动字段且电影字段为 null。订单、明细、票、座位和余票的持久化结构均未变化。
+
+TicketOrderQueryService 在列表分页取得当前页 TicketOrder 后，一次批量读取明细并统计 seatCount，一次批量读取 Showtime，再按 `bizType` 将 `biz_id` 分成 Movie 和 Activity 两组，各执行至多一次批量查询；Venue 与 Hall 仍各批量查询一次，最终按数据库分页记录的原顺序组装。空业务 ID 集合不发起无意义查询，未知业务类型、非法关联 ID、业务资源或其他上下文缺失均失败关闭为 `INTERNAL_ERROR`。详情只针对单个 Showtime 读取对应 Movie 或 Activity，继续一次批量读取全部 Seat 并按物理行列排序明细。
+
+订单查询展示的是已经成立的 MySQL 历史事实，因此 Activity 查询直接按主键读取，不复用只允许 `status=1` 的公开 ActivityService。活动后续下线时，用户仍能查看原订单；只有 Activity 记录物理缺失才视为数据不一致。两个接口不读取或写入 Redis，不根据过期时间修改订单状态，也不触发取消、支付、出票、退款或核销。
+
+自动化测试覆盖 MOVIE/ACTIVITY 混合分页、两类业务资源分别批量读取、分页顺序保持、Activity 与 Movie 字段互斥、下线 Activity 历史详情、Activity 缺失、未知业务类型和原 Movie 详情兼容。真实 MySQL 8.0.17、Redis 与随机端口 HTTP 联调完成 Activity 锁座 → 创建订单 → 列表 → 详情，确认活动名称、座位和 120.00/180.00 价格快照正确，并确认查询前后 TicketOrder、TicketOrderItem、ShowtimeSeat、`available_seats` 及 Redis 临时锁集合不变。全量 378 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功，Step 10.5 至此冻结。
+
+本 Step 不修改 SQL，不为取消、超时、支付、出票、退款或核销新增 Activity 分支验证，也不新增 Redis 状态、Redis Stream、MQ、第三方支付、部分退款、核销撤销、非固定座位库存、活动收藏/评价或 AI。下一步尚未指定，必须另开独立设计 Step。
+
 ## 8. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -1810,4 +1822,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.8，阶段 10 Step 10.4 已冻结固定座位 Activity 的锁座、释放与首次创建订单兼容；订单展示及取消、超时、支付、出票、退款、核销的 Activity 兼容尚未纳入本 Step。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.9，阶段 10 Step 10.5 已冻结固定座位 Activity 的订单列表与详情展示兼容；取消、超时、支付、出票、退款和核销的 Activity 验证尚未纳入本 Step。

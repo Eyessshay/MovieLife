@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.8（阶段 10 Step 10.4 Activity 锁座与首次创建订单兼容冻结版）
+- 版本：v0.9（阶段 10 Step 10.5 Activity 订单查询兼容冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -153,6 +153,10 @@ Step 10.4 已让既有 `POST /api/showtimes/{id}/seats/lock`、`POST /api/showti
 首次创建 Activity 订单时，仍先按 `lockToken` 查询 MySQL：若已有归属和请求一致的订单，直接返回原订单，不以 Redis 是否存在为前提；只有 token 尚未消费时才检查 Redis 临时资格。新订单在原单个 MySQL 事务内、任何写入之前再次校验 Activity Seat Map，然后按既有顺序插入 TicketOrder、批量插入 TicketOrderItem、条件占用全部 ShowtimeSeat、扣减 `available_seats`，并严格校验全部 affectedRows。订单金额只取 ShowtimeSeat.price；提交成功后才按 token 条件清理 Redis。释放接口仍只根据服务端签发的 token 原子清理 Redis，不修改 MySQL。
 
 Step 10.4 真实 HTTP 闭环已验证 Activity 锁座、主动释放、再次锁座、创建 UNPAID 订单、两档座价求和、MySQL 座位与余票事实、COMMIT 后 Redis 清理，以及 Redis 已不存在时相同 token 返回原订单；请求座位不一致仍返回 `ORDER_REQUEST_MISMATCH`。全量 375 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功。本 Step 不实现 Activity 订单列表/详情展示兼容，也不扩展取消、超时、支付、出票、退款或核销验证；不新增 SQL、Redis 状态、Stream、MQ、第三方支付、部分退款或核销撤销。
+
+Step 10.5 已让既有 `GET /api/orders` 和 `GET /api/orders/{id}` 展示固定座位 Activity 订单。`TicketOrderListItemVO` 与 `TicketOrderDetailVO` 兼容增加 `bizType`、`activityId`、`activityName`：ACTIVITY 返回活动字段且 `movieId/movieName` 为 null；MOVIE 保留原电影字段且活动字段为 null。列表按本页 Showtime 的业务类型分组，分别批量读取 Movie 和 Activity 后恢复原订单顺序；Activity 下线不隐藏已经成立的历史订单，关联记录物理缺失或未知 `bizType` 返回 `INTERNAL_ERROR`。
+
+Step 10.5 真实 HTTP 联调沿用 Activity 锁座与创建订单闭环，继续查询订单列表和详情，验证活动名称、场次、场馆、影厅、座位、价格快照和票状态，并确认查询前后 TicketOrder、TicketOrderItem、ShowtimeSeat、`available_seats` 和 Redis 临时锁集合完全不变。全量 378 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功。本 Step 不修改 SQL，不扩展取消、超时、支付、出票、退款或核销的 Activity 验证，也不新增 Redis 状态或后续阶段能力。
 
 ### 3.4 社区动态
 
@@ -336,13 +340,13 @@ Redis 5 分钟 `lockExpireTime` 只决定能否首次创建订单。订单成功
 
 已消费 token 对应订单的 `userId` 不属于当前用户时返回 `403 ORDER_NOT_OWNED`；`showtimeId` 或座位集合与原订单不一致时返回 `409 ORDER_REQUEST_MISMATCH`。未消费 token 的 Redis Metadata 不存在、过期、场次或座位集合不匹配，以及任一 seatKey 缺失或不再等于当前 token 时，统一返回 `400 INVALID_LOCK_TOKEN`；Metadata 用户不一致继续复用 `403 LOCK_NOT_OWNED`。
 
-`GET /api/orders` 已开放为当前登录用户订单列表。Query 参数为 `page`（默认 1，必须大于等于 1）和 `pageSize`（默认 20，范围 1～100），暂不支持状态筛选。响应 `data` 沿用统一分页结构 `list/total/page/pageSize`；列表项包含 `orderId`、`showtimeId`、电影、场馆和影厅的 ID/名称、`startTime`、原始订单 `status`、`totalAmount`、`expireTime`、`createTime` 和 `seatCount`。无订单时返回 HTTP 200 和空 `list`。
+`GET /api/orders` 已开放为当前登录用户订单列表。Query 参数为 `page`（默认 1，必须大于等于 1）和 `pageSize`（默认 20，范围 1～100），暂不支持状态筛选。响应 `data` 沿用统一分页结构 `list/total/page/pageSize`；列表项包含 `orderId`、`showtimeId`、`bizType`、电影或活动的兼容 ID/名称字段、场馆和影厅的 ID/名称、`startTime`、原始订单 `status`、`totalAmount`、`expireTime`、`createTime` 和 `seatCount`。无订单时返回 HTTP 200 和空 `list`。
 
-列表固定按 `create_time DESC, id DESC` 排序，只查询 `user_id=当前登录用户` 的订单。当前页订单明细、Showtime、Movie、Venue 和 Hall 均按本页 ID 集合批量查询，`seatCount` 由一次批量明细结果按 `orderId` 分组统计，不执行逐订单关联查询。
+列表固定按 `create_time DESC, id DESC` 排序，只查询 `user_id=当前登录用户` 的订单。当前页订单明细、Showtime、Venue 和 Hall 均按本页 ID 集合批量查询；Showtime 按 `bizType` 分组后分别批量读取 Movie 与 Activity，`seatCount` 由一次批量明细结果按 `orderId` 分组统计，不执行逐订单关联查询。历史 Activity 即使已经下线也按主键返回订单快照上下文，不套用公开活动详情的 `status=1` 条件。
 
 `GET /api/orders/{id}` 已开放为当前用户订单详情。响应除列表上下文字段外，还包含 `endTime`、`payTime` 和按物理座位 `rowNo ASC, colNo ASC` 排序的 `items`；每项包含 `seatId`、`rowNo`、`colNo`、`seatNo`、`seatType`、订单明细价格快照、`ticketCode` 和 `ticketStatus`。详情一次查询全部订单明细，并对全部 seatId 一次批量查询 Seat，不逐明细读取座位。
 
-订单不存在或不属于当前用户均返回 `404 ORDER_NOT_FOUND`，避免泄露其他用户订单是否存在；非法订单 ID 返回 `400 INVALID_ID`。订单存在但 Showtime、Movie、Venue、Hall、明细或 Seat 关联数据缺失时返回不暴露细节的 `500 INTERNAL_ERROR`。两个查询接口只读取 MySQL，不读取订单 Redis Key，不修改订单状态，也不会根据 `expireTime` 临时修正 `UNPAID` 状态。
+订单不存在或不属于当前用户均返回 `404 ORDER_NOT_FOUND`，避免泄露其他用户订单是否存在；非法订单 ID 返回 `400 INVALID_ID`。订单存在但 Showtime、对应 Movie/Activity、Venue、Hall、明细或 Seat 关联数据缺失，或者 Showtime 使用未知 `bizType` 时，返回不暴露细节的 `500 INTERNAL_ERROR`。两个查询接口只读取 MySQL，不读取订单 Redis Key，不修改订单状态，也不会根据 `expireTime` 临时修正 `UNPAID` 状态。
 
 `POST /api/orders/{id}/cancel` 已在阶段 8 Step 8.8 正式开放，仅允许当前登录用户主动取消自己的 `UNPAID` 订单。订单不存在或不属于当前用户统一返回 `404 ORDER_NOT_FOUND`；`PAID`、`REFUNDED` 等非 `UNPAID/CANCELED` 状态返回 `409 ORDER_STATUS_CONFLICT`；已经为 `CANCELED` 时按幂等成功返回 HTTP 200，不重复释放座位或增加余票。
 

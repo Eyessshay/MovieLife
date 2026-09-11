@@ -10,8 +10,11 @@ public class TicketOrderListItemVO {
 
     private Long orderId;
     private Long showtimeId;
+    private String bizType;
     private Long movieId;
     private String movieName;
+    private Long activityId;
+    private String activityName;
     private Long venueId;
     private String venueName;
     private Long hallId;
