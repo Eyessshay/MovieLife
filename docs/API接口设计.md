@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.7（阶段 10 Step 10.3 通用场次与 Seat Map 兼容冻结版）
+- 版本：v0.8（阶段 10 Step 10.4 Activity 锁座与首次创建订单兼容冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -148,6 +148,12 @@ Activity Seat Map 继续返回既有 `ShowtimeSeatMapVO/SeatVO` 字段，但额�
 
 Step 10.3 冻结证据：真实 HTTP 验证动态 2 座 Activity 和初始化 6 座 Activity 的通用场次详情与 Seat Map，查询前后 Activity、Showtime 和 `seat:lock:*` 均不变；全量 370 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功。活动锁座、创建订单、订单展示及后续交易兼容仍未实现；活动收藏、评价、附近活动、管理端、非固定座位票务、第三方支付、部分退款、核销撤销、Redis Stream、MQ 和 AI 继续留待后续独立 Step。
 
+Step 10.4 已让既有 `POST /api/showtimes/{id}/seats/lock`、`POST /api/showtimes/{id}/seats/release` 和 `POST /api/orders` 支持固定座位 Activity，不增加 Activity 专用接口或状态。Activity 锁座在写入 Redis 前复用 Step 10.3 的完整 Seat Map 校验，再校验所选物理 Seat 与 ShowtimeSeat；任何整体数据缺失、状态非法或余票计数不一致均失败关闭，不签发临时资格。MOVIE 锁座保持阶段 7 的原查询和 Lua 路径。
+
+首次创建 Activity 订单时，仍先按 `lockToken` 查询 MySQL：若已有归属和请求一致的订单，直接返回原订单，不以 Redis 是否存在为前提；只有 token 尚未消费时才检查 Redis 临时资格。新订单在原单个 MySQL 事务内、任何写入之前再次校验 Activity Seat Map，然后按既有顺序插入 TicketOrder、批量插入 TicketOrderItem、条件占用全部 ShowtimeSeat、扣减 `available_seats`，并严格校验全部 affectedRows。订单金额只取 ShowtimeSeat.price；提交成功后才按 token 条件清理 Redis。释放接口仍只根据服务端签发的 token 原子清理 Redis，不修改 MySQL。
+
+Step 10.4 真实 HTTP 闭环已验证 Activity 锁座、主动释放、再次锁座、创建 UNPAID 订单、两档座价求和、MySQL 座位与余票事实、COMMIT 后 Redis 清理，以及 Redis 已不存在时相同 token 返回原订单；请求座位不一致仍返回 `ORDER_REQUEST_MISMATCH`。全量 375 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功。本 Step 不实现 Activity 订单列表/详情展示兼容，也不扩展取消、超时、支付、出票、退款或核销验证；不新增 SQL、Redis 状态、Stream、MQ、第三方支付、部分退款或核销撤销。
+
 ### 3.4 社区动态
 
 ```bash
@@ -239,7 +245,7 @@ POST /api/showtimes/{id}/seats/release   # 主动释放未转订单的锁座
 
 接口固定读取一条 Showtime，并分别查询关联的 Venue、Hall、Movie，不使用复杂 JOIN，也不产生列表 N+1。响应 `ShowtimeDetailVO` 包含 `id`、`venueId`、`venueName`、`hallId`、`hallName`、`movieId`、`movieName`、`startTime`、`endTime`、`basePrice`。详情具有时间敏感性，当前直接读取 MySQL，不增加 Redis 缓存。
 
-`GET /api/showtimes/{id}/seats` 是公开的场次座位图查询接口，复用场次详情的有效性规则，只允许未来、启用、关联场馆有效的 `MOVIE` 场次。接口只执行查询，不创建座位状态、不锁座，也不操作 Redis。
+`GET /api/showtimes/{id}/seats` 是公开的场次座位图查询接口，复用场次详情的有效性规则，允许未来、启用、关联场馆有效的 `MOVIE` 或固定座位 `ACTIVITY` 场次。接口只执行查询，不创建座位状态、不锁座，也不操作 Redis。
 
 响应包含 `showtimeId`、`hallId`、`hallName`、`basePrice` 和扁平 `seats` 列表。每个座位返回 `seatId`、`rowNo`、`colNo`、`seatNo`、`seatType`、`status`、`price`；其中 `status` 来自 `tb_showtime_seat`，当前数值语义为 `0=AVAILABLE`、`1=HELD_BY_UNPAID_ORDER`、`2=SOLD`，`price` 为该场次下的座位价格。`tb_seat.base_status=0` 的物理座位不返回。
 

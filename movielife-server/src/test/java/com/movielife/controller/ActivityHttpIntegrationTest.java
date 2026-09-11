@@ -8,12 +8,16 @@ import com.movielife.entity.Hall;
 import com.movielife.entity.Seat;
 import com.movielife.entity.Showtime;
 import com.movielife.entity.ShowtimeSeat;
+import com.movielife.entity.TicketOrder;
+import com.movielife.entity.TicketOrderItem;
 import com.movielife.entity.Venue;
 import com.movielife.mapper.ActivityMapper;
 import com.movielife.mapper.HallMapper;
 import com.movielife.mapper.SeatMapper;
 import com.movielife.mapper.ShowtimeMapper;
 import com.movielife.mapper.ShowtimeSeatMapper;
+import com.movielife.mapper.TicketOrderItemMapper;
+import com.movielife.mapper.TicketOrderMapper;
 import com.movielife.mapper.VenueMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -22,15 +26,22 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -49,12 +60,17 @@ class ActivityHttpIntegrationTest {
     @Autowired private SeatMapper seatMapper;
     @Autowired private ShowtimeMapper showtimeMapper;
     @Autowired private ShowtimeSeatMapper showtimeSeatMapper;
+    @Autowired private TicketOrderMapper ticketOrderMapper;
+    @Autowired private TicketOrderItemMapper ticketOrderItemMapper;
 
     private Long activityId;
     private Long venueId;
     private Long hallId;
     private Long showtimeId;
     private final Set<Long> seatIds = new LinkedHashSet<>();
+    private final Set<String> loginTokens = new LinkedHashSet<>();
+    private final Set<String> loginPhones = new LinkedHashSet<>();
+    private final Set<String> lockTokens = new LinkedHashSet<>();
 
     @BeforeEach
     void setUp() {
@@ -103,12 +119,14 @@ class ActivityHttpIntegrationTest {
         showtimeMapper.insert(showtime);
         showtimeId = showtime.getId();
 
+        int seatIndex = 0;
         for (Long seatId : seatIds) {
             ShowtimeSeat state = new ShowtimeSeat();
             state.setShowtimeId(showtimeId);
             state.setSeatId(seatId);
             state.setStatus(0);
-            state.setPrice(new BigDecimal("120.00"));
+            state.setPrice(seatIndex++ == 0
+                    ? new BigDecimal("120.00") : new BigDecimal("180.00"));
             state.setVersion(0);
             showtimeSeatMapper.insert(state);
         }
@@ -117,9 +135,34 @@ class ActivityHttpIntegrationTest {
     @AfterEach
     void cleanup() {
         if (showtimeId != null) {
+            List<TicketOrder> orders = ticketOrderMapper.selectList(
+                    new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TicketOrder>()
+                            .eq(TicketOrder::getShowtimeId, showtimeId));
+            for (TicketOrder order : orders) {
+                ticketOrderItemMapper.delete(
+                        new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TicketOrderItem>()
+                                .eq(TicketOrderItem::getOrderId, order.getId()));
+            }
+            ticketOrderMapper.delete(
+                    new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TicketOrder>()
+                            .eq(TicketOrder::getShowtimeId, showtimeId));
             showtimeSeatMapper.delete(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ShowtimeSeat>()
                     .eq(ShowtimeSeat::getShowtimeId, showtimeId));
             showtimeMapper.deleteById(showtimeId);
+        }
+        for (String lockToken : lockTokens) {
+            redisTemplate.delete(RedisConstants.SEAT_LOCK_TOKEN_KEY_PREFIX + lockToken);
+        }
+        for (Long seatId : seatIds) {
+            if (showtimeId != null) {
+                redisTemplate.delete(RedisConstants.SEAT_LOCK_KEY_PREFIX + showtimeId + ":" + seatId);
+            }
+        }
+        for (String token : loginTokens) {
+            redisTemplate.delete(RedisConstants.LOGIN_TOKEN_KEY + token);
+        }
+        for (String phone : loginPhones) {
+            redisTemplate.delete(RedisConstants.LOGIN_CODE_KEY + phone);
         }
         for (Long seatId : seatIds) {
             seatMapper.deleteById(seatId);
@@ -220,6 +263,102 @@ class ActivityHttpIntegrationTest {
         assertThat(redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*")).isEqualTo(locksBefore);
     }
 
+    @Test
+    void activityLockReleaseAndOrderCreationShouldUseRedisQualificationAndMysqlFacts()
+            throws Exception {
+        LoginSession owner = login("13800000021", "246810");
+        List<Long> selected = new ArrayList<>(seatIds);
+        String seatJson = selected.get(1) + "," + selected.get(0);
+        Showtime beforeLock = showtimeMapper.selectById(showtimeId);
+
+        ResponseEntity<String> firstLock = post(
+                "/api/showtimes/" + showtimeId + "/seats/lock",
+                "{\"seatIds\":[" + seatJson + "]}", owner.token);
+        assertThat(firstLock.getStatusCode()).isEqualTo(HttpStatus.OK);
+        String releasedToken = json(firstLock).path("data").path("lockToken").asText();
+        lockTokens.add(releasedToken);
+        assertThat(releasedToken).isNotBlank();
+        for (Long seatId : selected) {
+            assertThat(redisTemplate.opsForValue().get(seatKey(seatId)))
+                    .isEqualTo(releasedToken);
+        }
+        assertThat(showtimeMapper.selectById(showtimeId)).isEqualTo(beforeLock);
+        assertThat(showtimeSeatMapper.selectList(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ShowtimeSeat>()
+                        .eq(ShowtimeSeat::getShowtimeId, showtimeId)))
+                .allSatisfy(state -> assertThat(state.getStatus()).isZero());
+
+        ResponseEntity<String> release = post(
+                "/api/showtimes/" + showtimeId + "/seats/release",
+                "{\"lockToken\":\"" + releasedToken + "\"}", owner.token);
+        assertThat(release.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(redisTemplate.opsForValue().get(tokenKey(releasedToken))).isNull();
+        for (Long seatId : selected) {
+            assertThat(redisTemplate.opsForValue().get(seatKey(seatId))).isNull();
+        }
+        assertThat(showtimeMapper.selectById(showtimeId)).isEqualTo(beforeLock);
+
+        ResponseEntity<String> secondLock = post(
+                "/api/showtimes/" + showtimeId + "/seats/lock",
+                "{\"seatIds\":[" + seatJson + "]}", owner.token);
+        assertThat(secondLock.getStatusCode()).isEqualTo(HttpStatus.OK);
+        String consumedToken = json(secondLock).path("data").path("lockToken").asText();
+        lockTokens.add(consumedToken);
+        assertThat(consumedToken).isNotEqualTo(releasedToken);
+
+        String orderBody = "{\"showtimeId\":" + showtimeId
+                + ",\"seatIds\":[" + seatJson + "]"
+                + ",\"lockToken\":\"" + consumedToken + "\"}";
+        ResponseEntity<String> create = post("/api/orders", orderBody, owner.token);
+        assertThat(create.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode created = json(create).path("data");
+        long orderId = created.path("orderId").asLong();
+        assertThat(orderId).isPositive();
+        assertThat(created.path("status").asText()).isEqualTo("UNPAID");
+        assertThat(created.path("totalAmount").decimalValue()).isEqualByComparingTo("300.00");
+
+        TicketOrder order = ticketOrderMapper.selectById(orderId);
+        assertThat(order.getUserId()).isEqualTo(owner.userId);
+        assertThat(order.getLockToken()).isEqualTo(consumedToken);
+        assertThat(order.getTotalAmount()).isEqualByComparingTo("300.00");
+        List<TicketOrderItem> items = ticketOrderItemMapper.selectList(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TicketOrderItem>()
+                        .eq(TicketOrderItem::getOrderId, orderId)
+                        .orderByAsc(TicketOrderItem::getSeatId));
+        assertThat(items).hasSize(2);
+        assertThat(items).extracting(TicketOrderItem::getPrice)
+                .containsExactlyInAnyOrder(new BigDecimal("120.00"), new BigDecimal("180.00"));
+        assertThat(showtimeSeatMapper.selectList(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ShowtimeSeat>()
+                        .eq(ShowtimeSeat::getShowtimeId, showtimeId)))
+                .allSatisfy(state -> {
+                    assertThat(state.getStatus()).isEqualTo(1);
+                    assertThat(state.getLockOrderId()).isEqualTo(orderId);
+                });
+        assertThat(showtimeMapper.selectById(showtimeId).getAvailableSeats()).isZero();
+        assertThat(redisTemplate.opsForValue().get(tokenKey(consumedToken))).isNull();
+        for (Long seatId : selected) {
+            assertThat(redisTemplate.opsForValue().get(seatKey(seatId))).isNull();
+        }
+
+        ResponseEntity<String> retry = post("/api/orders", orderBody, owner.token);
+        assertThat(retry.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(json(retry).path("data").path("orderId").asLong()).isEqualTo(orderId);
+        assertThat(ticketOrderMapper.selectCount(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TicketOrder>()
+                        .eq(TicketOrder::getLockToken, consumedToken))).isEqualTo(1);
+        assertThat(ticketOrderItemMapper.selectCount(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TicketOrderItem>()
+                        .eq(TicketOrderItem::getOrderId, orderId))).isEqualTo(2);
+
+        String mismatchBody = "{\"showtimeId\":" + showtimeId
+                + ",\"seatIds\":[" + selected.get(0) + "]"
+                + ",\"lockToken\":\"" + consumedToken + "\"}";
+        ResponseEntity<String> mismatch = post("/api/orders", mismatchBody, owner.token);
+        assertThat(mismatch.getStatusCode()).isEqualTo(HttpStatus.CONFLICT);
+        assertThat(json(mismatch).path("code").asText()).isEqualTo("ORDER_REQUEST_MISMATCH");
+    }
+
     private void insertSeat(int row, int column, String number, String type) {
         Seat seat = new Seat();
         seat.setHallId(hallId);
@@ -235,5 +374,51 @@ class ActivityHttpIntegrationTest {
     private Set<String> redisKeys(String pattern) {
         Set<String> keys = redisTemplate.keys(pattern);
         return keys == null ? Collections.emptySet() : new LinkedHashSet<>(keys);
+    }
+
+    private LoginSession login(String phone, String code) throws Exception {
+        loginPhones.add(phone);
+        redisTemplate.opsForValue().set(
+                RedisConstants.LOGIN_CODE_KEY + phone, code, 5, TimeUnit.MINUTES);
+        ResponseEntity<String> response = post("/api/user/login",
+                "{\"phone\":\"" + phone + "\",\"code\":\"" + code + "\"}", null);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode body = json(response);
+        String token = body.path("data").path("token").asText();
+        long userId = body.path("data").path("user").path("id").asLong();
+        loginTokens.add(token);
+        return new LoginSession(token, userId);
+    }
+
+    private ResponseEntity<String> post(String path, String body, String token) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        if (token != null) {
+            headers.setBearerAuth(token);
+        }
+        return restTemplate.exchange(path, HttpMethod.POST,
+                new HttpEntity<>(body, headers), String.class);
+    }
+
+    private JsonNode json(ResponseEntity<String> response) throws Exception {
+        return objectMapper.readTree(response.getBody());
+    }
+
+    private String seatKey(Long seatId) {
+        return RedisConstants.SEAT_LOCK_KEY_PREFIX + showtimeId + ":" + seatId;
+    }
+
+    private String tokenKey(String lockToken) {
+        return RedisConstants.SEAT_LOCK_TOKEN_KEY_PREFIX + lockToken;
+    }
+
+    private static final class LoginSession {
+        private final String token;
+        private final long userId;
+
+        private LoginSession(String token, long userId) {
+            this.token = token;
+            this.userId = userId;
+        }
     }
 }

@@ -110,6 +110,33 @@ class SeatLockServiceImplTest {
     }
 
     @Test
+    void activityShouldValidateCompleteSeatMapBeforeSelectedSeats() {
+        stubValidActivityShowtime();
+        when(seatMapper.selectList(any())).thenReturn(Collections.singletonList(enabledSeat(101L)));
+        when(showtimeSeatMapper.selectList(any()))
+                .thenReturn(Collections.singletonList(showtimeSeat(101L, 0)));
+
+        SeatLockContext context = seatLockService.prepareLockContext(
+                SHOWTIME_ID, request(101L));
+
+        assertThat(context.getSeatIds()).containsExactly(101L);
+        verify(showtimeService).querySeatMap(SHOWTIME_ID);
+    }
+
+    @Test
+    void incompleteActivitySeatMapShouldStopBeforeSelectedSeatQueries() {
+        stubValidActivityShowtime();
+        when(showtimeService.querySeatMap(SHOWTIME_ID))
+                .thenThrow(new BusinessException(ErrorCode.INTERNAL_ERROR));
+
+        assertError(ErrorCode.INTERNAL_ERROR,
+                () -> seatLockService.prepareLockContext(SHOWTIME_ID, request(101L)));
+
+        verify(seatMapper, never()).selectList(any());
+        verify(showtimeSeatMapper, never()).selectList(any());
+    }
+
+    @Test
     void seatOutsideTargetHallShouldFail() {
         stubValidShowtime();
         when(seatMapper.selectList(any())).thenReturn(Collections.singletonList(enabledSeat(101L)));
@@ -176,6 +203,7 @@ class SeatLockServiceImplTest {
         assertThat(context.getExpireTime()).isNull();
         verify(seatMapper, times(1)).selectList(any());
         verify(showtimeSeatMapper, times(1)).selectList(any());
+        verify(showtimeService, never()).querySeatMap(any());
     }
 
     @Test
@@ -225,6 +253,15 @@ class SeatLockServiceImplTest {
         ShowtimeDetailVO showtime = new ShowtimeDetailVO();
         showtime.setId(SHOWTIME_ID);
         showtime.setHallId(HALL_ID);
+        showtime.setBizType("MOVIE");
+        when(showtimeService.queryShowtimeDetail(SHOWTIME_ID)).thenReturn(showtime);
+    }
+
+    private void stubValidActivityShowtime() {
+        ShowtimeDetailVO showtime = new ShowtimeDetailVO();
+        showtime.setId(SHOWTIME_ID);
+        showtime.setHallId(HALL_ID);
+        showtime.setBizType("ACTIVITY");
         when(showtimeService.queryShowtimeDetail(SHOWTIME_ID)).thenReturn(showtime);
     }
 

@@ -1763,6 +1763,18 @@ Activity Seat Map 在阶段 6 的批量座位读取上增加固定座位完整�
 
 本 Step 不修改 SeatLockService、TicketOrder、支付、出票、退款或核销，也不让 Activity 进入交易写链路。后续若继续，应另开小 Step 处理 Activity 锁座与首次创建订单兼容，并继续遵守 Redis 只提供订单前临时资格、MySQL 保存订单后最终事实以及单事务全成全败边界。
 
+### 7.4 Step 10.4：Activity 锁座与首次创建订单兼容
+
+本 Step 复用既有锁座、释放和创建订单接口，没有复制 Activity 专用 Controller、DTO、Lua、订单表或状态机。SeatLockService 仍先取得通用 Showtime 详情；仅对 `bizType=ACTIVITY` 增加 Step 10.3 完整 Seat Map 校验，并在通过后继续执行原有的所选 Seat/ShowtimeSeat 批量校验与 Redis Lua 原子锁定。这样，Activity 整体座位数据不完整、状态/价格非法或 `total_seats`、`available_seats` 不一致时，不会签发可用于创建订单的临时资格；MOVIE 分支保持原锁座查询链路。主动释放仍只消费 token 元数据并通过既有 Lua 按 value 匹配删除，不写 MySQL。
+
+订单创建的幂等入口没有改变：TicketOrderCreationValidator 先按唯一 `lock_token` 查询 MySQL，已有订单时校验用户、场次和完整明细座位集合后直接返回；只有不存在订单时才校验 Redis Metadata、过期时间及全部 seatKey。因此 Activity 订单提交成功且 Redis 已清理后，同 token 重试仍返回原订单，不能二次消费，也不会错误返回 `INVALID_LOCK_TOKEN`。
+
+Activity 首次创建订单在既有 `TicketOrderTransactionService` 单事务内、任何写操作之前再次执行完整 Seat Map 校验，防止锁座后至下单前出现整体数据损坏。随后完全复用阶段 8 的事务顺序：插入 TicketOrder、批量插入 TicketOrderItem、按 AVAILABLE 且 `lock_order_id IS NULL` 条件批量占座、条件扣减 `available_seats`；订单和明细写入数量、占座数量及场次更新均要求精确 affectedRows，任一步异常整体回滚。价格快照逐座读取 ShowtimeSeat.price，Activity.priceMin/priceMax 不参与结算。事务成功返回后才调用原 token 条件清理；Redis 清理失败不否定已经提交的 MySQL 订单事实。
+
+测试新增 Activity 完整 Seat Map 门禁、MOVIE 路径不增加 Seat Map 查询、门禁失败零写入，以及真实 HTTP 锁座 → 释放 → 再锁座 → 创建订单 → Redis 清理 → 无 Redis 幂等重试闭环。真实联调使用隔离 MySQL 8.0.17、当前 `movielife.sql`、10.2 可重复活动种子和本机 Redis；两张活动票按 120.00 与 180.00 形成 300.00 订单，MySQL 中形成唯一 TicketOrder、两条 TicketOrderItem、两条 HELD ShowtimeSeat 和 `available_seats=0`，Redis token 与 seatKey 在提交后删除。全量 375 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功，Step 10.4 至此冻结。
+
+本 Step 不修改 SQL，不实现 Activity 订单列表/详情展示兼容，不为取消、超时、支付、出票、退款或核销增加 Activity 分支验证，也不新增 Redis 状态、Redis Stream、MQ、第三方支付、部分退款、核销撤销、非固定座位库存、活动收藏/评价或 AI。下一步尚未指定，必须另行设计并拆成独立小 Step。
+
 ## 8. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -1798,4 +1810,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.7，阶段 10 Step 10.3 已冻结固定座位 Activity 的通用场次详情与 Seat Map 只读兼容，锁座及订单交易链路的 Activity 兼容尚未实现。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.8，阶段 10 Step 10.4 已冻结固定座位 Activity 的锁座、释放与首次创建订单兼容；订单展示及取消、超时、支付、出票、退款、核销的 Activity 兼容尚未纳入本 Step。

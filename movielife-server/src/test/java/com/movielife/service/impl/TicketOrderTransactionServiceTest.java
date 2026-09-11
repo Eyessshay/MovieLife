@@ -100,6 +100,37 @@ class TicketOrderTransactionServiceTest {
     }
 
     @Test
+    void activityShouldValidateCompleteSeatMapBeforeCreatingOrder() {
+        stubShowtimeAndSeats("ACTIVITY");
+        stubSuccessfulOrderAndItems();
+        when(showtimeSeatMapper.holdSeatsForOrder(1001L, context.getSeatIds(), 9001L)).thenReturn(2);
+        when(showtimeMapper.decreaseAvailableSeats(1001L, 2)).thenReturn(1);
+
+        CreateTicketOrderVO result = service.createNewOrder(context);
+
+        assertThat(result.getOrderId()).isEqualTo(9001L);
+        verify(showtimeService).querySeatMap(1001L);
+    }
+
+    @Test
+    void incompleteActivitySeatMapShouldFailBeforeAnyOrderWrite() {
+        ShowtimeDetailVO showtime = new ShowtimeDetailVO();
+        showtime.setBizType("ACTIVITY");
+        showtime.setStartTime(LocalDateTime.now().plusHours(2));
+        when(showtimeService.queryShowtimeDetail(1001L)).thenReturn(showtime);
+        when(showtimeService.querySeatMap(1001L))
+                .thenThrow(new BusinessException(ErrorCode.INTERNAL_ERROR));
+
+        assertError(ErrorCode.INTERNAL_ERROR, () -> service.createNewOrder(context));
+
+        verify(showtimeSeatMapper, never()).selectList(any());
+        verify(ticketOrderMapper, never()).insert(any());
+        verify(ticketOrderItemMapper, never()).insertBatch(anyList());
+        verify(showtimeSeatMapper, never()).holdSeatsForOrder(any(), anyList(), any());
+        verify(showtimeMapper, never()).decreaseAvailableSeats(any(), any());
+    }
+
+    @Test
     void partialSeatHoldShouldFailBeforeAvailableCountUpdate() {
         stubShowtimeAndSeats();
         stubSuccessfulOrderAndItems();
@@ -155,6 +186,15 @@ class TicketOrderTransactionServiceTest {
         doAnswer(invocation -> { ((TicketOrder) invocation.getArgument(0)).setId(9001L); return 1; })
                 .when(ticketOrderMapper).insert(any(TicketOrder.class));
         when(ticketOrderItemMapper.insertBatch(anyList())).thenReturn(2);
+    }
+
+    private void stubShowtimeAndSeats(String bizType) {
+        ShowtimeDetailVO showtime = new ShowtimeDetailVO();
+        showtime.setBizType(bizType);
+        showtime.setStartTime(LocalDateTime.now().plusHours(2));
+        when(showtimeService.queryShowtimeDetail(1001L)).thenReturn(showtime);
+        when(showtimeSeatMapper.selectList(any())).thenReturn(Arrays.asList(
+                seatState(101L, "40.00"), seatState(102L, "55.00")));
     }
 
     private TicketOrderCreationContext context() {

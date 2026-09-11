@@ -33,6 +33,7 @@ public class TicketOrderTransactionService {
 
     static final long ORDER_PAYMENT_TTL_MINUTES = 15L;
     private static final int AVAILABLE_STATUS = 0;
+    private static final String ACTIVITY_BIZ_TYPE = "ACTIVITY";
 
     private final ShowtimeService showtimeService;
     private final ShowtimeMapper showtimeMapper;
@@ -44,6 +45,9 @@ public class TicketOrderTransactionService {
     public CreateTicketOrderVO createNewOrder(TicketOrderCreationContext context) {
         validateContext(context);
         ShowtimeDetailVO showtime = showtimeService.queryShowtimeDetail(context.getShowtimeId());
+        if (ACTIVITY_BIZ_TYPE.equals(showtime.getBizType())) {
+            showtimeService.querySeatMap(context.getShowtimeId());
+        }
         List<ShowtimeSeat> showtimeSeats = queryAndValidateShowtimeSeats(context);
         Map<Long, BigDecimal> seatPriceMap = buildSeatPriceMap(showtimeSeats, context.getSeatIds());
 

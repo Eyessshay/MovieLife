@@ -44,6 +44,7 @@ public class SeatLockServiceImpl implements SeatLockService {
     private static final int MAX_SEATS_PER_LOCK = 6;
     private static final int ENABLED_STATUS = 1;
     private static final int AVAILABLE_STATUS = 0;
+    private static final String ACTIVITY_BIZ_TYPE = "ACTIVITY";
     private static final DefaultRedisScript<Long> SEAT_LOCK_SCRIPT;
     private static final DefaultRedisScript<Long> SEAT_RELEASE_SCRIPT;
 
@@ -144,6 +145,9 @@ public class SeatLockServiceImpl implements SeatLockService {
         Long userId = requireUserId();
         List<Long> seatIds = validateAndNormalizeSeatIds(request);
         ShowtimeDetailVO showtime = showtimeService.queryShowtimeDetail(showtimeId);
+        if (ACTIVITY_BIZ_TYPE.equals(showtime.getBizType())) {
+            showtimeService.querySeatMap(showtimeId);
+        }
 
         validateSeats(showtime.getHallId(), seatIds);
         validateShowtimeSeats(showtimeId, seatIds);
