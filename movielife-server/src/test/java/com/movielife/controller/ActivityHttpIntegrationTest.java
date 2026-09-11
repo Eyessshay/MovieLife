@@ -753,6 +753,187 @@ class ActivityHttpIntegrationTest {
         assertThat(redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*")).isEqualTo(locksBefore);
     }
 
+    @Test
+    void activityIssuanceShouldCreateCodesOnceAndReturnOriginalCodes() throws Exception {
+        LoginSession owner = login("13800000032", "086421");
+        CreatedOrder created = createActivityOrder(owner);
+        payActivityOrder(created.orderId, owner);
+        TicketOrder orderBefore = ticketOrderMapper.selectById(created.orderId);
+        List<TicketOrderItem> itemsBefore = queryOrderItems(created.orderId);
+        List<ShowtimeSeat> seatsBefore = queryShowtimeSeats();
+        Showtime showtimeBefore = showtimeMapper.selectById(showtimeId);
+        Set<String> locksBefore = redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*");
+
+        ResponseEntity<String> first = post(
+                "/api/orders/" + created.orderId + "/issue", null, owner.token);
+
+        assertThat(first.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode firstTickets = json(first).path("data");
+        assertThat(firstTickets).hasSize(2);
+        Set<String> codes = new LinkedHashSet<>();
+        for (JsonNode ticket : firstTickets) {
+            assertThat(ticket.path("seatId").asLong()).isIn(seatIds);
+            assertThat(ticket.path("ticketCode").asText()).matches("[0-9a-f]{32}");
+            assertThat(ticket.path("ticketStatus").asInt()).isEqualTo(1);
+            codes.add(ticket.path("ticketCode").asText());
+        }
+        assertThat(codes).hasSize(2);
+        assertThat(queryOrderItems(created.orderId)).allSatisfy(item -> {
+            assertThat(item.getTicketStatus()).isEqualTo(1);
+            assertThat(codes).contains(item.getTicketCode());
+            assertThat(item.getPrice()).isIn(
+                    new BigDecimal("120.00"), new BigDecimal("180.00"));
+        });
+
+        ResponseEntity<String> repeated = post(
+                "/api/orders/" + created.orderId + "/issue", null, owner.token);
+
+        assertThat(repeated.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(json(repeated).path("data")).isEqualTo(firstTickets);
+        assertThat(ticketOrderMapper.selectById(created.orderId)).isEqualTo(orderBefore);
+        assertThat(queryShowtimeSeats()).isEqualTo(seatsBefore);
+        assertThat(showtimeMapper.selectById(showtimeId)).isEqualTo(showtimeBefore);
+        assertThat(redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*")).isEqualTo(locksBefore);
+        assertThat(itemsBefore).allSatisfy(item -> {
+            assertThat(item.getTicketStatus()).isZero();
+            assertThat(item.getTicketCode()).isNull();
+        });
+    }
+
+    @Test
+    void offlineActivityOrderShouldStillIssueFromMysqlFacts() throws Exception {
+        LoginSession owner = login("13800000033", "975312");
+        CreatedOrder created = createActivityOrder(owner);
+        payActivityOrder(created.orderId, owner);
+        Activity offline = new Activity();
+        offline.setId(activityId);
+        offline.setStatus(0);
+        assertThat(activityMapper.updateById(offline)).isEqualTo(1);
+        List<ShowtimeSeat> seatsBefore = queryShowtimeSeats();
+        Showtime showtimeBefore = showtimeMapper.selectById(showtimeId);
+        Set<String> locksBefore = redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*");
+
+        ResponseEntity<String> response = post(
+                "/api/orders/" + created.orderId + "/issue", null, owner.token);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(json(response).path("data")).hasSize(2);
+        assertThat(ticketOrderMapper.selectById(created.orderId).getStatus()).isEqualTo("PAID");
+        assertThat(queryOrderItems(created.orderId)).allSatisfy(item -> {
+            assertThat(item.getTicketStatus()).isEqualTo(1);
+            assertThat(item.getTicketCode()).matches("[0-9a-f]{32}");
+        });
+        assertThat(queryShowtimeSeats()).isEqualTo(seatsBefore);
+        assertThat(showtimeMapper.selectById(showtimeId)).isEqualTo(showtimeBefore);
+        assertThat(redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*")).isEqualTo(locksBefore);
+    }
+
+    @Test
+    void partialActivityIssuanceShouldPreserveCodeAndFillPendingItem() throws Exception {
+        LoginSession owner = login("13800000034", "864213");
+        CreatedOrder created = createActivityOrder(owner);
+        payActivityOrder(created.orderId, owner);
+        List<TicketOrderItem> items = queryOrderItems(created.orderId);
+        String existingCode = "0123456789abcdef0123456789abcdef";
+        TicketOrderItem issued = items.get(0);
+        issued.setTicketCode(existingCode);
+        issued.setTicketStatus(1);
+        assertThat(ticketOrderItemMapper.updateById(issued)).isEqualTo(1);
+        TicketOrder orderBefore = ticketOrderMapper.selectById(created.orderId);
+        List<ShowtimeSeat> seatsBefore = queryShowtimeSeats();
+        Showtime showtimeBefore = showtimeMapper.selectById(showtimeId);
+        Set<String> locksBefore = redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*");
+
+        ResponseEntity<String> response = post(
+                "/api/orders/" + created.orderId + "/issue", null, owner.token);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode tickets = json(response).path("data");
+        assertThat(tickets).hasSize(2);
+        assertThat(tickets.toString()).contains(existingCode);
+        List<TicketOrderItem> after = queryOrderItems(created.orderId);
+        assertThat(after).allSatisfy(item -> {
+            assertThat(item.getTicketStatus()).isEqualTo(1);
+            assertThat(item.getTicketCode()).matches("[0-9a-f]{32}");
+        });
+        assertThat(after).extracting(TicketOrderItem::getTicketCode)
+                .contains(existingCode).doesNotHaveDuplicates();
+        assertThat(ticketOrderMapper.selectById(created.orderId)).isEqualTo(orderBefore);
+        assertThat(queryShowtimeSeats()).isEqualTo(seatsBefore);
+        assertThat(showtimeMapper.selectById(showtimeId)).isEqualTo(showtimeBefore);
+        assertThat(redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*")).isEqualTo(locksBefore);
+    }
+
+    @Test
+    void concurrentActivityIssuanceShouldReturnSameCodes() throws Exception {
+        LoginSession owner = login("13800000035", "753219");
+        CreatedOrder created = createActivityOrder(owner);
+        payActivityOrder(created.orderId, owner);
+        TicketOrder orderBefore = ticketOrderMapper.selectById(created.orderId);
+        List<ShowtimeSeat> seatsBefore = queryShowtimeSeats();
+        Showtime showtimeBefore = showtimeMapper.selectById(showtimeId);
+        Set<String> locksBefore = redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*");
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<ResponseEntity<String>> first = executor.submit(() -> {
+                await(start);
+                return post("/api/orders/" + created.orderId + "/issue", null, owner.token);
+            });
+            Future<ResponseEntity<String>> second = executor.submit(() -> {
+                await(start);
+                return post("/api/orders/" + created.orderId + "/issue", null, owner.token);
+            });
+            start.countDown();
+            ResponseEntity<String> firstResponse = first.get(10, TimeUnit.SECONDS);
+            ResponseEntity<String> secondResponse = second.get(10, TimeUnit.SECONDS);
+            assertThat(firstResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
+            assertThat(secondResponse.getStatusCode()).isEqualTo(HttpStatus.OK);
+            assertThat(json(firstResponse).path("data"))
+                    .isEqualTo(json(secondResponse).path("data"));
+        } finally {
+            executor.shutdownNow();
+        }
+
+        assertThat(queryOrderItems(created.orderId)).allSatisfy(item -> {
+            assertThat(item.getTicketStatus()).isEqualTo(1);
+            assertThat(item.getTicketCode()).matches("[0-9a-f]{32}");
+        });
+        assertThat(queryOrderItems(created.orderId)).extracting(TicketOrderItem::getTicketCode)
+                .doesNotHaveDuplicates();
+        assertThat(ticketOrderMapper.selectById(created.orderId)).isEqualTo(orderBefore);
+        assertThat(queryShowtimeSeats()).isEqualTo(seatsBefore);
+        assertThat(showtimeMapper.selectById(showtimeId)).isEqualTo(showtimeBefore);
+        assertThat(redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*")).isEqualTo(locksBefore);
+    }
+
+    @Test
+    void inconsistentActivityTicketStateShouldRejectIssuanceWithoutPartialWrites()
+            throws Exception {
+        LoginSession owner = login("13800000036", "642318");
+        CreatedOrder created = createActivityOrder(owner);
+        payActivityOrder(created.orderId, owner);
+        TicketOrderItem inconsistent = queryOrderItems(created.orderId).get(1);
+        inconsistent.setTicketCode("fedcba9876543210fedcba9876543210");
+        assertThat(ticketOrderItemMapper.updateById(inconsistent)).isEqualTo(1);
+        TicketOrder orderBefore = ticketOrderMapper.selectById(created.orderId);
+        List<TicketOrderItem> itemsBefore = queryOrderItems(created.orderId);
+        List<ShowtimeSeat> seatsBefore = queryShowtimeSeats();
+        Showtime showtimeBefore = showtimeMapper.selectById(showtimeId);
+        Set<String> locksBefore = redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*");
+
+        ResponseEntity<String> response = post(
+                "/api/orders/" + created.orderId + "/issue", null, owner.token);
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR);
+        assertThat(json(response).path("code").asText()).isEqualTo("INTERNAL_ERROR");
+        assertThat(ticketOrderMapper.selectById(created.orderId)).isEqualTo(orderBefore);
+        assertThat(queryOrderItems(created.orderId)).isEqualTo(itemsBefore);
+        assertThat(queryShowtimeSeats()).isEqualTo(seatsBefore);
+        assertThat(showtimeMapper.selectById(showtimeId)).isEqualTo(showtimeBefore);
+        assertThat(redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*")).isEqualTo(locksBefore);
+    }
+
     private CreatedOrder createActivityOrder(LoginSession owner) throws Exception {
         List<Long> selected = new ArrayList<>(seatIds);
         String seatJson = selected.get(1) + "," + selected.get(0);
@@ -775,6 +956,13 @@ class ActivityHttpIntegrationTest {
             assertThat(redisTemplate.opsForValue().get(seatKey(seatId))).isNull();
         }
         return new CreatedOrder(orderId);
+    }
+
+    private void payActivityOrder(Long orderId, LoginSession owner) {
+        ResponseEntity<String> response = post(
+                "/api/orders/" + orderId + "/pay", "{}", owner.token);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(ticketOrderMapper.selectById(orderId).getStatus()).isEqualTo("PAID");
     }
 
     private void assertCanceledOrderState(Long orderId, List<TicketOrderItem> itemsBefore) {

@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.11（阶段 10 Step 10.7 Activity 模拟支付兼容冻结版）
+- 版本：v0.12（阶段 10 Step 10.8 Activity 出票兼容冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -169,6 +169,12 @@ Step 10.7 已确认既有 `POST /api/orders/{id}/pay` 可直接处理固定座�
 支付继续在一个 MySQL 事务中先锁 TicketOrder，随后读取全部 TicketOrderItem，再按 `showtime_id + seatIds + status=HELD_BY_UNPAID_ORDER + lock_order_id=当前订单` 条件批量将 ShowtimeSeat 更新为 SOLD、递增版本并保留 `lock_order_id`。座位 affectedRows 必须等于订单明细数，随后以 `id + status=UNPAID + expire_time>payTime` 条件更新订单为 PAID；任一步失败整体回滚。创建订单时已经扣减 `available_seats`，因此支付不再修改余票，不生成 ticketCode，也不改变 TicketOrderItem 的 PENDING 状态。
 
 Step 10.7 真实联调覆盖 Activity 锁座 → 创建订单 → 支付 → 重复支付、下线 Activity 历史订单支付、过期与已取消订单拒绝、双支付、支付与主动取消竞争、过期支付与超时取消竞争，以及部分座位状态异常时事务全回滚。合法并发终态只能是 `PAID + SOLD` 或 `CANCELED + AVAILABLE`，双支付只写入一个 payTime 和一次座位版本变化；支付前后 `available_seats` 与 Redis `seat:lock:*` 集合保持不变。全量 388 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功。本 Step 不修改生产 Java、SQL 或 Redis，不提前实现 Activity 出票、退款和核销，也不引入第三方支付或异步通知。
+
+Step 10.8 已确认既有 `POST /api/orders/{id}/issue` 可直接为固定座位 Activity 的本人 PAID 订单出票，不增加 Activity 专用接口、参数、VO、票状态或票码规则。出票以已经成立的 TicketOrder 与 TicketOrderItem 为 MySQL 事实，不查询 Movie/Activity 作为前置条件，因此 Activity 后续下线不影响历史 PAID 订单出票；非 PAID 状态仍返回 `ORDER_STATUS_CONFLICT`。
+
+出票继续在单个 MySQL 事务内先锁 TicketOrder，再按 seatId 排序读取完整 TicketOrderItem 并校验订单归属、明细 ID、座位唯一性以及票码/票状态组合。PENDING 且票码为空的明细生成 32 位票码并通过单条条件批量 UPDATE 写为 VALID，affectedRows 必须等于待出票数；已为 VALID 且票码非空的明细保持原值，全部已出票时直接返回原票码，部分已出票时只补齐剩余明细。唯一索引冲突、条件更新行数不足或异常明细均失败关闭并由事务整体回滚，不接受部分成功。
+
+Step 10.8 真实 HTTP 联调覆盖 Activity 正常出票与重复幂等、下线 Activity 历史订单出票、部分出票恢复、双出票并发以及票码/状态异常时零部分写入，并复用原出票事务测试确认批量唯一键冲突整体回滚。出票前后 TicketOrder 保持 PAID 且 `payTime` 不变，ShowtimeSeat 保持 SOLD 并保留 `lock_order_id`，`available_seats`、明细价格和 Redis `seat:lock:*` 集合均不变。全量 393 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功。本 Step 不修改生产 Java、SQL 或 Redis，不提前验证 Activity 退款和核销，也不引入 Redis Stream、MQ、第三方支付、部分退款或核销撤销。
 
 ### 3.4 社区动态
 
