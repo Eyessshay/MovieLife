@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.10（阶段 10 Step 10.6 Activity 订单取消兼容冻结版）
+- 版本：v0.11（阶段 10 Step 10.7 Activity 模拟支付兼容冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -163,6 +163,12 @@ Step 10.6 已确认既有 `POST /api/orders/{id}/cancel` 与后台 `TicketOrderT
 主动取消继续只允许订单本人操作；`CANCELED` 重复请求幂等成功，非 `UNPAID/CANCELED` 状态冲突，且不因为 `expireTime` 已过而拒绝数据库中仍为 `UNPAID` 的订单。超时任务继续限量扫描到期 UNPAID 订单并逐单独立事务复核；已取消、已支付、未到期或不存在的订单跳过，单订单失败不阻断后续订单，不新增 `EXPIRED` 状态。主动取消和超时取消竞争时只能有一方实际释放座位并恢复余票。
 
 Step 10.6 真实联调覆盖 Activity 锁座 → 创建 UNPAID 订单 → 主动取消、重复主动取消、下线 Activity 历史订单取消、定时超时取消、重复任务、主动与超时并发竞争，以及部分座位状态异常时的事务全回滚。成功取消后 TicketOrderItem 价格和票状态保持不变，ShowtimeSeat 全部恢复 AVAILABLE、清空 `lock_order_id`，`available_seats` 只恢复一次；取消前后 Redis `seat:lock:*` 集合不变。全量 382 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功。本 Step 不修改生产 Java、SQL 或 Redis，不提前扩展 Activity 支付、出票、退款和核销。
+
+Step 10.7 已确认既有 `POST /api/orders/{id}/pay` 可直接处理固定座位 Activity 订单，不增加 Activity 专用接口、请求参数、支付状态或响应类型。支付只接受本人尚未超过 `expireTime` 的 UNPAID 订单；PAID 重复请求幂等返回首次 `payTime`，到期订单返回 `ORDER_EXPIRED` 且不在支付事务内顺手取消，CANCELED 或 REFUNDED 返回 `ORDER_STATUS_CONFLICT`。Activity 下线不影响已经成立订单支付，支付以 MySQL 订单事实为准。
+
+支付继续在一个 MySQL 事务中先锁 TicketOrder，随后读取全部 TicketOrderItem，再按 `showtime_id + seatIds + status=HELD_BY_UNPAID_ORDER + lock_order_id=当前订单` 条件批量将 ShowtimeSeat 更新为 SOLD、递增版本并保留 `lock_order_id`。座位 affectedRows 必须等于订单明细数，随后以 `id + status=UNPAID + expire_time>payTime` 条件更新订单为 PAID；任一步失败整体回滚。创建订单时已经扣减 `available_seats`，因此支付不再修改余票，不生成 ticketCode，也不改变 TicketOrderItem 的 PENDING 状态。
+
+Step 10.7 真实联调覆盖 Activity 锁座 → 创建订单 → 支付 → 重复支付、下线 Activity 历史订单支付、过期与已取消订单拒绝、双支付、支付与主动取消竞争、过期支付与超时取消竞争，以及部分座位状态异常时事务全回滚。合法并发终态只能是 `PAID + SOLD` 或 `CANCELED + AVAILABLE`，双支付只写入一个 payTime 和一次座位版本变化；支付前后 `available_seats` 与 Redis `seat:lock:*` 集合保持不变。全量 388 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功。本 Step 不修改生产 Java、SQL 或 Redis，不提前实现 Activity 出票、退款和核销，也不引入第三方支付或异步通知。
 
 ### 3.4 社区动态
 

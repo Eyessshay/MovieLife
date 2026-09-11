@@ -1797,6 +1797,16 @@ TicketOrderQueryService 在列表分页取得当前页 TicketOrder 后，一次�
 
 全量 382 项自动化测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`，Step 10.6 至此冻结。本 Step 不修改生产 Java、SQL、Redis Lua、DTO、VO 或公开接口，不实现 Activity 支付、出票、退款、核销，也不引入 Redis Stream、MQ、第三方支付、部分退款或核销撤销。下一步尚未指定，必须另开独立设计 Step。
 
+### 7.7 Step 10.7：Activity 模拟支付兼容
+
+本 Step 复用阶段 8 已冻结的 `POST /api/orders/{id}/pay`、`PayTicketOrderVO` 和 `TicketOrderPaymentService`，不增加 Activity 专用入口、请求参数或状态机。支付依据已经成立的 TicketOrder、TicketOrderItem 与 ShowtimeSeat 事实，不查询 Movie/Activity 作为支付前置条件，因此 Activity 后续下线不会使尚在支付窗口内的本人 UNPAID 订单失效。现有生产实现没有 Movie 专属分支，经真实兼容验证后无需修改 Java 业务代码或 SQL。
+
+支付事务继续先以 `SELECT ... FOR UPDATE` 锁定 TicketOrder，并在锁内校验用户、状态和 `expire_time>payTime`；随后一次读取完整订单明细，使用单条条件 UPDATE 将当前场次、完整 seatId 集合、`status=HELD_BY_UNPAID_ORDER` 且 `lock_order_id=当前订单` 的全部 ShowtimeSeat 更新为 SOLD，递增版本并保留归属。座位影响行数必须等于明细数，订单再以 `id + status=UNPAID + expire_time>payTime` 条件更新为 PAID 并写入 payTime；任一步异常由单个 MySQL 事务整体回滚。支付不修改创建订单时已扣减的 `available_seats`，不生成票码，也不改变 TicketOrderItem 的 PENDING 状态。
+
+新增 6 项 Activity 随机端口 HTTP 场景：下线 Activity 的正常支付及重复幂等、过期与取消状态拒绝、双支付竞争、支付与主动取消竞争、过期支付与超时任务竞争、部分座位状态异常时整体回滚。测试同时复用原 Movie 支付服务、Controller、事务和并发回归。双支付只允许一次座位 `HELD → SOLD` 和唯一首次 payTime；支付与取消竞争只允许 `PAID + SOLD` 或 `CANCELED + AVAILABLE`；过期支付与超时竞争最终为 `CANCELED + AVAILABLE`；异常路径不接受部分成功。所有支付场景中明细价格保持不变，不生成 ticketCode，Redis `seat:lock:*` 集合与 `available_seats` 均保持不变。
+
+真实联调使用隔离 MySQL 8.0.17、当前 `movielife.sql`、10.2 Activity 固定座位种子和本机 Redis。全量 388 项自动化测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`，Step 10.7 至此冻结。本 Step 不修改生产 Java、SQL、Redis Lua、DTO、VO 或公开接口，不实现 Activity 出票、退款、核销，也不引入 Redis Stream、MQ、第三方支付、支付回调、部分退款或核销撤销。下一步尚未指定，必须另开独立设计 Step。
+
 ## 8. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -1832,4 +1842,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.10，阶段 10 Step 10.6 已冻结固定座位 Activity 的主动取消与超时取消兼容；支付、出票、退款和核销的 Activity 验证尚未纳入本 Step。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.11，阶段 10 Step 10.7 已冻结固定座位 Activity 的模拟支付兼容；出票、退款和核销的 Activity 验证尚未纳入本 Step。
