@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.13（阶段 10 Step 10.9 Activity 整单退款兼容冻结版）
+- 版本：v0.14（阶段 10 Step 10.10 Activity 核销兼容冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -181,6 +181,12 @@ Step 10.9 已确认既有 `POST /api/orders/{id}/refund` 可直接处理固定�
 退款继续在单个 MySQL 事务中先锁 TicketOrder，再按明细 ID 顺序锁定完整 TicketOrderItem。全部明细必须为 PENDING 或 VALID，随后按 `showtime_id + 完整 seatIds + status=SOLD + lock_order_id=当前订单` 条件批量恢复 ShowtimeSeat 为 AVAILABLE、清空 `lock_order_id` 并递增版本；affectedRows 必须等于明细数。之后恢复不超过 `total_seats` 的 `available_seats`、条件更新订单 `PAID → REFUNDED`，并把全部票明细统一更新为 REFUNDED。每一步影响行数均严格校验，任一步异常都整体回滚。
 
 Step 10.9 真实 HTTP 联调覆盖未出票 Activity 整单退款、已出票整单退款并保留原票码、重复退款幂等、下线 Activity 历史订单退款、已开场或存在 USED 明细时零写入拒绝、双退款并发只恢复一次，以及部分座位状态异常时事务全回滚。退款保留 `payTime`、`lockToken`、订单明细、价格和既有 `ticketCode`，不读取或写入 Redis。全量 399 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功。本 Step 不修改生产 Java、SQL 或 Redis，不提前实现 Activity 核销，也不引入真实退款渠道、退款回调、部分退款、Redis Stream 或 MQ。
+
+Step 10.10 已确认既有 `POST /api/admin/tickets/verify` 可直接核销固定座位 Activity 票，不增加 Activity 专用接口、DTO、VO、权限表或票状态。请求仍只包含 `ticketCode`；服务端根据票明细关联订单与 Showtime，以启用的 `tb_venue_staff(user_id, venue_id)` 校验工作人员是否属于该 Activity 场次的实际 Venue。Activity 下线不影响已经成立且有效的活动票核销；无本场馆权限、跨场馆或停用工作人员统一返回 `TICKET_VERIFY_FORBIDDEN`。
+
+核销继续在单个 MySQL 事务中先定位票明细，再锁 TicketOrder，随后锁目标 TicketOrderItem，保持与整单退款相同的订单后明细锁顺序。仅 PAID 订单的 VALID 票可通过 `id + order_id + ticket_status=VALID + used_time/used_by_user_id IS NULL` 条件更新为 USED，并在同一条 UPDATE 中写入首次 `usedTime` 和 `usedByUserId`；affectedRows 必须为 1。重复核销严格返回 `TICKET_ALREADY_USED`，不得覆盖首次核销证据；跨场馆拒绝发生在写入前。
+
+Step 10.10 真实 HTTP 联调覆盖下线 Activity 的本场馆工作人员首次核销与重复拒绝、跨场馆工作人员拒绝且零写入、双核销并发仅一次成功，以及 Activity 核销与整单退款竞争。竞争终态只能是“整单 REFUNDED、核销返回 TICKET_REFUNDED”或“目标票 USED、订单保持 PAID、退款返回 REFUND_NOT_ALLOWED”。核销不修改 TicketOrder、ShowtimeSeat、`available_seats` 或 Redis。全量 403 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功。本 Step 不修改生产 Java、SQL 或 Redis，不实现核销撤销、批量核销、电子闸机或异步消息。
 
 ### 3.4 社区动态
 

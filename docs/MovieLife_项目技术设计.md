@@ -1827,6 +1827,16 @@ TicketOrderQueryService 在列表分页取得当前页 TicketOrder 后，一次�
 
 真实联调使用隔离 MySQL 8.0.17、当前 `movielife.sql`、10.2 Activity 固定座位种子和本机 Redis。全量 399 项自动化测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`，Step 10.9 至此冻结。本 Step 不修改生产 Java、SQL、Redis Lua、DTO、VO 或公开接口，不实现 Activity 核销，也不引入 Redis Stream、MQ、第三方支付退款、退款回调、部分退款或核销撤销。下一步尚未指定，必须另开独立设计 Step。
 
+### 7.10 Step 10.10：Activity 场馆核销兼容
+
+本 Step 复用阶段 9 已冻结的 `POST /api/admin/tickets/verify`、`VerifyTicketDTO/VO`、`TicketVerificationService` 和 `tb_venue_staff` 场馆权限事实，不增加 Activity 专用核销入口、票状态或权限模型。服务根据 ticketCode 定位 TicketOrderItem，经 TicketOrder 找到 Showtime，并使用 Showtime.venueId 校验当前用户存在同场馆启用的 VenueStaff 关系；因此工作人员只有目标活动实际 Venue 的权限才可核销，跨场馆、停用或无关系均严格返回 `TICKET_VERIFY_FORBIDDEN`。核销不查询 Activity 上下架状态，下线活动的已成立有效票仍以 MySQL 票务事实处理。
+
+事务先通过唯一 ticketCode 定位明细，再以 `SELECT ... FOR UPDATE` 锁定 TicketOrder，随后锁定目标 TicketOrderItem，保持订单后明细的统一锁顺序。写入前校验订单 PAID、票状态 VALID、核销证据为空、Seat 属于 Showtime.hallId 且物理座号有效。首次核销使用单条条件 UPDATE 执行 `VALID → USED`，同时写入秒级 usedTime 与 usedByUserId，affectedRows 必须为 1；条件竞争失败后重新读取最终状态并映射为明确业务错误。重复或并发重复核销返回 `TICKET_ALREADY_USED`，首次证据不可覆盖。
+
+新增 4 项 Activity 随机端口 HTTP 测试：下线 Activity 的本场馆工作人员成功核销并验证重复请求不覆盖证据、跨场馆工作人员核销严格拒绝且所有事实不变、双核销并发只有一个 HTTP 200、核销与整单退款并发只形成两种合法终态。同时复用阶段 9 原 Controller、Service 和事务测试覆盖空票码、未出票、退款票、非 PAID 订单、停用权限、异常核销证据和物理座位关联缺失。成功核销只修改目标 TicketOrderItem，订单保持 PAID，其他票仍为 VALID，ShowtimeSeat 保持 SOLD，`lock_order_id`、`available_seats` 与 Redis 均不变。
+
+真实联调使用隔离 MySQL 8.0.17、当前 `movielife.sql`、10.2 Activity 固定座位种子和兼容 GEO 的本机 Redis。全量 403 项自动化测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`，Step 10.10 至此冻结。本 Step 不修改生产 Java、SQL、Redis Lua、DTO、VO 或公开接口，不实现核销撤销、批量核销、电子闸机、Redis Stream 或 MQ。下一步尚未指定，必须另开独立设计 Step。
+
 ## 8. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -1862,4 +1872,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.13，阶段 10 Step 10.9 已冻结固定座位 Activity 的整单退款兼容；核销的 Activity 验证尚未纳入本 Step。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.14，阶段 10 Step 10.10 已冻结固定座位 Activity 的场馆核销兼容；阶段 10 后续 Step 尚未指定。
