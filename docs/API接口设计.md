@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.12（阶段 10 Step 10.8 Activity 出票兼容冻结版）
+- 版本：v0.13（阶段 10 Step 10.9 Activity 整单退款兼容冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -175,6 +175,12 @@ Step 10.8 已确认既有 `POST /api/orders/{id}/issue` 可直接为固定座位
 出票继续在单个 MySQL 事务内先锁 TicketOrder，再按 seatId 排序读取完整 TicketOrderItem 并校验订单归属、明细 ID、座位唯一性以及票码/票状态组合。PENDING 且票码为空的明细生成 32 位票码并通过单条条件批量 UPDATE 写为 VALID，affectedRows 必须等于待出票数；已为 VALID 且票码非空的明细保持原值，全部已出票时直接返回原票码，部分已出票时只补齐剩余明细。唯一索引冲突、条件更新行数不足或异常明细均失败关闭并由事务整体回滚，不接受部分成功。
 
 Step 10.8 真实 HTTP 联调覆盖 Activity 正常出票与重复幂等、下线 Activity 历史订单出票、部分出票恢复、双出票并发以及票码/状态异常时零部分写入，并复用原出票事务测试确认批量唯一键冲突整体回滚。出票前后 TicketOrder 保持 PAID 且 `payTime` 不变，ShowtimeSeat 保持 SOLD 并保留 `lock_order_id`，`available_seats`、明细价格和 Redis `seat:lock:*` 集合均不变。全量 393 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功。本 Step 不修改生产 Java、SQL 或 Redis，不提前验证 Activity 退款和核销，也不引入 Redis Stream、MQ、第三方支付、部分退款或核销撤销。
+
+Step 10.9 已确认既有 `POST /api/orders/{id}/refund` 可直接处理固定座位 Activity 整单退款，不增加 Activity 专用接口、请求参数、退款状态或响应类型。仅本人 PAID 且场次尚未开始的订单可退款，REFUNDED 重复请求幂等成功，UNPAID/CANCELED 返回 `ORDER_STATUS_CONFLICT`；Activity 下线不影响已经成立的历史订单退款。任一票明细为 USED 时，在任何写入前返回 `REFUND_NOT_ALLOWED`，不接受部分座位退款。
+
+退款继续在单个 MySQL 事务中先锁 TicketOrder，再按明细 ID 顺序锁定完整 TicketOrderItem。全部明细必须为 PENDING 或 VALID，随后按 `showtime_id + 完整 seatIds + status=SOLD + lock_order_id=当前订单` 条件批量恢复 ShowtimeSeat 为 AVAILABLE、清空 `lock_order_id` 并递增版本；affectedRows 必须等于明细数。之后恢复不超过 `total_seats` 的 `available_seats`、条件更新订单 `PAID → REFUNDED`，并把全部票明细统一更新为 REFUNDED。每一步影响行数均严格校验，任一步异常都整体回滚。
+
+Step 10.9 真实 HTTP 联调覆盖未出票 Activity 整单退款、已出票整单退款并保留原票码、重复退款幂等、下线 Activity 历史订单退款、已开场或存在 USED 明细时零写入拒绝、双退款并发只恢复一次，以及部分座位状态异常时事务全回滚。退款保留 `payTime`、`lockToken`、订单明细、价格和既有 `ticketCode`，不读取或写入 Redis。全量 399 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功。本 Step 不修改生产 Java、SQL 或 Redis，不提前实现 Activity 核销，也不引入真实退款渠道、退款回调、部分退款、Redis Stream 或 MQ。
 
 ### 3.4 社区动态
 
