@@ -1837,6 +1837,16 @@ TicketOrderQueryService 在列表分页取得当前页 TicketOrder 后，一次�
 
 真实联调使用隔离 MySQL 8.0.17、当前 `movielife.sql`、10.2 Activity 固定座位种子和兼容 GEO 的本机 Redis。全量 403 项自动化测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`，Step 10.10 至此冻结。本 Step 不修改生产 Java、SQL、Redis Lua、DTO、VO 或公开接口，不实现核销撤销、批量核销、电子闸机、Redis Stream 或 MQ。下一步尚未指定，必须另开独立设计 Step。
 
+### 7.11 Step 10.11：Activity 完整闭环与阶段冻结
+
+本 Step 不新增业务实现，而是以一条随机端口真实 HTTP 主链路把阶段 10.2～10.10 已冻结能力串联验收：活动列表与详情 → 活动场次 → 通用 Showtime 详情 → Seat Map → Redis 临时锁座 → 创建 UNPAID 订单 → 订单详情 → 模拟支付 → 出票 → 对应 Venue 工作人员核销。回归逐节点验证公开响应与持久化事实，确认 Activity 始终复用通用 Showtime、TicketOrder、TicketOrderItem 和 ShowtimeSeat 模型，没有 Activity 专用订单或状态分支。
+
+主链路验证 Redis TEMP_LOCKED 仅存在于创建订单之前；订单提交后 tokenKey 和全部 seatKey 已清理，后续支付、出票和核销均不创建票务 Redis 状态。最终 MySQL 事实为 TicketOrder 保持 PAID 且保留首次 payTime，全部 ShowtimeSeat 为 SOLD 并继续归属该订单，目标 TicketOrderItem 为 USED 且写入首次核销证据，其余明细为 VALID，`available_seats` 保持 0。订单后的最终事实完全由 MySQL 承担。
+
+阶段冻结测试集继续保留并统一验收主动取消、超时取消、支付与取消竞争、过期支付与超时竞争、未出票及已出票整单退款、核销与退款竞争、异常数据全事务回滚，以及下单、支付、出票、退款的幂等和重复核销严格拒绝。合法分支终态只允许 `CANCELED + AVAILABLE`、`REFUNDED + 全明细 REFUNDED + AVAILABLE` 或 `PAID + SOLD + VALID/USED`；任何中间写入或部分成功都由锁顺序、条件 UPDATE、affectedRows 校验和单个 MySQL 事务阻止。
+
+真实联调使用隔离 MySQL 8.0.17、当前 `movielife.sql` 和兼容 GEO 的 Redis。Activity 定向 29 项测试通过；全量 404 项自动化测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。Step 10.11 不修改生产 Java、SQL、Redis Lua、DTO、VO 或公开接口，不实现非固定座位票务、第三方支付、部分退款、核销撤销、Redis Stream 或 MQ。阶段 10 至此完成并冻结；下一阶段尚未指定，必须先从活动票务或 AI 能力中明确独立阶段，再拆分单个小 Step。
+
 ## 8. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -1872,4 +1882,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.14，阶段 10 Step 10.10 已冻结固定座位 Activity 的场馆核销兼容；阶段 10 后续 Step 尚未指定。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.15，阶段 10 Step 10.11 已完成固定座位 Activity 完整票务闭环回归，阶段 10 至此冻结；下一阶段尚未指定。

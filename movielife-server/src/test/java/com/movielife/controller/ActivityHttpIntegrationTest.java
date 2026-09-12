@@ -1322,6 +1322,125 @@ class ActivityHttpIntegrationTest {
         assertThat(redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*")).isEqualTo(locksBefore);
     }
 
+    @Test
+    void completeActivityTicketingLoopShouldPreserveMysqlAndRedisBoundaries() throws Exception {
+        LoginSession owner = login("13800000051", "197531");
+        LoginSession staff = login("13800000052", "086420");
+        grantVenueStaff(staff.userId, venueId, 1);
+        Set<String> locksBefore = redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*");
+
+        ResponseEntity<String> activities = restTemplate.getForEntity(
+                "/api/activities?keyword=Step102Http&page=1&pageSize=20", String.class);
+        assertThat(activities.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(json(activities).path("data").path("list")).anySatisfy(item ->
+                assertThat(item.path("id").asLong()).isEqualTo(activityId));
+
+        ResponseEntity<String> activityDetail = restTemplate.getForEntity(
+                "/api/activities/" + activityId, String.class);
+        assertThat(activityDetail.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(json(activityDetail).path("data").path("title").asText())
+                .isEqualTo("Step102Http固定座位活动");
+
+        String date = LocalDate.now().plusDays(3).toString();
+        ResponseEntity<String> activityShowtimes = restTemplate.getForEntity(
+                "/api/activities/" + activityId + "/showtimes?date=" + date
+                        + "&venueId=" + venueId,
+                String.class);
+        assertThat(activityShowtimes.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(json(activityShowtimes).path("data")).anySatisfy(item -> {
+            assertThat(item.path("showtimeId").asLong()).isEqualTo(showtimeId);
+            assertThat(item.path("availableSeats").asInt()).isEqualTo(2);
+        });
+
+        ResponseEntity<String> showtimeDetail = restTemplate.getForEntity(
+                "/api/showtimes/" + showtimeId, String.class);
+        assertThat(showtimeDetail.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode showtimeData = json(showtimeDetail).path("data");
+        assertThat(showtimeData.path("bizType").asText()).isEqualTo("ACTIVITY");
+        assertThat(showtimeData.path("activityId").asLong()).isEqualTo(activityId);
+
+        ResponseEntity<String> seatMap = restTemplate.getForEntity(
+                "/api/showtimes/" + showtimeId + "/seats", String.class);
+        assertThat(seatMap.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(json(seatMap).path("data").path("seats")).hasSize(2)
+                .allSatisfy(seat -> assertThat(seat.path("status").asInt()).isZero());
+
+        List<Long> selected = new ArrayList<>(seatIds);
+        String seatJson = selected.get(1) + "," + selected.get(0);
+        ResponseEntity<String> lock = post(
+                "/api/showtimes/" + showtimeId + "/seats/lock",
+                "{\"seatIds\":[" + seatJson + "]}", owner.token);
+        assertThat(lock.getStatusCode()).isEqualTo(HttpStatus.OK);
+        String lockToken = json(lock).path("data").path("lockToken").asText();
+        lockTokens.add(lockToken);
+        assertThat(redisTemplate.opsForValue().get(tokenKey(lockToken))).isNotBlank();
+        for (Long seatId : selected) {
+            assertThat(redisTemplate.opsForValue().get(seatKey(seatId))).isEqualTo(lockToken);
+        }
+
+        String orderBody = "{\"showtimeId\":" + showtimeId
+                + ",\"seatIds\":[" + seatJson + "]"
+                + ",\"lockToken\":\"" + lockToken + "\"}";
+        ResponseEntity<String> create = post("/api/orders", orderBody, owner.token);
+        assertThat(create.getStatusCode()).isEqualTo(HttpStatus.OK);
+        long orderId = json(create).path("data").path("orderId").asLong();
+        assertThat(ticketOrderMapper.selectById(orderId).getStatus()).isEqualTo("UNPAID");
+        assertThat(queryShowtimeSeats()).allSatisfy(state -> {
+            assertThat(state.getStatus()).isEqualTo(1);
+            assertThat(state.getLockOrderId()).isEqualTo(orderId);
+        });
+        assertThat(showtimeMapper.selectById(showtimeId).getAvailableSeats()).isZero();
+        assertThat(redisTemplate.opsForValue().get(tokenKey(lockToken))).isNull();
+        for (Long seatId : selected) {
+            assertThat(redisTemplate.opsForValue().get(seatKey(seatId))).isNull();
+        }
+
+        ResponseEntity<String> orderDetail = get("/api/orders/" + orderId, owner.token);
+        assertThat(orderDetail.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode orderData = json(orderDetail).path("data");
+        assertThat(orderData.path("bizType").asText()).isEqualTo("ACTIVITY");
+        assertThat(orderData.path("activityId").asLong()).isEqualTo(activityId);
+        assertThat(orderData.path("status").asText()).isEqualTo("UNPAID");
+        assertThat(orderData.path("items")).hasSize(2);
+
+        ResponseEntity<String> pay = post("/api/orders/" + orderId + "/pay", "{}", owner.token);
+        assertThat(pay.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(json(pay).path("data").path("status").asText()).isEqualTo("PAID");
+        assertThat(queryShowtimeSeats()).allSatisfy(state -> {
+            assertThat(state.getStatus()).isEqualTo(2);
+            assertThat(state.getLockOrderId()).isEqualTo(orderId);
+        });
+
+        ResponseEntity<String> issue = post(
+                "/api/orders/" + orderId + "/issue", null, owner.token);
+        assertThat(issue.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode tickets = json(issue).path("data");
+        assertThat(tickets).hasSize(2);
+        String ticketCode = tickets.get(0).path("ticketCode").asText();
+        assertThat(ticketCode).matches("[0-9a-f]{32}");
+        assertThat(queryOrderItems(orderId)).allSatisfy(item -> {
+            assertThat(item.getTicketStatus()).isEqualTo(1);
+            assertThat(item.getTicketCode()).isNotBlank();
+        });
+
+        ResponseEntity<String> verify = post("/api/admin/tickets/verify",
+                "{\"ticketCode\":\"" + ticketCode + "\"}", staff.token);
+        assertThat(verify.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(json(verify).path("data").path("ticketStatus").asInt()).isEqualTo(2);
+
+        TicketOrder finalOrder = ticketOrderMapper.selectById(orderId);
+        assertThat(finalOrder.getStatus()).isEqualTo("PAID");
+        assertThat(finalOrder.getPayTime()).isNotNull();
+        assertThat(queryOrderItems(orderId)).extracting(TicketOrderItem::getTicketStatus)
+                .containsExactlyInAnyOrder(2, 1);
+        assertThat(queryShowtimeSeats()).allSatisfy(state -> {
+            assertThat(state.getStatus()).isEqualTo(2);
+            assertThat(state.getLockOrderId()).isEqualTo(orderId);
+        });
+        assertThat(showtimeMapper.selectById(showtimeId).getAvailableSeats()).isZero();
+        assertThat(redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*")).isEqualTo(locksBefore);
+    }
+
     private CreatedOrder createActivityOrder(LoginSession owner) throws Exception {
         List<Long> selected = new ArrayList<>(seatIds);
         String seatJson = selected.get(1) + "," + selected.get(0);

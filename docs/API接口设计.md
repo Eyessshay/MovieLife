@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.14（阶段 10 Step 10.10 Activity 核销兼容冻结版）
+- 版本：v0.15（阶段 10 Step 10.11 Activity 完整闭环冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -187,6 +187,12 @@ Step 10.10 已确认既有 `POST /api/admin/tickets/verify` 可直接核销固�
 核销继续在单个 MySQL 事务中先定位票明细，再锁 TicketOrder，随后锁目标 TicketOrderItem，保持与整单退款相同的订单后明细锁顺序。仅 PAID 订单的 VALID 票可通过 `id + order_id + ticket_status=VALID + used_time/used_by_user_id IS NULL` 条件更新为 USED，并在同一条 UPDATE 中写入首次 `usedTime` 和 `usedByUserId`；affectedRows 必须为 1。重复核销严格返回 `TICKET_ALREADY_USED`，不得覆盖首次核销证据；跨场馆拒绝发生在写入前。
 
 Step 10.10 真实 HTTP 联调覆盖下线 Activity 的本场馆工作人员首次核销与重复拒绝、跨场馆工作人员拒绝且零写入、双核销并发仅一次成功，以及 Activity 核销与整单退款竞争。竞争终态只能是“整单 REFUNDED、核销返回 TICKET_REFUNDED”或“目标票 USED、订单保持 PAID、退款返回 REFUND_NOT_ALLOWED”。核销不修改 TicketOrder、ShowtimeSeat、`available_seats` 或 Redis。全量 403 项测试通过，0 failure、0 error、0 skipped，Maven 构建成功。本 Step 不修改生产 Java、SQL 或 Redis，不实现核销撤销、批量核销、电子闸机或异步消息。
+
+Step 10.11 将阶段 10 冻结为固定座位 Activity 完整票务闭环，不新增接口、请求响应字段、数据库结构、Redis Key 或业务状态。主链路继续使用上述通用接口，按“活动查询 → 活动场次 → 通用场次详情 → Seat Map → Redis 临时锁座 → MySQL 创建 UNPAID 订单 → 订单查询 → 模拟支付 → 出票 → 场馆核销”顺序完成真实 HTTP 回归；最终事实必须为订单 PAID、所选 ShowtimeSeat 全部 SOLD 且归属原订单、一个目标票 USED、其余票 VALID、`available_seats=0`，并且创建订单提交后不得残留临时锁座 Key。
+
+阶段冻结回归同时纳入主动取消、后台超时取消、支付与取消竞争、过期支付与超时竞争、未出票和已出票整单退款、核销与退款竞争，以及重复下单、支付、出票、退款、核销的幂等或严格拒绝行为。取消或超时成功只能形成 `CANCELED + AVAILABLE`；退款成功只能形成 `REFUNDED + 全明细 REFUNDED + AVAILABLE`；已核销票不得退款。所有写操作继续使用既有锁顺序、条件 UPDATE、严格 affectedRows 和单个 MySQL 事务，不接受部分成功。Step 10.11 不实现站票、通票、票档库存、第三方支付、部分退款、核销撤销、Redis Stream 或 MQ；阶段 10 至此完成并冻结，后续能力必须作为新阶段单独设计。
+
+Step 10.11 冻结证据：隔离 MySQL 8.0.17、当前 `movielife.sql` 与兼容 GEO 的 Redis 下，Activity 定向 29 项和全量 404 项自动化测试全部通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。
 
 ### 3.4 社区动态
 
