@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.18（阶段 11 Step 11.3 附近活动主接口冻结版）
+- 版本：v0.19（阶段 11 Step 11.4 边界、异常与分页加固冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -270,6 +270,18 @@ Step 11.3 已实现匿名接口 `GET /api/activities/nearby`，请求由独立 `
 冻结验证包含 DTO/Controller/Service 以及真实 MySQL、兼容 GEO 的 Redis、随机端口 HTTP：覆盖单类型与四类型召回、跨类型合并、同一 Activity 跨场馆/多场次去重、最近场馆优先、该场馆下一场、Activity type 过滤、过滤后分页、售罄展示、非法 VenueType、禁止 N+1 和请求前后 MySQL/GEO 快照不变。Step 11.3 定向 19 项测试通过；全量 420 项测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。
 
 Step 11.3 不修改 `sql/movielife.sql`，不新增 Redis Key、缓存或写状态，不触碰锁座、订单、ShowtimeSeat 和 `available_seats`。Step 11.4/11.5、非固定座位票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端和 GEO 自动同步均未提前实现。
+
+##### 3.3.7 Step 11.4：边界、异常与分页加固冻结
+
+Step 11.4 不改变 3.3.1～3.3.6 的 URL、Method、登录要求、DTO、VO、错误码或排序规则，只为既有 `GET /api/activities/nearby` 补齐边界证据。GEO Key 不存在继续返回 `[]`；Redis GEO 调用失败、无法解析的 member 或缺失距离失败关闭为 `INTERNAL_ERROR`，不降级为 MySQL 经纬度扫描。GEO 中物理缺失、停用、跨城市或实际 VenueType 与来源 Key 不一致的 Venue 被忽略。
+
+MySQL 资格仍由既有批量查询和内存关联共同决定：已结束、停售、非 `ACTIVITY` 的 Showtime 不参与发现；下线 Activity 被过滤；Hall 缺失或不属于 Showtime.Venue 时返回 `INTERNAL_ERROR`。同一 Activity 跨多个 Venue、Showtime 或 VenueType 仍只返回一次；等距时严格使用 `venueId`、`nextStartTime`、`showtimeId` 和 `activityId` 既定次序消除 Redis/MySQL 返回顺序差异。`available_seats=0` 不影响发现资格。
+
+分页继续在全部业务过滤和 Activity 去重后执行。每个目标 VenueType 的候选窗口严格为 `min(page × pageSize × 5, 200)`；请求页起点达到或超过本次最多 200 条有界候选形成的结果时返回 `[]`，不为深页扩大窗口、不返回伪造 total，也不执行无界数据库补偿查询。
+
+新增 8 项自动化测试，并强化既有随机端口 HTTP 联调的只读快照。真实 MySQL/Redis 验证覆盖空 GEO、历史 member、停用 Venue、下线 Activity、过期/停售/错误业务类型场次、Hall/Venue 错配、跨类型与多场馆/多场次去重、等距稳定排序、过滤后分页、候选上限和售罄展示；查询前后 Activity、Venue、Hall、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、GEO member、`seat:lock:*` 与 `seat:lock:token:*` 均不变。原 MOVIE Nearby 专项 61 项通过；全量 428 项测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。
+
+Step 11.4 至此冻结。本 Step 未修改生产 Java、`sql/movielife.sql`、Redis Key 或阶段 1～10 状态机，不实现 Step 11.5、非固定座位票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端或 GEO 自动同步。
 
 ### 3.4 社区动态
 

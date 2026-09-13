@@ -6,10 +6,15 @@ import com.movielife.constants.RedisConstants;
 import com.movielife.entity.Activity;
 import com.movielife.entity.Hall;
 import com.movielife.entity.Showtime;
+import com.movielife.entity.ShowtimeSeat;
+import com.movielife.entity.TicketOrder;
 import com.movielife.entity.Venue;
 import com.movielife.mapper.ActivityMapper;
 import com.movielife.mapper.HallMapper;
 import com.movielife.mapper.ShowtimeMapper;
+import com.movielife.mapper.ShowtimeSeatMapper;
+import com.movielife.mapper.TicketOrderItemMapper;
+import com.movielife.mapper.TicketOrderMapper;
 import com.movielife.mapper.VenueMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -51,6 +56,9 @@ class ActivityNearbyHttpIntegrationTest {
     @Autowired private VenueMapper venueMapper;
     @Autowired private HallMapper hallMapper;
     @Autowired private ShowtimeMapper showtimeMapper;
+    @Autowired private ShowtimeSeatMapper showtimeSeatMapper;
+    @Autowired private TicketOrderMapper ticketOrderMapper;
+    @Autowired private TicketOrderItemMapper ticketOrderItemMapper;
 
     private final List<Long> activityIds = new ArrayList<>();
     private final List<Long> venueIds = new ArrayList<>();
@@ -92,7 +100,18 @@ class ActivityNearbyHttpIntegrationTest {
     void nearbyHttpShouldMergeTypesDeduplicateChooseContextAndRemainReadOnly() throws Exception {
         Map<Long, Activity> activitiesBefore = loadActivities();
         Map<Long, Venue> venuesBefore = loadVenues();
+        Map<Long, Hall> hallsBefore = loadHalls();
         Map<Long, Showtime> showtimesBefore = loadShowtimes();
+        Long showtimeSeatCountBefore = showtimeSeatMapper.selectCount(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ShowtimeSeat>()
+                        .in(ShowtimeSeat::getShowtimeId, showtimeIds));
+        Long orderCountBefore = ticketOrderMapper.selectCount(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TicketOrder>()
+                        .in(TicketOrder::getShowtimeId, showtimeIds));
+        Long orderItemCountBefore = ticketOrderItemMapper.selectCount(null);
+        Set<String> seatLockKeysBefore = redisTemplate.keys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*");
+        Set<String> seatLockTokenKeysBefore = redisTemplate.keys(
+                RedisConstants.SEAT_LOCK_TOKEN_KEY_PREFIX + "*");
         Set<ZSetOperations.TypedTuple<String>> theaterGeoBefore =
                 redisTemplate.opsForZSet().rangeWithScores(THEATER_KEY, 0, -1);
         Set<ZSetOperations.TypedTuple<String>> livehouseGeoBefore =
@@ -130,7 +149,21 @@ class ActivityNearbyHttpIntegrationTest {
 
         assertThat(loadActivities()).isEqualTo(activitiesBefore);
         assertThat(loadVenues()).isEqualTo(venuesBefore);
+        assertThat(loadHalls()).isEqualTo(hallsBefore);
         assertThat(loadShowtimes()).isEqualTo(showtimesBefore);
+        assertThat(showtimeSeatMapper.selectCount(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<ShowtimeSeat>()
+                        .in(ShowtimeSeat::getShowtimeId, showtimeIds)))
+                .isEqualTo(showtimeSeatCountBefore);
+        assertThat(ticketOrderMapper.selectCount(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TicketOrder>()
+                        .in(TicketOrder::getShowtimeId, showtimeIds)))
+                .isEqualTo(orderCountBefore);
+        assertThat(ticketOrderItemMapper.selectCount(null)).isEqualTo(orderItemCountBefore);
+        assertThat(redisTemplate.keys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*"))
+                .isEqualTo(seatLockKeysBefore);
+        assertThat(redisTemplate.keys(RedisConstants.SEAT_LOCK_TOKEN_KEY_PREFIX + "*"))
+                .isEqualTo(seatLockTokenKeysBefore);
         assertThat(redisTemplate.opsForZSet().rangeWithScores(THEATER_KEY, 0, -1))
                 .isEqualTo(theaterGeoBefore);
         assertThat(redisTemplate.opsForZSet().rangeWithScores(LIVEHOUSE_KEY, 0, -1))
@@ -212,6 +245,12 @@ class ActivityNearbyHttpIntegrationTest {
     private Map<Long, Showtime> loadShowtimes() {
         Map<Long, Showtime> result = new LinkedHashMap<>();
         showtimeMapper.selectBatchIds(showtimeIds).forEach(value -> result.put(value.getId(), value));
+        return result;
+    }
+
+    private Map<Long, Hall> loadHalls() {
+        Map<Long, Hall> result = new LinkedHashMap<>();
+        hallMapper.selectBatchIds(hallIds).forEach(value -> result.put(value.getId(), value));
         return result;
     }
 }

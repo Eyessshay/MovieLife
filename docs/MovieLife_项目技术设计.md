@@ -1932,6 +1932,18 @@ Step 11.3 新增 `ActivityNearbyQueryDTO`、`ActivityNearbyVO` 和匿名 `GET /a
 
 Step 11.3 至此冻结：本 Step 未修改 SQL、表结构、Redis Key、锁座或订单状态，不实现 Step 11.4/11.5、非固定座位活动票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端或 GEO 自动同步。下一步只能在明确指定后进入独立 Step。
 
+### 8.4 Step 11.4：边界、异常与分页加固冻结
+
+Step 11.4 对 Step 11.3 的实现进行验证加固，不新增或修改生产接口、DTO、VO、Mapper SQL、Redis Key 和业务状态。GEO Key 缺失按无候选返回空列表；Redis GEO 故障、非法 member 或缺失距离统一失败关闭为 `INTERNAL_ERROR`。历史 GEO member 对应的 Venue 物理缺失、停用、跨城市、经纬度损坏或来源 VenueType 错误时在批量装载后被过滤，不回写 Redis，也不使用 MySQL 经纬度查询降级。
+
+场次资格继续由 `selectFutureActivityShowtimesByVenueIds` 一次批量限定 `biz_type='ACTIVITY' AND status=1 AND start_time>NOW()`，因此已结束、停售和错误业务类型场次不进入组装。Service 再批量校验 Activity、Hall 和核心场次字段：Activity 下线属于正常不可见并过滤，Activity 物理缺失、Hall 缺失或 Hall.Venue 与 Showtime.Venue 不一致属于结构损坏并返回 `INTERNAL_ERROR`。余票为 0 仍是合法场次，附近发现不承担锁座资格判断。
+
+去重和顺序边界经独立测试固定：同一 Activity 可跨多个 VenueType、多个 Venue 和多个 Showtime，最近 Venue 以 `distance ASC, venueId ASC` 决定，该 Venue 下一场以 `startTime ASC, showtimeId ASC` 决定，最终列表以 `distance ASC, nextStartTime ASC, activityId ASC` 排序。分页只能发生在 Venue/Showtime/Activity/Hall 过滤和 Activity 去重之后。每个 GEO Key 的候选数继续限制为 `min(page × pageSize × 5, 200)`；超过该有界窗口的深页返回空列表，不扩大召回、不产生伪精确 total。
+
+新增 5 项 Service 单元测试和 3 项真实 MySQL/Redis 边界集成测试，并扩展既有随机端口 HTTP 联调快照。验证覆盖 GEO 空 Key 与异常、非法 member、脏 Venue、下线 Activity、无效 Showtime、Hall/Venue 错配、跨类型去重、同距离稳定顺序、过滤后分页、200 条候选上限和 `available_seats=0`。HTTP 请求前后比较 Activity、Venue、Hall、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、GEO member、`seat:lock:*` 与 `seat:lock:token:*`，证明全链路无 MySQL/Redis 写入。原 MOVIE Nearby 专项 61 项通过；全量 428 项测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。
+
+Step 11.4 至此冻结。本 Step 未修改生产 Java、SQL、表结构、Redis Lua 或 Key，不实现 Step 11.5、非固定座位活动票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端或 GEO 自动同步；阶段 11 尚未整体冻结。
+
 ## 9. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -1967,4 +1979,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.18，阶段 10 固定座位 Activity 票务保持冻结，阶段 11 已确定为 Activity Nearby，Step 11.1 已完成详细契约设计冻结，Step 11.2 已完成指定 Activity 的附近场馆实现冻结，Step 11.3 已完成附近活动主接口实现、验证、提交与冻结，Step 11.4 尚未开始。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.19，阶段 10 固定座位 Activity 票务保持冻结，阶段 11 已确定为 Activity Nearby，Step 11.1～11.4 已分别完成设计、实现、边界验证、提交与冻结；阶段 11 尚待独立 Step 11.5 完成主链路验收和整体冻结。

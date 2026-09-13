@@ -18,6 +18,7 @@ import com.movielife.vo.ActivityNearbyVO;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.geo.Circle;
@@ -185,6 +186,92 @@ class ActivityServiceImplTest {
         assertThat(service.queryNearbyActivities(query))
                 .extracting(ActivityNearbyVO::getId)
                 .containsExactly(2L);
+    }
+
+    @Test
+    void nearbyShouldReturnEmptyWhenGeoKeyDoesNotExist() {
+        ActivityNearbyQueryDTO query = nearbyQuery();
+
+        assertThat(service.queryNearbyActivities(query)).isEmpty();
+        verify(venueMapper, never()).selectBatchIds(any());
+        verify(showtimeMapper, never()).selectFutureActivityShowtimesByVenueIds(any());
+        verify(activityMapper, never()).selectBatchIds(any());
+        verify(hallMapper, never()).selectBatchIds(any());
+    }
+
+    @Test
+    void nearbyShouldFailClosedWhenRedisGeoQueryFails() {
+        ActivityNearbyQueryDTO query = nearbyQuery();
+        query.setVenueType(VenueType.CINEMA);
+        when(geoOperations.radius(eq("venue:geo:上海:CINEMA"), any(Circle.class), any()))
+                .thenThrow(new RuntimeException("redis unavailable"));
+
+        assertError(() -> service.queryNearbyActivities(query), ErrorCode.INTERNAL_ERROR);
+        verify(venueMapper, never()).selectBatchIds(any());
+        verify(showtimeMapper, never()).selectFutureActivityShowtimesByVenueIds(any());
+    }
+
+    @Test
+    void nearbyShouldFailClosedWhenGeoMemberIsNotANumericVenueId() {
+        ActivityNearbyQueryDTO query = nearbyQuery();
+        query.setVenueType(VenueType.CINEMA);
+        when(geoOperations.radius(eq("venue:geo:上海:CINEMA"), any(Circle.class), any()))
+                .thenReturn(geoResults(geoResult("invalid-member", 100D)));
+
+        assertError(() -> service.queryNearbyActivities(query), ErrorCode.INTERNAL_ERROR);
+        verify(venueMapper, never()).selectBatchIds(any());
+    }
+
+    @Test
+    void nearbyShouldApplyStableTieBreakersAfterDeduplication() {
+        ActivityNearbyQueryDTO query = nearbyQuery();
+        query.setVenueType(VenueType.CINEMA);
+        when(geoOperations.radius(eq("venue:geo:上海:CINEMA"), any(Circle.class), any()))
+                .thenReturn(geoResults(geoResult("20", 100D), geoResult("10", 100D)));
+        when(venueMapper.selectBatchIds(any())).thenReturn(Arrays.asList(
+                nearbyVenue(20L, "cinema", "二十号场馆"),
+                nearbyVenue(10L, "cinema", "十号场馆")));
+
+        LocalDateTime commonStart = LocalDateTime.now().plusDays(1);
+        Showtime activityOneAtHigherVenue = nearbyShowtime(201L, 1L, 20L, 201L, 1);
+        activityOneAtHigherVenue.setStartTime(commonStart.minusHours(1));
+        activityOneAtHigherVenue.setEndTime(commonStart.plusHours(1));
+        Showtime activityOneAtLowerVenue = nearbyShowtime(101L, 1L, 10L, 101L, 2);
+        Showtime activityTwo = nearbyShowtime(102L, 2L, 10L, 101L, 1);
+        activityTwo.setStartTime(commonStart);
+        activityTwo.setEndTime(commonStart.plusHours(2));
+        Showtime activityThree = nearbyShowtime(103L, 3L, 10L, 101L, 1);
+        activityThree.setStartTime(commonStart);
+        activityThree.setEndTime(commonStart.plusHours(2));
+        when(showtimeMapper.selectFutureActivityShowtimesByVenueIds(any())).thenReturn(Arrays.asList(
+                activityOneAtHigherVenue, activityOneAtLowerVenue, activityThree, activityTwo));
+        when(activityMapper.selectBatchIds(any())).thenReturn(Arrays.asList(
+                activity(3L, 1), activity(1L, 1), activity(2L, 1)));
+        when(hallMapper.selectBatchIds(any())).thenReturn(Arrays.asList(
+                hall(101L, 10L, "十号厅"), hall(201L, 20L, "二十号厅")));
+
+        List<ActivityNearbyVO> result = service.queryNearbyActivities(query);
+
+        assertThat(result).extracting(ActivityNearbyVO::getId).containsExactly(2L, 3L, 1L);
+        assertThat(result.get(2).getNearestVenueId()).isEqualTo(10L);
+        assertThat(result.get(2).getNextShowtimeId()).isEqualTo(101L);
+    }
+
+    @Test
+    void nearbyShouldCapEachGeoCandidateWindowAtTwoHundred() {
+        ActivityNearbyQueryDTO query = nearbyQuery();
+        query.setVenueType(VenueType.CINEMA);
+        query.setPage(201);
+        query.setPageSize(1);
+        when(geoOperations.radius(eq("venue:geo:上海:CINEMA"), any(Circle.class), any()))
+                .thenReturn(geoResults());
+        ArgumentCaptor<RedisGeoCommands.GeoRadiusCommandArgs> argsCaptor =
+                ArgumentCaptor.forClass(RedisGeoCommands.GeoRadiusCommandArgs.class);
+
+        assertThat(service.queryNearbyActivities(query)).isEmpty();
+        verify(geoOperations).radius(
+                eq("venue:geo:上海:CINEMA"), any(Circle.class), argsCaptor.capture());
+        assertThat(argsCaptor.getValue().getLimit()).isEqualTo(200L);
     }
 
     private Activity activity(Long id, int status) {
