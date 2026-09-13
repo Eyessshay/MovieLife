@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.movielife.constants.RedisConstants;
 import com.movielife.dto.VenueDetailCacheDTO;
 import com.movielife.dto.VenueNearbyQueryDTO;
+import com.movielife.entity.Activity;
 import com.movielife.entity.Movie;
 import com.movielife.entity.Hall;
 import com.movielife.entity.Showtime;
@@ -12,6 +13,7 @@ import com.movielife.enums.VenueType;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.mapper.VenueMapper;
+import com.movielife.mapper.ActivityMapper;
 import com.movielife.mapper.HallMapper;
 import com.movielife.mapper.MovieMapper;
 import com.movielife.mapper.ShowtimeMapper;
@@ -64,6 +66,8 @@ class VenueServiceImplTest {
     @Mock
     private MovieMapper movieMapper;
     @Mock
+    private ActivityMapper activityMapper;
+    @Mock
     private ShowtimeMapper showtimeMapper;
     @Mock
     private StringRedisTemplate redisTemplate;
@@ -82,6 +86,7 @@ class VenueServiceImplTest {
                 venueMapper,
                 hallMapper,
                 movieMapper,
+                activityMapper,
                 showtimeMapper,
                 redisTemplate,
                 objectMapper
@@ -322,9 +327,66 @@ class VenueServiceImplTest {
     }
 
     @Test
+    void activityFilterShouldKeepFutureShowtimeVenuesInGeoOrderAndPaginateAfterFiltering() {
+        Venue first = enabledVenue();
+        Venue second = enabledVenue();
+        second.setId(2L);
+        Venue third = enabledVenue();
+        third.setId(3L);
+        VenueNearbyQueryDTO dto = nearbyQuery(1, 1);
+        dto.setBizType("ACTIVITY");
+        dto.setBizId(8L);
+        Activity activity = new Activity();
+        activity.setStatus(1);
+        when(activityMapper.selectById(8L)).thenReturn(activity);
+        when(geoOperations.radius(eq("venue:geo:上海:CINEMA"), any(Circle.class),
+                any(RedisGeoCommands.GeoRadiusCommandArgs.class)))
+                .thenReturn(geoResults(
+                        geoResult("1", 100D),
+                        geoResult("2", 200D),
+                        geoResult("3", 300D)
+                ));
+        when(venueMapper.selectList(any())).thenReturn(Arrays.asList(third, second, first));
+        when(showtimeMapper.selectVenueIdsWithFutureActivityShowtimes(eq(8L), any()))
+                .thenReturn(Arrays.asList(3L, 2L));
+
+        List<VenueNearbyVO> result = venueService.queryNearbyVenues(dto);
+
+        assertThat(result).extracting(VenueNearbyVO::getId).containsExactly(2L);
+        verify(showtimeMapper, never()).selectVenueIdsWithFutureMovieShowtimes(any(), any());
+    }
+
+    @Test
+    void unavailableActivityShouldFailBeforeGeoQuery() {
+        VenueNearbyQueryDTO missingQuery = nearbyQuery(1, 10);
+        missingQuery.setBizType("ACTIVITY");
+        missingQuery.setBizId(999L);
+        when(activityMapper.selectById(999L)).thenReturn(null);
+
+        assertThatThrownBy(() -> venueService.queryNearbyVenues(missingQuery))
+                .isInstanceOf(BusinessException.class)
+                .extracting(exception -> ((BusinessException) exception).getErrorCode())
+                .isEqualTo(ErrorCode.ACTIVITY_NOT_FOUND);
+
+        VenueNearbyQueryDTO offlineQuery = nearbyQuery(1, 10);
+        offlineQuery.setBizType("ACTIVITY");
+        offlineQuery.setBizId(8L);
+        Activity offline = new Activity();
+        offline.setStatus(2);
+        when(activityMapper.selectById(8L)).thenReturn(offline);
+
+        assertThatThrownBy(() -> venueService.queryNearbyVenues(offlineQuery))
+                .isInstanceOf(BusinessException.class)
+                .extracting(exception -> ((BusinessException) exception).getErrorCode())
+                .isEqualTo(ErrorCode.ACTIVITY_NOT_FOUND);
+        verify(geoOperations, never()).radius(eq("venue:geo:上海:CINEMA"), any(Circle.class),
+                any(RedisGeoCommands.GeoRadiusCommandArgs.class));
+    }
+
+    @Test
     void unsupportedBusinessTypeShouldBeRejected() {
         VenueNearbyQueryDTO dto = nearbyQuery(1, 10);
-        dto.setBizType("ACTIVITY");
+        dto.setBizType("EVENT");
         dto.setBizId(1L);
 
         assertThatThrownBy(() -> venueService.queryNearbyVenues(dto))

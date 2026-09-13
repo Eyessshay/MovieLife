@@ -69,7 +69,7 @@ class VenueNearbyQueryDTOTest {
     }
 
     @Test
-    void shouldRequireBusinessFilterPairAndMovieType() {
+    void shouldRequireBusinessFilterPairAndSupportedType() {
         VenueNearbyQueryDTO dto = validDto();
         dto.setBizType("MOVIE");
         assertThat(violatedProperties(dto)).contains("bizFilterPairValid");
@@ -78,6 +78,9 @@ class VenueNearbyQueryDTOTest {
         assertThat(VALIDATOR.validate(dto)).isEmpty();
 
         dto.setBizType("ACTIVITY");
+        assertThat(VALIDATOR.validate(dto)).isEmpty();
+
+        dto.setBizType("EVENT");
         assertThat(violatedProperties(dto)).contains("bizTypeValid");
 
         dto.setBizType(null);

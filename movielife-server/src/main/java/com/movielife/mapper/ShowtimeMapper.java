@@ -28,6 +28,22 @@ public interface ShowtimeMapper extends BaseMapper<Showtime> {
             @Param("venueIds") List<Long> venueIds
     );
 
+    @Select("<script>" +
+            "SELECT DISTINCT venue_id FROM tb_showtime " +
+            "WHERE biz_type = 'ACTIVITY' " +
+            "AND biz_id = #{activityId} " +
+            "AND venue_id IN " +
+            "<foreach collection='venueIds' item='venueId' open='(' separator=',' close=')'>" +
+            "#{venueId}" +
+            "</foreach> " +
+            "AND start_time &gt; NOW() " +
+            "AND status = 1" +
+            "</script>")
+    List<Long> selectVenueIdsWithFutureActivityShowtimes(
+            @Param("activityId") Long activityId,
+            @Param("venueIds") List<Long> venueIds
+    );
+
     @Update("UPDATE tb_showtime " +
             "SET available_seats = available_seats - #{seatCount} " +
             "WHERE id = #{showtimeId} " +

@@ -9,6 +9,7 @@ import com.movielife.constants.RedisConstants;
 import com.movielife.dto.VenueDetailCacheDTO;
 import com.movielife.dto.VenueNearbyQueryDTO;
 import com.movielife.dto.VenueQueryDTO;
+import com.movielife.entity.Activity;
 import com.movielife.entity.Hall;
 import com.movielife.entity.Movie;
 import com.movielife.entity.Showtime;
@@ -17,6 +18,7 @@ import com.movielife.enums.VenueType;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.mapper.HallMapper;
+import com.movielife.mapper.ActivityMapper;
 import com.movielife.mapper.MovieMapper;
 import com.movielife.mapper.ShowtimeMapper;
 import com.movielife.mapper.VenueMapper;
@@ -58,12 +60,14 @@ public class VenueServiceImpl implements VenueService {
 
     private static final int ENABLED_STATUS = 1;
     private static final String MOVIE_BIZ_TYPE = "MOVIE";
-    private static final int MOVIE_CANDIDATE_MULTIPLIER = 5;
-    private static final int MAX_MOVIE_CANDIDATES = 200;
+    private static final String ACTIVITY_BIZ_TYPE = "ACTIVITY";
+    private static final int FILTERED_CANDIDATE_MULTIPLIER = 5;
+    private static final int MAX_FILTERED_CANDIDATES = 200;
 
     private final VenueMapper venueMapper;
     private final HallMapper hallMapper;
     private final MovieMapper movieMapper;
+    private final ActivityMapper activityMapper;
     private final ShowtimeMapper showtimeMapper;
     private final StringRedisTemplate stringRedisTemplate;
     private final ObjectMapper objectMapper;
@@ -164,17 +168,15 @@ public class VenueServiceImpl implements VenueService {
 
     @Override
     public List<VenueNearbyVO> queryNearbyVenues(VenueNearbyQueryDTO queryDTO) {
-        boolean movieFilterEnabled = validateMovieFilter(queryDTO);
-        if (movieFilterEnabled && movieMapper.selectById(queryDTO.getBizId()) == null) {
-            throw new BusinessException(ErrorCode.MOVIE_NOT_FOUND);
-        }
+        String filterBizType = validateBusinessFilter(queryDTO);
+        validateFilterTarget(filterBizType, queryDTO.getBizId());
 
         String key = RedisConstants.VENUE_GEO_KEY
                 + queryDTO.getCity() + ":" + queryDTO.getType().name();
         long from = (long) (queryDTO.getPage() - 1) * queryDTO.getPageSize();
         long end = (long) queryDTO.getPage() * queryDTO.getPageSize();
-        long candidateLimit = movieFilterEnabled
-                ? Math.min(end * MOVIE_CANDIDATE_MULTIPLIER, MAX_MOVIE_CANDIDATES)
+        long candidateLimit = filterBizType != null
+                ? Math.min(end * FILTERED_CANDIDATE_MULTIPLIER, MAX_FILTERED_CANDIDATES)
                 : end;
 
         GeoResults<RedisGeoCommands.GeoLocation<String>> geoResults;
@@ -201,9 +203,10 @@ public class VenueServiceImpl implements VenueService {
             return Collections.emptyList();
         }
 
-        if (movieFilterEnabled) {
-            return queryMovieFilteredNearbyVenues(
+        if (filterBizType != null) {
+            return queryBusinessFilteredNearbyVenues(
                     geoResults.getContent(),
+                    filterBizType,
                     queryDTO.getBizId(),
                     from,
                     queryDTO.getPageSize()
@@ -220,9 +223,10 @@ public class VenueServiceImpl implements VenueService {
         );
     }
 
-    private List<VenueNearbyVO> queryMovieFilteredNearbyVenues(
+    private List<VenueNearbyVO> queryBusinessFilteredNearbyVenues(
             List<GeoResult<RedisGeoCommands.GeoLocation<String>>> geoCandidates,
-            Long movieId,
+            String bizType,
+            Long bizId,
             long from,
             int pageSize) {
         List<Long> candidateIds = extractVenueIds(geoCandidates);
@@ -235,8 +239,10 @@ public class VenueServiceImpl implements VenueService {
         }
 
         List<Long> enabledVenueIds = extractVenueIds(enabledCandidates);
-        Set<Long> validVenueIds = showtimeMapper
-                .selectVenueIdsWithFutureMovieShowtimes(movieId, enabledVenueIds)
+        List<Long> venueIdsWithFutureShowtimes = MOVIE_BIZ_TYPE.equals(bizType)
+                ? showtimeMapper.selectVenueIdsWithFutureMovieShowtimes(bizId, enabledVenueIds)
+                : showtimeMapper.selectVenueIdsWithFutureActivityShowtimes(bizId, enabledVenueIds);
+        Set<Long> validVenueIds = venueIdsWithFutureShowtimes
                 .stream()
                 .collect(Collectors.toSet());
         List<GeoResult<RedisGeoCommands.GeoLocation<String>>> filteredCandidates = enabledCandidates.stream()
@@ -302,19 +308,35 @@ public class VenueServiceImpl implements VenueService {
         return Long.valueOf(result.getContent().getName());
     }
 
-    private boolean validateMovieFilter(VenueNearbyQueryDTO queryDTO) {
+    private String validateBusinessFilter(VenueNearbyQueryDTO queryDTO) {
         boolean hasBizType = StrUtil.isNotBlank(queryDTO.getBizType());
         boolean hasBizId = queryDTO.getBizId() != null;
         if (hasBizType != hasBizId) {
             throw new BusinessException(ErrorCode.INVALID_PARAM);
         }
         if (!hasBizType) {
-            return false;
+            return null;
         }
-        if (!MOVIE_BIZ_TYPE.equals(queryDTO.getBizType())) {
+        if (!MOVIE_BIZ_TYPE.equals(queryDTO.getBizType())
+                && !ACTIVITY_BIZ_TYPE.equals(queryDTO.getBizType())) {
             throw new BusinessException(ErrorCode.INVALID_BIZ_TYPE);
         }
-        return true;
+        return queryDTO.getBizType();
+    }
+
+    private void validateFilterTarget(String bizType, Long bizId) {
+        if (MOVIE_BIZ_TYPE.equals(bizType)) {
+            if (movieMapper.selectById(bizId) == null) {
+                throw new BusinessException(ErrorCode.MOVIE_NOT_FOUND);
+            }
+            return;
+        }
+        if (ACTIVITY_BIZ_TYPE.equals(bizType)) {
+            Activity activity = activityMapper.selectById(bizId);
+            if (activity == null || !Integer.valueOf(ENABLED_STATUS).equals(activity.getStatus())) {
+                throw new BusinessException(ErrorCode.ACTIVITY_NOT_FOUND);
+            }
+        }
     }
 
     private VenueDetailCacheDTO findPublicVenueDetail(Long id) {

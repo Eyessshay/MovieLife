@@ -2,11 +2,13 @@ package com.movielife.service;
 
 import com.movielife.constants.RedisConstants;
 import com.movielife.dto.VenueNearbyQueryDTO;
+import com.movielife.entity.Activity;
 import com.movielife.entity.Hall;
 import com.movielife.entity.Showtime;
 import com.movielife.entity.Venue;
 import com.movielife.enums.VenueType;
 import com.movielife.mapper.HallMapper;
+import com.movielife.mapper.ActivityMapper;
 import com.movielife.mapper.ShowtimeMapper;
 import com.movielife.mapper.VenueMapper;
 import com.movielife.exception.BusinessException;
@@ -47,6 +49,8 @@ class VenueNearbyServiceIntegrationTest {
     private VenueMapper venueMapper;
     @Autowired
     private HallMapper hallMapper;
+    @Autowired
+    private ActivityMapper activityMapper;
     @Autowired
     private ShowtimeMapper showtimeMapper;
     @Autowired
@@ -183,6 +187,51 @@ class VenueNearbyServiceIntegrationTest {
                 .isEqualTo(ErrorCode.MOVIE_NOT_FOUND);
     }
 
+    @Test
+    void activityFilterShouldKeepFutureOnSaleVenuesInGeoOrderAndDeduplicate() {
+        Activity activity = insertActivity("附近活动", 1);
+        insertActivityShowtime(nearest, nearestHall, activity,
+                LocalDateTime.now().plusDays(1), 1);
+        insertActivityShowtime(nearest, nearestHall, activity,
+                LocalDateTime.now().plusDays(2), 1);
+        insertActivityShowtime(farther, fartherHall, activity,
+                LocalDateTime.now().minusDays(1), 1);
+        insertActivityShowtime(farther, fartherHall, activity,
+                LocalDateTime.now().plusDays(2), 0);
+
+        assertThat(venueService.queryNearbyVenues(activityQuery(activity.getId(), 1, 10)))
+                .extracting(VenueNearbyVO::getId)
+                .containsExactly(nearest.getId());
+    }
+
+    @Test
+    void activityFilterShouldPaginateAfterShowtimeFiltering() {
+        Activity activity = insertActivity("过滤后分页活动", 1);
+        insertActivityShowtime(farther, fartherHall, activity,
+                LocalDateTime.now().plusDays(1), 1);
+
+        assertThat(venueService.queryNearbyVenues(activityQuery(activity.getId(), 1, 1)))
+                .extracting(VenueNearbyVO::getId)
+                .containsExactly(farther.getId());
+    }
+
+    @Test
+    void unavailableActivityShouldReturnActivityNotFound() {
+        Activity offline = insertActivity("已下线附近活动", 2);
+
+        assertThatThrownBy(() -> venueService.queryNearbyVenues(
+                activityQuery(offline.getId(), 1, 10)))
+                .isInstanceOf(BusinessException.class)
+                .extracting(exception -> ((BusinessException) exception).getErrorCode())
+                .isEqualTo(ErrorCode.ACTIVITY_NOT_FOUND);
+
+        assertThatThrownBy(() -> venueService.queryNearbyVenues(
+                activityQuery(999999999L, 1, 10)))
+                .isInstanceOf(BusinessException.class)
+                .extracting(exception -> ((BusinessException) exception).getErrorCode())
+                .isEqualTo(ErrorCode.ACTIVITY_NOT_FOUND);
+    }
+
     private VenueNearbyQueryDTO query(String city,
                                       VenueType type,
                                       int distance,
@@ -204,6 +253,46 @@ class VenueNearbyServiceIntegrationTest {
         dto.setBizType("MOVIE");
         dto.setBizId(movieId);
         return dto;
+    }
+
+    private VenueNearbyQueryDTO activityQuery(Long activityId, int page, int pageSize) {
+        VenueNearbyQueryDTO dto = query(TEST_CITY, VenueType.CINEMA, 5000, page, pageSize);
+        dto.setBizType("ACTIVITY");
+        dto.setBizId(activityId);
+        return dto;
+    }
+
+    private Activity insertActivity(String title, int status) {
+        Activity activity = new Activity();
+        activity.setTitle(title);
+        activity.setType("talkshow");
+        activity.setCity(TEST_CITY);
+        activity.setDescription("Step 11.2 附近活动测试");
+        activity.setPriceMin(new BigDecimal("99.00"));
+        activity.setPriceMax(new BigDecimal("299.00"));
+        activity.setStatus(status);
+        activityMapper.insert(activity);
+        return activity;
+    }
+
+    private Showtime insertActivityShowtime(Venue venue,
+                                             Hall hall,
+                                             Activity activity,
+                                             LocalDateTime startTime,
+                                             int status) {
+        Showtime showtime = new Showtime();
+        showtime.setBizType("ACTIVITY");
+        showtime.setBizId(activity.getId());
+        showtime.setVenueId(venue.getId());
+        showtime.setHallId(hall.getId());
+        showtime.setStartTime(startTime);
+        showtime.setEndTime(startTime.plusHours(2));
+        showtime.setBasePrice(new BigDecimal("199.00"));
+        showtime.setTotalSeats(100);
+        showtime.setAvailableSeats(100);
+        showtime.setStatus(status);
+        showtimeMapper.insert(showtime);
+        return showtime;
     }
 
     private RedisGeoCommands.GeoLocation<String> geoLocation(Venue venue) {

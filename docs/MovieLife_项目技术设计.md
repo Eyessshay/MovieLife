@@ -1906,6 +1906,18 @@ Redis 只负责空间候选召回，不保存活动可见性、场次有效性�
 
 Step 11.1 至此冻结：本 Step 只更新 `API接口设计.md` 和 `MovieLife_项目技术设计.md`，不实施 Step 11.2～11.5，不包含非固定座位活动票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端或 GEO 自动同步。
 
+### 8.2 Step 11.2：指定 Activity 的附近场馆实现与冻结
+
+Step 11.2 只落地 `GET /api/venues/nearby?bizType=ACTIVITY&bizId={activityId}`，不实现附近活动主接口。`VenueNearbyQueryDTO` 将合法业务类型扩展为 `MOVIE/ACTIVITY`；Service 在访问 Redis 前校验指定 Activity 存在且 `status=1`，不存在、草稿或下线统一返回 `ACTIVITY_NOT_FOUND`。原 MOVIE 分支仍使用既有 Movie 校验及 Mapper 查询，不改变其公开契约和运行路径。
+
+ACTIVITY 分支复用单 VenueType 的 `venue:geo:{city}:{VenueType}`，按照现有 `min(page × pageSize × 5, 200)` 候选窗口取得距离升序结果。Service 一次批量装载启用 Venue，再由 `ShowtimeMapper.selectVenueIdsWithFutureActivityShowtimes` 使用 `SELECT DISTINCT venue_id` 筛选 `biz_type='ACTIVITY' AND biz_id=? AND venue_id IN (...) AND start_time>NOW() AND status=1`。返回的场馆 ID 转为集合只用于资格判断，最终遍历仍以 Redis GEO 结果为准，因此同一场馆多场次只出现一次、距离顺序不被 MySQL 返回顺序打乱，并在完成业务过滤后按 `page/pageSize` 截取。
+
+本 Step 没有 MySQL 或 Redis 写路径：Activity、Venue 和 Showtime 只读，GEO 只召回；不新增 Redis Key，不创建缓存，不读写临时锁座状态，不修改 ShowtimeSeat、`available_seats`、TicketOrder 或 TicketOrderItem。`sql/movielife.sql`、数据库表结构、现有 Lua、DTO/VO 响应字段以及阶段 1～10 的状态机均保持不变。
+
+测试分为四层：DTO/Controller 校验 `ACTIVITY` 合法且未知类型被拒绝；Service 单元测试验证 Activity 状态、GEO 顺序、过滤后分页以及 MOVIE Mapper 分支不串用；真实 Service 集成测试覆盖未来/过期/停售场次、场馆去重和下线 Activity；随机端口 HTTP 测试使用真实 MySQL 与兼容 GEO 的 Redis，并在请求前后比较 Activity、Showtime 与 GEO member 快照证明查询零写入。Step 11.2 定向真实联调 15 项通过；全量 411 项测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。
+
+Step 11.2 至此冻结。下一步仍为独立的 Step 11.3，仅实现 `GET /api/activities/nearby`；本 Step 未提前实现多 VenueType GEO 合并、Activity 去重、最近场馆/下一场次选择、Step 11.4/11.5、非固定座位票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端或 GEO 自动同步。
+
 ## 9. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -1941,4 +1953,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.16，阶段 10 固定座位 Activity 票务保持冻结，阶段 11 已确定为 Activity Nearby，Step 11.1 已完成详细契约设计与冻结，尚未实现生产代码。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.17，阶段 10 固定座位 Activity 票务保持冻结，阶段 11 已确定为 Activity Nearby，Step 11.1 已完成详细契约设计冻结，Step 11.2 已完成指定 Activity 的附近场馆实现、验证、提交与冻结，Step 11.3 尚未开始。

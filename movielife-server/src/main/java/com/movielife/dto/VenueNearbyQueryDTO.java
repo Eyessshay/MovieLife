@@ -49,9 +49,11 @@ public class VenueNearbyQueryDTO {
         return hasText(bizType) == (bizId != null);
     }
 
-    @AssertTrue(message = "当前仅支持MOVIE业务类型")
+    @AssertTrue(message = "当前仅支持MOVIE或ACTIVITY业务类型")
     public boolean isBizTypeValid() {
-        return !hasText(bizType) || "MOVIE".equals(bizType);
+        return !hasText(bizType)
+                || "MOVIE".equals(bizType)
+                || "ACTIVITY".equals(bizType);
     }
 
     private boolean hasText(String value) {

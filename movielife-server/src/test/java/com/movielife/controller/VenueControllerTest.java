@@ -92,13 +92,28 @@ class VenueControllerTest {
     }
 
     @Test
-    void nearbyQueryShouldRejectUnsupportedBusinessType() throws Exception {
+    void nearbyQueryShouldAllowActivityBusinessType() throws Exception {
+        when(venueService.queryNearbyVenues(any())).thenReturn(Collections.emptyList());
+
         mockMvc.perform(get("/api/venues/nearby")
                         .param("city", "上海")
-                        .param("type", "CINEMA")
+                        .param("type", "THEATER")
                         .param("x", "121.437")
                         .param("y", "31.188")
                         .param("bizType", "ACTIVITY")
+                        .param("bizId", "1"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("OK"));
+    }
+
+    @Test
+    void nearbyQueryShouldRejectUnsupportedBusinessType() throws Exception {
+        mockMvc.perform(get("/api/venues/nearby")
+                        .param("city", "上海")
+                        .param("type", "THEATER")
+                        .param("x", "121.437")
+                        .param("y", "31.188")
+                        .param("bizType", "EVENT")
                         .param("bizId", "1"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("INVALID_BIZ_TYPE"));

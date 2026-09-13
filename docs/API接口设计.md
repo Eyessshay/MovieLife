@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.16（阶段 11 Step 11.1 Activity Nearby 契约冻结版）
+- 版本：v0.17（阶段 11 Step 11.2 指定 Activity 的附近场馆冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -248,6 +248,16 @@ Step 10.11 冻结证据：隔离 MySQL 8.0.17、当前 `movielife.sql` 与兼容
 | 只读边界 | 联调前后 MySQL 表、现有 GEO member、`seat:lock:*`、订单、ShowtimeSeat 和 `available_seats` 均不变化 |
 
 后续实现按独立小 Step 推进：Step 11.2 只扩展指定 Activity 的附近场馆；Step 11.3 只实现附近活动主接口；Step 11.4 加固异常、候选窗口和分页；Step 11.5 完成真实主链路、全量回归、`BUILD SUCCESS`、文档同步、commit 并冻结阶段 11。不得提前合并后续 Step。
+
+##### 3.3.5 Step 11.2：指定 Activity 的附近场馆实现冻结
+
+Step 11.2 已按 3.3.2 契约实现并冻结：既有匿名接口 `GET /api/venues/nearby` 的 `VenueNearbyQueryDTO.bizType` 从仅允许 `MOVIE` 扩展为严格允许 `MOVIE/ACTIVITY`。`bizType=ACTIVITY` 时先读取 `tb_activity` 并要求记录存在且 `status=1`，否则返回 `404 ACTIVITY_NOT_FOUND`；随后从单个 `venue:geo:{city}:{VenueType}` 按距离升序召回 `min(page × pageSize × 5, 200)` 个候选，批量查询 `tb_showtime` 中 `biz_type=ACTIVITY`、`biz_id=activityId`、`status=1`、`start_time>NOW()` 的场馆 ID，按集合去重并保持原 GEO 距离顺序，最后执行过滤后分页。没有符合条件的未来场次返回 `[]`。
+
+实现复用了 `VenueNearbyVO` 和既有 MySQL/Redis 数据模型，仅增加 Activity 状态校验和一条批量 Showtime Mapper 查询；MOVIE 分支仍调用原有 Movie 校验和原有批量场次查询，接口参数、错误码、排序、候选窗口与响应结构均未改变。查询全程只读，不新增或刷新 Redis 状态，不触碰 `seat:lock:*`、订单、ShowtimeSeat 或 `available_seats`，未修改 `sql/movielife.sql`，也未新增 Redis Key。
+
+冻结验证覆盖 DTO 参数组合与非法类型、Activity 不存在/下线、未来/过期/停售场次、同场馆多场次去重、GEO 顺序、过滤后分页、MOVIE 分支回归及 Redis 异常映射。真实 MySQL + 兼容 GEO 的 Redis + 随机端口 HTTP 联调 15 项通过，并比较 Activity、Showtime 与 GEO member 的请求前后快照确认零写入；全量 411 项测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。
+
+Step 11.2 不实现 `GET /api/activities/nearby`、多 VenueType 合并、附近活动去重与下一场选择，也不包含 Step 11.4/11.5、非固定座位票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端或 GEO 自动同步；这些能力继续按后续独立 Step 推进。
 
 ### 3.4 社区动态
 
