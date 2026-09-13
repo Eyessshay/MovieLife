@@ -1,11 +1,13 @@
 package com.movielife.controller;
 
 import com.movielife.common.Result;
+import com.movielife.dto.ActivityNearbyQueryDTO;
 import com.movielife.dto.ActivityQueryDTO;
 import com.movielife.dto.ActivityShowtimeQueryDTO;
 import com.movielife.service.ActivityService;
 import com.movielife.vo.ActivityDetailVO;
 import com.movielife.vo.ActivityListItemVO;
+import com.movielife.vo.ActivityNearbyVO;
 import com.movielife.vo.ActivityShowtimeVO;
 import com.movielife.vo.PageVO;
 import lombok.RequiredArgsConstructor;
@@ -27,6 +29,11 @@ public class ActivityController {
     @GetMapping
     public Result<PageVO<ActivityListItemVO>> list(@Valid ActivityQueryDTO query) {
         return Result.ok(activityService.queryActivities(query));
+    }
+
+    @GetMapping("/nearby")
+    public Result<List<ActivityNearbyVO>> nearby(@Valid ActivityNearbyQueryDTO query) {
+        return Result.ok(activityService.queryNearbyActivities(query));
     }
 
     @GetMapping("/{id}")

@@ -105,7 +105,8 @@ public class GlobalExceptionHandler {
         if ("status".equals(fieldError.getField())) {
             return ErrorCode.INVALID_MOVIE_STATUS;
         }
-        if ("type".equals(fieldError.getField())) {
+        if ("type".equals(fieldError.getField())
+                || "venueType".equals(fieldError.getField())) {
             return ErrorCode.INVALID_VENUE_TYPE;
         }
         if ("bizTypeValid".equals(fieldError.getField())) {

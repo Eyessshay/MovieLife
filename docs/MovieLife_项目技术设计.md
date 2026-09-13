@@ -1918,6 +1918,20 @@ ACTIVITY 分支复用单 VenueType 的 `venue:geo:{city}:{VenueType}`，按照�
 
 Step 11.2 至此冻结。下一步仍为独立的 Step 11.3，仅实现 `GET /api/activities/nearby`；本 Step 未提前实现多 VenueType GEO 合并、Activity 去重、最近场馆/下一场次选择、Step 11.4/11.5、非固定座位票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端或 GEO 自动同步。
 
+### 8.3 Step 11.3：附近活动主接口实现与冻结
+
+Step 11.3 新增 `ActivityNearbyQueryDTO`、`ActivityNearbyVO` 和匿名 `GET /api/activities/nearby`，并在 `ActivityService` 中增加独立查询入口。DTO 固定 `city/x/y`、距离、分页、Activity type 与可选 VenueType 边界；VO 返回 Activity 展示字段、最近有效 Venue、距离及该 Venue 的下一场次上下文，不返回有界 GEO 召回无法精确计算的 total。Activity 自身的 city 不参与巡演城市资格判断，响应 `venueCity` 取选中 Venue 的城市。
+
+候选流水线保持严格有界和只读：对一个指定 VenueType 或全部四类 VenueType，逐 Key 执行带距离、升序和 `min(page × pageSize × 5, 200)` 上限的 GEO 查询；按 venueId 合并后批量读取 Venue，并以 `status=1`、city、实际 type、经纬度过滤历史 member。若同一 venueId 出现在多个类型 Key，只接受其 MySQL 实际类型对应 Key 的距离，错误类型 Key 不能污染最终排序。
+
+有效 Venue ID 集合交给 `ShowtimeMapper.selectFutureActivityShowtimesByVenueIds`，用一条 `IN (...)` 查询取得全部未来在售 ACTIVITY Showtime。Service 从结果一次提取 activityIds 和 hallIds，再分别使用一次 `selectBatchIds` 补齐 Activity 与 Hall；循环只做内存关联和选择，不执行 Mapper 查询。Showtime 核心字段、Activity 物理存在性以及 Hall 对 Venue 的归属必须完整；损坏关系返回 `INTERNAL_ERROR`，下线 Activity 和不匹配的 Activity type 正常过滤，售罄场次仍保留发现资格。
+
+每个 Showtime 形成 `Activity + Venue + Showtime + distance` 候选。同一 Activity 先按 `distance ASC, venueId ASC` 选择最近 Venue，再在该 Venue 内按 `startTime ASC, showtimeId ASC` 选择下一场；最终按 `distance ASC, nextStartTime ASC, activityId ASC` 排序并在所有过滤完成后分页。该顺序与 Step 11.1 契约一致，同时保证 Redis 或 MySQL 原始返回顺序不会改变公开结果。
+
+验证分为四层：DTO 边界与默认值；Controller 匿名访问、响应字段和非法 VenueType；Service 多 GEO 合并、Activity 去重、最近 Venue/下一场选择、type 过滤后分页及 Mapper 批量调用次数；真实随机端口 HTTP 使用 MySQL 和兼容 GEO 的 Redis，覆盖 THEATER/LIVEHOUSE、跨场馆、多场次、售罄展示，并比较 Activity、Venue、Showtime 与 GEO member 的请求前后快照证明零写入。Step 11.3 定向 19 项测试通过；全量 420 项测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。
+
+Step 11.3 至此冻结：本 Step 未修改 SQL、表结构、Redis Key、锁座或订单状态，不实现 Step 11.4/11.5、非固定座位活动票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端或 GEO 自动同步。下一步只能在明确指定后进入独立 Step。
+
 ## 9. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -1953,4 +1967,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.17，阶段 10 固定座位 Activity 票务保持冻结，阶段 11 已确定为 Activity Nearby，Step 11.1 已完成详细契约设计冻结，Step 11.2 已完成指定 Activity 的附近场馆实现、验证、提交与冻结，Step 11.3 尚未开始。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.18，阶段 10 固定座位 Activity 票务保持冻结，阶段 11 已确定为 Activity Nearby，Step 11.1 已完成详细契约设计冻结，Step 11.2 已完成指定 Activity 的附近场馆实现冻结，Step 11.3 已完成附近活动主接口实现、验证、提交与冻结，Step 11.4 尚未开始。

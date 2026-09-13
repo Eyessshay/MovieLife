@@ -1,10 +1,12 @@
 package com.movielife.service.impl;
 
+import com.movielife.dto.ActivityNearbyQueryDTO;
 import com.movielife.dto.ActivityShowtimeQueryDTO;
 import com.movielife.entity.Activity;
 import com.movielife.entity.Hall;
 import com.movielife.entity.Showtime;
 import com.movielife.entity.Venue;
+import com.movielife.enums.VenueType;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.mapper.ActivityMapper;
@@ -12,11 +14,21 @@ import com.movielife.mapper.HallMapper;
 import com.movielife.mapper.ShowtimeMapper;
 import com.movielife.mapper.VenueMapper;
 import com.movielife.vo.ActivityShowtimeVO;
+import com.movielife.vo.ActivityNearbyVO;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.geo.Circle;
+import org.springframework.data.geo.Distance;
+import org.springframework.data.geo.GeoResult;
+import org.springframework.data.geo.GeoResults;
+import org.springframework.data.geo.Metrics;
+import org.springframework.data.geo.Point;
+import org.springframework.data.redis.connection.RedisGeoCommands;
+import org.springframework.data.redis.core.GeoOperations;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -27,6 +39,8 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -38,12 +52,16 @@ class ActivityServiceImplTest {
     @Mock private ShowtimeMapper showtimeMapper;
     @Mock private VenueMapper venueMapper;
     @Mock private HallMapper hallMapper;
+    @Mock private StringRedisTemplate redisTemplate;
+    @Mock private GeoOperations<String, String> geoOperations;
 
     private ActivityServiceImpl service;
 
     @BeforeEach
     void setUp() {
-        service = new ActivityServiceImpl(activityMapper, showtimeMapper, venueMapper, hallMapper);
+        service = new ActivityServiceImpl(
+                activityMapper, showtimeMapper, venueMapper, hallMapper, redisTemplate);
+        lenient().when(redisTemplate.opsForGeo()).thenReturn(geoOperations);
     }
 
     @Test
@@ -103,6 +121,72 @@ class ActivityServiceImplTest {
                 1L, new ActivityShowtimeQueryDTO()), ErrorCode.INTERNAL_ERROR);
     }
 
+    @Test
+    void nearbyShouldMergeVenueTypesAndChooseNearestVenueThenNextShowtime() {
+        ActivityNearbyQueryDTO query = nearbyQuery();
+        when(geoOperations.radius(eq("venue:geo:上海:CINEMA"), any(Circle.class), any()))
+                .thenReturn(geoResults(geoResult("10", 100D)));
+        when(geoOperations.radius(eq("venue:geo:上海:THEATER"), any(Circle.class), any()))
+                .thenReturn(geoResults(geoResult("20", 200D), geoResult("10", 300D)));
+        when(venueMapper.selectBatchIds(any())).thenReturn(Arrays.asList(
+                nearbyVenue(10L, "cinema", "最近影院"),
+                nearbyVenue(20L, "theater", "较远剧场")));
+
+        Showtime activityOneFar = nearbyShowtime(101L, 1L, 20L, 201L, 2);
+        Showtime activityOneNear = nearbyShowtime(102L, 1L, 10L, 101L, 3);
+        Showtime activityTwoLater = nearbyShowtime(202L, 2L, 20L, 201L, 4);
+        Showtime activityTwoNext = nearbyShowtime(201L, 2L, 20L, 201L, 1);
+        when(showtimeMapper.selectFutureActivityShowtimesByVenueIds(any()))
+                .thenReturn(Arrays.asList(
+                        activityOneFar, activityOneNear, activityTwoLater, activityTwoNext));
+        when(activityMapper.selectBatchIds(any())).thenReturn(Arrays.asList(
+                activity(1L, 1), activity(2L, 1)));
+        when(hallMapper.selectBatchIds(any())).thenReturn(Arrays.asList(
+                hall(101L, 10L, "影院厅"), hall(201L, 20L, "剧场厅")));
+
+        List<ActivityNearbyVO> result = service.queryNearbyActivities(query);
+
+        assertThat(result).extracting(ActivityNearbyVO::getId).containsExactly(1L, 2L);
+        assertThat(result.get(0).getNearestVenueId()).isEqualTo(10L);
+        assertThat(result.get(0).getNextShowtimeId()).isEqualTo(102L);
+        assertThat(result.get(1).getNearestVenueId()).isEqualTo(20L);
+        assertThat(result.get(1).getNextShowtimeId()).isEqualTo(201L);
+        verify(venueMapper).selectBatchIds(any());
+        verify(showtimeMapper).selectFutureActivityShowtimesByVenueIds(any());
+        verify(activityMapper).selectBatchIds(any());
+        verify(hallMapper).selectBatchIds(any());
+        verify(activityMapper, never()).selectById(any());
+        verify(venueMapper, never()).selectById(any());
+        verify(hallMapper, never()).selectById(any());
+    }
+
+    @Test
+    void nearbyShouldFilterByActivityTypeBeforePaging() {
+        ActivityNearbyQueryDTO query = nearbyQuery();
+        query.setVenueType(VenueType.CINEMA);
+        query.setType("drama");
+        query.setPageSize(1);
+        when(geoOperations.radius(eq("venue:geo:上海:CINEMA"), any(Circle.class), any()))
+                .thenReturn(geoResults(geoResult("10", 100D), geoResult("20", 200D)));
+        when(venueMapper.selectBatchIds(any())).thenReturn(Arrays.asList(
+                nearbyVenue(10L, "cinema", "最近影院"),
+                nearbyVenue(20L, "cinema", "较远影院")));
+        when(showtimeMapper.selectFutureActivityShowtimesByVenueIds(any())).thenReturn(Arrays.asList(
+                nearbyShowtime(101L, 1L, 10L, 101L, 1),
+                nearbyShowtime(201L, 2L, 20L, 201L, 1)));
+        Activity filtered = activity(1L, 1);
+        filtered.setType("talkshow");
+        Activity matching = activity(2L, 1);
+        matching.setType("drama");
+        when(activityMapper.selectBatchIds(any())).thenReturn(Arrays.asList(filtered, matching));
+        when(hallMapper.selectBatchIds(any())).thenReturn(Arrays.asList(
+                hall(101L, 10L, "一号厅"), hall(201L, 20L, "二号厅")));
+
+        assertThat(service.queryNearbyActivities(query))
+                .extracting(ActivityNearbyVO::getId)
+                .containsExactly(2L);
+    }
+
     private Activity activity(Long id, int status) {
         Activity value = new Activity();
         value.setId(id);
@@ -139,12 +223,54 @@ class ActivityServiceImplTest {
         return value;
     }
 
+    private Venue nearbyVenue(Long id, String type, String name) {
+        Venue value = venue(id, name, 1);
+        value.setType(type);
+        value.setCity("上海");
+        value.setAddress("测试地址");
+        value.setLongitude(new BigDecimal("121.47"));
+        value.setLatitude(new BigDecimal("31.23"));
+        return value;
+    }
+
     private Hall hall(Long id, Long venueId, String name) {
         Hall value = new Hall();
         value.setId(id);
         value.setVenueId(venueId);
         value.setName(name);
         return value;
+    }
+
+    private ActivityNearbyQueryDTO nearbyQuery() {
+        ActivityNearbyQueryDTO query = new ActivityNearbyQueryDTO();
+        query.setCity("上海");
+        query.setX(121.47D);
+        query.setY(31.23D);
+        return query;
+    }
+
+    private Showtime nearbyShowtime(Long id,
+                                    Long activityId,
+                                    Long venueId,
+                                    Long hallId,
+                                    int daysFromNow) {
+        Showtime value = showtime(id, venueId, hallId);
+        value.setBizId(activityId);
+        value.setStartTime(LocalDateTime.now().plusDays(daysFromNow));
+        value.setEndTime(value.getStartTime().plusHours(2));
+        return value;
+    }
+
+    private GeoResult<RedisGeoCommands.GeoLocation<String>> geoResult(String id, double meters) {
+        RedisGeoCommands.GeoLocation<String> location =
+                new RedisGeoCommands.GeoLocation<>(id, new Point(0D, 0D));
+        return new GeoResult<>(location, new Distance(meters / 1000D, Metrics.KILOMETERS));
+    }
+
+    @SafeVarargs
+    private final GeoResults<RedisGeoCommands.GeoLocation<String>> geoResults(
+            GeoResult<RedisGeoCommands.GeoLocation<String>>... results) {
+        return new GeoResults<>(Arrays.asList(results));
     }
 
     private void assertError(Runnable action, ErrorCode expected) {

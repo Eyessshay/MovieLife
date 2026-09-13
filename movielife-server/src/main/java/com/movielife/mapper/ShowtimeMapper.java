@@ -44,6 +44,23 @@ public interface ShowtimeMapper extends BaseMapper<Showtime> {
             @Param("venueIds") List<Long> venueIds
     );
 
+    @Select("<script>" +
+            "SELECT id, biz_type, biz_id, venue_id, hall_id, start_time, end_time, " +
+            "language_version, base_price, total_seats, available_seats, status, " +
+            "create_time, update_time FROM tb_showtime " +
+            "WHERE biz_type = 'ACTIVITY' " +
+            "AND venue_id IN " +
+            "<foreach collection='venueIds' item='venueId' open='(' separator=',' close=')'>" +
+            "#{venueId}" +
+            "</foreach> " +
+            "AND start_time &gt; NOW() " +
+            "AND status = 1 " +
+            "ORDER BY venue_id ASC, start_time ASC, id ASC" +
+            "</script>")
+    List<Showtime> selectFutureActivityShowtimesByVenueIds(
+            @Param("venueIds") List<Long> venueIds
+    );
+
     @Update("UPDATE tb_showtime " +
             "SET available_seats = available_seats - #{seatCount} " +
             "WHERE id = #{showtimeId} " +

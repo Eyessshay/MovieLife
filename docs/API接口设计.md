@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.17（阶段 11 Step 11.2 指定 Activity 的附近场馆冻结版）
+- 版本：v0.18（阶段 11 Step 11.3 附近活动主接口冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -258,6 +258,18 @@ Step 11.2 已按 3.3.2 契约实现并冻结：既有匿名接口 `GET /api/venu
 冻结验证覆盖 DTO 参数组合与非法类型、Activity 不存在/下线、未来/过期/停售场次、同场馆多场次去重、GEO 顺序、过滤后分页、MOVIE 分支回归及 Redis 异常映射。真实 MySQL + 兼容 GEO 的 Redis + 随机端口 HTTP 联调 15 项通过，并比较 Activity、Showtime 与 GEO member 的请求前后快照确认零写入；全量 411 项测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。
 
 Step 11.2 不实现 `GET /api/activities/nearby`、多 VenueType 合并、附近活动去重与下一场选择，也不包含 Step 11.4/11.5、非固定座位票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端或 GEO 自动同步；这些能力继续按后续独立 Step 推进。
+
+##### 3.3.6 Step 11.3：附近活动主接口实现冻结
+
+Step 11.3 已实现匿名接口 `GET /api/activities/nearby`，请求由独立 `ActivityNearbyQueryDTO` 承载：`city/x/y` 必填，`distance=5000`、`page=1`、`pageSize=20` 为默认值，支持 Activity `type` 精确过滤和可选 `venueType`。未指定 `venueType` 时查询 `CINEMA/THEATER/LIVEHOUSE/EXHIBITION` 四个既有 GEO Key；非法 `venueType` 返回 `400 INVALID_VENUE_TYPE`。响应使用独立 `ActivityNearbyVO`，字段与 3.3.1 冻结契约一致，不返回 total。
+
+每个目标 GEO Key 独立使用 `min(page × pageSize × 5, 200)` 候选窗口。服务按 `venueId` 合并候选，并仅采用 Venue 在 MySQL 中实际类型所对应 GEO Key 的距离；随后一次批量装载 Venue、一次批量查询未来有效 ACTIVITY Showtime、一次批量装载 Activity、一次批量装载 Hall。Venue 必须启用、城市与请求一致、类型与 GEO 来源一致且经纬度合法；未来有效场次必须满足 `biz_type=ACTIVITY`、`status=1`、`start_time>NOW()`，同时校验时间、座位数量、余票范围和 Hall/Venue 关系。物理缺失的 Activity 或损坏的场次关联失败关闭为 `INTERNAL_ERROR`，下线 Activity 与不匹配的 Activity type 被过滤，`available_seats=0` 仍可展示。
+
+同一 Activity 的候选按 `distance ASC, venueId ASC, startTime ASC, showtimeId ASC` 选出最近场馆及该场馆下一场，再按 `distance ASC, nextStartTime ASC, activityId ASC` 对最终 Activity 列表稳定排序，完成全部业务过滤后按 `page/pageSize` 截取。实现不存在按 Venue、Activity、Hall 或 Showtime 循环查询的 Mapper 调用；普通 Activity 列表、指定 Activity 场馆查询、MOVIE Nearby 和阶段 1～10 行为保持不变。
+
+冻结验证包含 DTO/Controller/Service 以及真实 MySQL、兼容 GEO 的 Redis、随机端口 HTTP：覆盖单类型与四类型召回、跨类型合并、同一 Activity 跨场馆/多场次去重、最近场馆优先、该场馆下一场、Activity type 过滤、过滤后分页、售罄展示、非法 VenueType、禁止 N+1 和请求前后 MySQL/GEO 快照不变。Step 11.3 定向 19 项测试通过；全量 420 项测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。
+
+Step 11.3 不修改 `sql/movielife.sql`，不新增 Redis Key、缓存或写状态，不触碰锁座、订单、ShowtimeSeat 和 `available_seats`。Step 11.4/11.5、非固定座位票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端和 GEO 自动同步均未提前实现。
 
 ### 3.4 社区动态
 

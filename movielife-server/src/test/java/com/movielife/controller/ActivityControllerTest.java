@@ -1,10 +1,12 @@
 package com.movielife.controller;
 
 import com.movielife.dto.ActivityShowtimeQueryDTO;
+import com.movielife.dto.ActivityNearbyQueryDTO;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.service.ActivityService;
 import com.movielife.vo.ActivityDetailVO;
+import com.movielife.vo.ActivityNearbyVO;
 import com.movielife.vo.ActivityShowtimeVO;
 import com.movielife.vo.PageVO;
 import org.junit.jupiter.api.Test;
@@ -56,6 +58,46 @@ class ActivityControllerTest {
         mockMvc.perform(get("/api/activities").param("pageSize", "101"))
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("PAGE_SIZE_TOO_LARGE"));
+    }
+
+    @Test
+    void nearbyShouldReturnPublicActivityDiscoveryResult() throws Exception {
+        ActivityNearbyVO nearby = new ActivityNearbyVO();
+        nearby.setId(1L);
+        nearby.setTitle("附近话剧");
+        nearby.setNearestVenueId(2L);
+        nearby.setNextShowtimeId(3L);
+        nearby.setDistance(125.5D);
+        when(activityService.queryNearbyActivities(any(ActivityNearbyQueryDTO.class)))
+                .thenReturn(Collections.singletonList(nearby));
+
+        mockMvc.perform(get("/api/activities/nearby")
+                        .param("city", "上海")
+                        .param("x", "121.47")
+                        .param("y", "31.23")
+                        .param("venueType", "THEATER"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data[0].id").value(1))
+                .andExpect(jsonPath("$.data[0].nearestVenueId").value(2))
+                .andExpect(jsonPath("$.data[0].nextShowtimeId").value(3));
+    }
+
+    @Test
+    void nearbyShouldValidateParametersAndVenueType() throws Exception {
+        mockMvc.perform(get("/api/activities/nearby")
+                        .param("city", "上海")
+                        .param("x", "181")
+                        .param("y", "31.23"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PARAM"));
+
+        mockMvc.perform(get("/api/activities/nearby")
+                        .param("city", "上海")
+                        .param("x", "121.47")
+                        .param("y", "31.23")
+                        .param("venueType", "MUSEUM"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_VENUE_TYPE"));
     }
 
     @Test
