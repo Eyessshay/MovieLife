@@ -1944,6 +1944,20 @@ Step 11.4 对 Step 11.3 的实现进行验证加固，不新增或修改生产�
 
 Step 11.4 至此冻结。本 Step 未修改生产 Java、SQL、表结构、Redis Lua 或 Key，不实现 Step 11.5、非固定座位活动票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端或 GEO 自动同步；阶段 11 尚未整体冻结。
 
+### 8.5 Step 11.5：完整主链路与阶段冻结
+
+Step 11.5 不增加生产能力，只在现有真实 HTTP 集成测试中把 Venue GEO 接入阶段 10.11 已冻结的 Activity 票务闭环，形成 `Nearby → Detail → Showtimes → Showtime Detail → Seat Map → Lock → Order → Pay → Issue → Verify` 的跨阶段证据。测试使用隔离城市和独立 THEATER GEO member，由 Nearby 返回 Activity、最近 Venue 和下一 Showtime，再使用这些 MySQL 身份继续后续接口，避免用测试预知 ID 绕过阶段 11 的发现入口。
+
+主链路在首次锁座前保存并复核 Activity、Venue、Hall、Showtime、全部 ShowtimeSeat、相关 TicketOrder 数量、全局 TicketOrderItem 数量、Venue GEO member、`seat:lock:*` 和 `seat:lock:token:*`。Nearby、Activity 详情、Activity 场次、Showtime 详情与 Seat Map 完成后所有快照保持不变，证明阶段 11 的空间召回和 MySQL 资格过滤不会写缓存、修复 GEO、修改余票或产生订单状态。
+
+进入阶段 10 后继续验证既有职责分界：Redis token 与 seatKey 只保存创建订单前的 TEMP_LOCKED 资格；创建订单在单个 MySQL 事务中生成唯一 TicketOrder、两条完整 TicketOrderItem、条件占用全部 ShowtimeSeat，并将 `available_seats` 从 2 精确扣减到 0。事务提交后 Redis 临时锁被清理。随后以同一 lockToken、同一用户、同一 Showtime 和乱序 seatIds 重试，直接返回原 orderId，TicketOrder 仍为 1 条、TicketOrderItem 仍为 2 条，不依赖 Redis Key 存在。
+
+后续支付、出票与核销仍执行阶段 10 已冻结的锁顺序、条件 UPDATE、affectedRows 和事务规则：订单成为 PAID，座位成为 SOLD 且保留 orderId，票码唯一，目标明细首次核销成为 USED 并保存首次证据，另一张票保持 VALID；`available_seats` 保持 0，Redis 临时锁集合恢复到测试前状态。取消、超时、退款和并发分支继续由同一套 29 项 Activity HTTP 票务测试及全量回归覆盖，没有新增 Activity 专用状态机。
+
+Activity Nearby 与完整 Activity 票务定向 56 项通过；真实 MySQL、Redis、随机端口 HTTP 主链路通过；全量 428 项测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。本 Step 只强化测试和文档，未修改生产 Java、SQL、表结构、Redis Lua、Redis Key、DTO、VO 或公开接口。
+
+阶段 11 Activity Nearby 至此正式冻结。阶段成果包含指定 Activity 的附近场馆、附近活动主接口、多 VenueType 有界召回、批量 MySQL 资格过滤、Activity 去重与稳定排序、边界失败关闭、过滤后分页和完整跨阶段真实链路。非固定座位活动票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端和 GEO 自动同步仍不属于本阶段；下一阶段必须重新明确单一能力范围后再拆分 Step。
+
 ## 9. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -1979,4 +1993,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.19，阶段 10 固定座位 Activity 票务保持冻结，阶段 11 已确定为 Activity Nearby，Step 11.1～11.4 已分别完成设计、实现、边界验证、提交与冻结；阶段 11 尚待独立 Step 11.5 完成主链路验收和整体冻结。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.20，阶段 10 固定座位 Activity 票务保持冻结，阶段 11 Activity Nearby 的 Step 11.1～11.5 已完成设计、实现、边界加固、真实跨阶段验收、提交与冻结，阶段 11 已正式完成。

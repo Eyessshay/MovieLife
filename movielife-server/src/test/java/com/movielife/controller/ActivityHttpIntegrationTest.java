@@ -28,7 +28,9 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.data.geo.Point;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -57,6 +59,10 @@ import static org.assertj.core.api.Assertions.assertThat;
         properties = "movielife.startup-check.enabled=false"
 )
 class ActivityHttpIntegrationTest {
+
+    private static final String STEP_115_CITY = "STEP115主链路市";
+    private static final String STEP_115_GEO_KEY =
+            RedisConstants.VENUE_GEO_KEY + STEP_115_CITY + ":THEATER";
 
     @Autowired private TestRestTemplate restTemplate;
     @Autowired private ObjectMapper objectMapper;
@@ -98,12 +104,16 @@ class ActivityHttpIntegrationTest {
         Venue venue = new Venue();
         venue.setName("Step102Http剧场");
         venue.setType("theater");
-        venue.setCity("上海");
+        venue.setCity(STEP_115_CITY);
         venue.setAddress("Step 10.2 HTTP 测试地址");
+        venue.setLongitude(new BigDecimal("121.470000"));
+        venue.setLatitude(new BigDecimal("31.230000"));
         venue.setAvgScore(BigDecimal.ZERO);
         venue.setStatus(1);
         venueMapper.insert(venue);
         venueId = venue.getId();
+        redisTemplate.opsForGeo().add(
+                STEP_115_GEO_KEY, new Point(121.47D, 31.23D), venueId.toString());
 
         Hall hall = new Hall();
         hall.setVenueId(venueId);
@@ -162,6 +172,9 @@ class ActivityHttpIntegrationTest {
         }
         for (String lockToken : lockTokens) {
             redisTemplate.delete(RedisConstants.SEAT_LOCK_TOKEN_KEY_PREFIX + lockToken);
+        }
+        if (venueId != null) {
+            redisTemplate.opsForZSet().remove(STEP_115_GEO_KEY, venueId.toString());
         }
         for (Long seatId : seatIds) {
             if (showtimeId != null) {
@@ -1323,11 +1336,40 @@ class ActivityHttpIntegrationTest {
     }
 
     @Test
-    void completeActivityTicketingLoopShouldPreserveMysqlAndRedisBoundaries() throws Exception {
+    void nearbyToCompleteActivityTicketingLoopShouldPreserveMysqlAndRedisBoundaries()
+            throws Exception {
         LoginSession owner = login("13800000051", "197531");
         LoginSession staff = login("13800000052", "086420");
         grantVenueStaff(staff.userId, venueId, 1);
         Set<String> locksBefore = redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*");
+        Set<String> tokenLocksBefore = redisKeys(
+                RedisConstants.SEAT_LOCK_TOKEN_KEY_PREFIX + "*");
+        Activity activityBefore = activityMapper.selectById(activityId);
+        Venue venueBefore = venueMapper.selectById(venueId);
+        Hall hallBefore = hallMapper.selectById(hallId);
+        Showtime showtimeBefore = showtimeMapper.selectById(showtimeId);
+        List<ShowtimeSeat> showtimeSeatsBefore = queryShowtimeSeats();
+        Long orderCountBefore = ticketOrderMapper.selectCount(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TicketOrder>()
+                        .eq(TicketOrder::getShowtimeId, showtimeId));
+        Long orderItemCountBefore = ticketOrderItemMapper.selectCount(null);
+        Set<ZSetOperations.TypedTuple<String>> geoBefore =
+                redisTemplate.opsForZSet().rangeWithScores(STEP_115_GEO_KEY, 0, -1);
+
+        ResponseEntity<String> nearby = restTemplate.getForEntity(
+                "/api/activities/nearby?city=" + STEP_115_CITY
+                        + "&venueType=THEATER&x=121.47&y=31.23"
+                        + "&distance=5000&page=1&pageSize=20",
+                String.class);
+        assertThat(nearby.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode nearbyData = json(nearby).path("data");
+        assertThat(nearbyData).hasSize(1);
+        long discoveredActivityId = nearbyData.get(0).path("id").asLong();
+        long discoveredVenueId = nearbyData.get(0).path("nearestVenueId").asLong();
+        long discoveredShowtimeId = nearbyData.get(0).path("nextShowtimeId").asLong();
+        assertThat(discoveredActivityId).isEqualTo(activityId);
+        assertThat(discoveredVenueId).isEqualTo(venueId);
+        assertThat(discoveredShowtimeId).isEqualTo(showtimeId);
 
         ResponseEntity<String> activities = restTemplate.getForEntity(
                 "/api/activities?keyword=Step102Http&page=1&pageSize=20", String.class);
@@ -1336,15 +1378,15 @@ class ActivityHttpIntegrationTest {
                 assertThat(item.path("id").asLong()).isEqualTo(activityId));
 
         ResponseEntity<String> activityDetail = restTemplate.getForEntity(
-                "/api/activities/" + activityId, String.class);
+                "/api/activities/" + discoveredActivityId, String.class);
         assertThat(activityDetail.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(json(activityDetail).path("data").path("title").asText())
                 .isEqualTo("Step102Http固定座位活动");
 
         String date = LocalDate.now().plusDays(3).toString();
         ResponseEntity<String> activityShowtimes = restTemplate.getForEntity(
-                "/api/activities/" + activityId + "/showtimes?date=" + date
-                        + "&venueId=" + venueId,
+                "/api/activities/" + discoveredActivityId + "/showtimes?date=" + date
+                        + "&venueId=" + discoveredVenueId,
                 String.class);
         assertThat(activityShowtimes.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(json(activityShowtimes).path("data")).anySatisfy(item -> {
@@ -1353,22 +1395,39 @@ class ActivityHttpIntegrationTest {
         });
 
         ResponseEntity<String> showtimeDetail = restTemplate.getForEntity(
-                "/api/showtimes/" + showtimeId, String.class);
+                "/api/showtimes/" + discoveredShowtimeId, String.class);
         assertThat(showtimeDetail.getStatusCode()).isEqualTo(HttpStatus.OK);
         JsonNode showtimeData = json(showtimeDetail).path("data");
         assertThat(showtimeData.path("bizType").asText()).isEqualTo("ACTIVITY");
         assertThat(showtimeData.path("activityId").asLong()).isEqualTo(activityId);
 
         ResponseEntity<String> seatMap = restTemplate.getForEntity(
-                "/api/showtimes/" + showtimeId + "/seats", String.class);
+                "/api/showtimes/" + discoveredShowtimeId + "/seats", String.class);
         assertThat(seatMap.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(json(seatMap).path("data").path("seats")).hasSize(2)
                 .allSatisfy(seat -> assertThat(seat.path("status").asInt()).isZero());
 
+        assertThat(activityMapper.selectById(activityId)).isEqualTo(activityBefore);
+        assertThat(venueMapper.selectById(venueId)).isEqualTo(venueBefore);
+        assertThat(hallMapper.selectById(hallId)).isEqualTo(hallBefore);
+        assertThat(showtimeMapper.selectById(showtimeId)).isEqualTo(showtimeBefore);
+        assertThat(queryShowtimeSeats()).isEqualTo(showtimeSeatsBefore);
+        assertThat(ticketOrderMapper.selectCount(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TicketOrder>()
+                        .eq(TicketOrder::getShowtimeId, showtimeId)))
+                .isEqualTo(orderCountBefore);
+        assertThat(ticketOrderItemMapper.selectCount(null)).isEqualTo(orderItemCountBefore);
+        assertThat(redisTemplate.opsForZSet().rangeWithScores(STEP_115_GEO_KEY, 0, -1))
+                .isEqualTo(geoBefore);
+        assertThat(redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*"))
+                .isEqualTo(locksBefore);
+        assertThat(redisKeys(RedisConstants.SEAT_LOCK_TOKEN_KEY_PREFIX + "*"))
+                .isEqualTo(tokenLocksBefore);
+
         List<Long> selected = new ArrayList<>(seatIds);
         String seatJson = selected.get(1) + "," + selected.get(0);
         ResponseEntity<String> lock = post(
-                "/api/showtimes/" + showtimeId + "/seats/lock",
+                "/api/showtimes/" + discoveredShowtimeId + "/seats/lock",
                 "{\"seatIds\":[" + seatJson + "]}", owner.token);
         assertThat(lock.getStatusCode()).isEqualTo(HttpStatus.OK);
         String lockToken = json(lock).path("data").path("lockToken").asText();
@@ -1378,7 +1437,7 @@ class ActivityHttpIntegrationTest {
             assertThat(redisTemplate.opsForValue().get(seatKey(seatId))).isEqualTo(lockToken);
         }
 
-        String orderBody = "{\"showtimeId\":" + showtimeId
+        String orderBody = "{\"showtimeId\":" + discoveredShowtimeId
                 + ",\"seatIds\":[" + seatJson + "]"
                 + ",\"lockToken\":\"" + lockToken + "\"}";
         ResponseEntity<String> create = post("/api/orders", orderBody, owner.token);
@@ -1395,11 +1454,21 @@ class ActivityHttpIntegrationTest {
             assertThat(redisTemplate.opsForValue().get(seatKey(seatId))).isNull();
         }
 
+        ResponseEntity<String> retry = post("/api/orders", orderBody, owner.token);
+        assertThat(retry.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(json(retry).path("data").path("orderId").asLong()).isEqualTo(orderId);
+        assertThat(ticketOrderMapper.selectCount(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TicketOrder>()
+                        .eq(TicketOrder::getLockToken, lockToken))).isEqualTo(1L);
+        assertThat(ticketOrderItemMapper.selectCount(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TicketOrderItem>()
+                        .eq(TicketOrderItem::getOrderId, orderId))).isEqualTo(2L);
+
         ResponseEntity<String> orderDetail = get("/api/orders/" + orderId, owner.token);
         assertThat(orderDetail.getStatusCode()).isEqualTo(HttpStatus.OK);
         JsonNode orderData = json(orderDetail).path("data");
         assertThat(orderData.path("bizType").asText()).isEqualTo("ACTIVITY");
-        assertThat(orderData.path("activityId").asLong()).isEqualTo(activityId);
+        assertThat(orderData.path("activityId").asLong()).isEqualTo(discoveredActivityId);
         assertThat(orderData.path("status").asText()).isEqualTo("UNPAID");
         assertThat(orderData.path("items")).hasSize(2);
 
@@ -1439,6 +1508,8 @@ class ActivityHttpIntegrationTest {
         });
         assertThat(showtimeMapper.selectById(showtimeId).getAvailableSeats()).isZero();
         assertThat(redisKeys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*")).isEqualTo(locksBefore);
+        assertThat(redisKeys(RedisConstants.SEAT_LOCK_TOKEN_KEY_PREFIX + "*"))
+                .isEqualTo(tokenLocksBefore);
     }
 
     private CreatedOrder createActivityOrder(LoginSession owner) throws Exception {

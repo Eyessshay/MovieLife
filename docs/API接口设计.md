@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.19（阶段 11 Step 11.4 边界、异常与分页加固冻结版）
+- 版本：v0.20（阶段 11 Activity Nearby 完整链路冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -282,6 +282,18 @@ MySQL 资格仍由既有批量查询和内存关联共同决定：已结束、�
 新增 8 项自动化测试，并强化既有随机端口 HTTP 联调的只读快照。真实 MySQL/Redis 验证覆盖空 GEO、历史 member、停用 Venue、下线 Activity、过期/停售/错误业务类型场次、Hall/Venue 错配、跨类型与多场馆/多场次去重、等距稳定排序、过滤后分页、候选上限和售罄展示；查询前后 Activity、Venue、Hall、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、GEO member、`seat:lock:*` 与 `seat:lock:token:*` 均不变。原 MOVIE Nearby 专项 61 项通过；全量 428 项测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。
 
 Step 11.4 至此冻结。本 Step 未修改生产 Java、`sql/movielife.sql`、Redis Key 或阶段 1～10 状态机，不实现 Step 11.5、非固定座位票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端或 GEO 自动同步。
+
+##### 3.3.8 Step 11.5：完整主链路与阶段冻结
+
+Step 11.5 不新增接口或业务实现，而是使用真实 MySQL、兼容 GEO 的 Redis 与随机端口 HTTP，将阶段 11 和已冻结的阶段 10 串成一条可重复验收链路：`Activity Nearby → Activity Detail → Activity Showtimes → Showtime Detail → Seat Map → Redis 临时锁座 → 创建订单 → 相同 lockToken 幂等重试 → 支付 → 出票 → 场馆核销`。Nearby 返回的 Activity、最近 Venue 和下一 Showtime 必须与后续详情及场次接口保持一致。
+
+从 Nearby 到 Seat Map 的只读区间，请求前后逐项比较 Activity、Venue、Hall、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、Venue GEO、`seat:lock:*` 和 `seat:lock:token:*`，确认没有 MySQL 或 Redis 写入。进入锁座后，`TEMP_LOCKED` 仍只存在于订单创建之前；新订单提交后形成唯一 TicketOrder、两条完整 TicketOrderItem、全部 ShowtimeSeat `AVAILABLE → HELD_BY_UNPAID_ORDER` 并归属该订单，`available_seats` 从 2 精确扣减到 0，随后按 token 条件清理 Redis 临时锁。
+
+相同用户、Showtime 和规范化 seatIds 使用已经消费的 lockToken 重试时，即使 Redis Key 已不存在也返回原 orderId；MySQL 不增加订单或明细。后续支付、出票和核销继续复用阶段 10 状态机：订单 `UNPAID → PAID`，ShowtimeSeat `HELD → SOLD`，票从 PENDING 出票为 VALID，目标票首次核销为 USED 并保留证据；这些操作不创建新的票务 Redis 状态，也不改变已扣减的 `available_seats`。
+
+Activity Nearby 与完整 Activity 票务定向 56 项测试通过；全量 428 项自动化测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。联调数据和 GEO member 均在测试后精确清理，未修改 `sql/movielife.sql`、生产 Java、Redis Key 或阶段 1～10 已冻结契约。
+
+阶段 11 至此正式冻结。后续不得在阶段 11 中继续加入非固定座位活动票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端或 GEO 自动同步；任何新能力必须另行明确独立阶段并重新按设计、实现、测试、真实联调、构建、提交和冻结推进。
 
 ### 3.4 社区动态
 
