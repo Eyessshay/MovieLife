@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.15（阶段 10 Step 10.11 Activity 完整闭环冻结版）
+- 版本：v0.16（阶段 11 Step 11.1 Activity Nearby 契约冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -193,6 +193,61 @@ Step 10.11 将阶段 10 冻结为固定座位 Activity 完整票务闭环，不�
 阶段冻结回归同时纳入主动取消、后台超时取消、支付与取消竞争、过期支付与超时竞争、未出票和已出票整单退款、核销与退款竞争，以及重复下单、支付、出票、退款、核销的幂等或严格拒绝行为。取消或超时成功只能形成 `CANCELED + AVAILABLE`；退款成功只能形成 `REFUNDED + 全明细 REFUNDED + AVAILABLE`；已核销票不得退款。所有写操作继续使用既有锁顺序、条件 UPDATE、严格 affectedRows 和单个 MySQL 事务，不接受部分成功。Step 10.11 不实现站票、通票、票档库存、第三方支付、部分退款、核销撤销、Redis Stream 或 MQ；阶段 10 至此完成并冻结，后续能力必须作为新阶段单独设计。
 
 Step 10.11 冻结证据：隔离 MySQL 8.0.17、当前 `movielife.sql` 与兼容 GEO 的 Redis 下，Activity 定向 29 项和全量 404 项自动化测试全部通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。
+
+#### 阶段 11 Step 11.1：Activity Nearby 详细契约
+
+阶段 11 只实现附近活动发现，同时纳入“浏览附近活动”和“查询指定活动的附近场馆”两个互补场景；不改动阶段 1～10，不包含非固定座位票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端或 GEO 自动同步。Step 11.1 只冻结设计，不修改生产 Java、SQL、Redis Key 或公开接口实现。
+
+##### 3.3.1 查询附近活动
+
+1. URL：`/api/activities/nearby`
+2. Method：`GET`
+3. 是否登录：否
+4. Query 参数：
+   - `city: String`：必填，去除首尾空白后不能为空；表示目标 Venue 所在城市，不以 `tb_activity.city` 判断巡演城市。
+   - `x: Double`：必填，经度范围 `-180～180`。
+   - `y: Double`：必填，纬度范围 `-90～90`。
+   - `distance: Integer`：可选，单位米，默认 `5000`，范围 `100～50000`。
+   - `page: Integer`：可选，默认 `1`，必须大于等于 `1`。
+   - `pageSize: Integer`：可选，默认 `20`，范围 `1～100`。
+   - `type: String`：可选，按 `tb_activity.type` 精确过滤。
+   - `venueType: VenueType`：可选，取值为 `CINEMA`、`THEATER`、`LIVEHOUSE` 或 `EXHIBITION`；为空时查询全部四类场馆。
+5. Request DTO：`ActivityNearbyQueryDTO`，只承载上述 Query 参数，不接受用户 ID、Activity ID、Showtime ID 或座位信息。
+6. Response VO：`List<ActivityNearbyVO>`，不返回无法精确计算的 `total`。每项包含 `id`、`title`、`coverUrl`、`type`、`priceMin`、`priceMax`、`nearestVenueId`、`nearestVenueName`、`nearestVenueType`、`nearestVenueAddress`、`venueCity`、`distance`、`nextShowtimeId`、`nextStartTime` 和 `nextAvailableSeats`；距离单位为米。`priceMin/priceMax` 仍只用于发现页展示，订单价格不读取这两个字段。
+7. 业务错误码：参数缺失、越界或格式非法返回 `400 INVALID_PARAM`；非法场馆类型返回 `400 INVALID_VENUE_TYPE`；Redis GEO 异常、非法 GEO member、业务关联缺失或场次核心数据损坏返回 `500 INTERNAL_ERROR`。没有符合条件的活动正常返回 `[]`。
+8. 数据库 / Redis 行为：不建立 `activity:geo:*`。服务根据 `venueType` 查询一个或全部 `venue:geo:{city}:{VenueType}`，Redis 只返回 `venueId + distance`；随后批量读取 MySQL 中启用的 Venue、未来有效 ACTIVITY Showtime、Activity 和 Hall。全链路只读，不创建或刷新缓存，不读取或写入 `seat:lock:*`，不修改订单、座位、余票或任何业务状态。
+
+##### 3.3.2 查询指定活动的附近场馆
+
+1. URL：`/api/venues/nearby`
+2. Method：`GET`
+3. 是否登录：否
+4. Query 参数：继续使用现有 `city`、`type`、`x`、`y`、`distance`、`page`、`pageSize`、`bizType` 和 `bizId`；本阶段只把 `bizType` 的合法范围从 `MOVIE` 扩展为 `MOVIE/ACTIVITY`。查询 Activity 时必须同时传 `bizType=ACTIVITY&bizId={activityId}`，`bizType` 与 `bizId` 仍必须同时存在或同时为空。
+5. Request DTO：复用 `VenueNearbyQueryDTO`，不新增 Activity 专用 DTO。
+6. Response VO：复用 `List<VenueNearbyVO>`，字段保持 `id`、`name`、`type`、`city`、`address`、`avgScore`、`openTime` 和 `distance`，不破坏 MOVIE 客户端契约。
+7. 业务错误码：参数组合非法返回 `400 INVALID_PARAM`；不支持的业务类型返回 `400 INVALID_BIZ_TYPE`；目标 Activity 不存在、草稿或下线返回 `404 ACTIVITY_NOT_FOUND`；Redis GEO 或数据完整性异常返回 `500 INTERNAL_ERROR`。没有未来有效场次时返回 `[]`。
+8. 数据库 / Redis 行为：继续先从单个 `venue:geo:{city}:{type}` 召回候选 Venue，再以 `biz_type=ACTIVITY`、`biz_id=activityId`、`status=1`、`start_time>NOW()` 批量筛选存在未来场次的 Venue；同一 Venue 多个场次只返回一次。只读现有 Redis GEO 和 MySQL，不新增 Key、表、字段或索引。
+
+##### 3.3.3 合并、去重、排序与分页
+
+- 多 VenueType 查询对每个 GEO Key 使用相同的半径、升序和候选上限，再按 `venueId` 合并；同一 Venue 重复出现时保留最小距离。MySQL 必须重新校验 Venue 的 `status=1`、`city`、`type` 和经纬度，已删除、停用、跨城市或落入错误类型 Key 的历史 member 直接忽略。
+- 业务过滤候选窗口统一为 `min(page × pageSize × 5, 200)`；`GET /api/activities/nearby` 对每个被查询的 VenueType Key 应用该上限，`GET /api/venues/nearby` 对单个 Key 应用该上限。200 是 MVP 的有界召回，不承诺完整深分页；超过候选窗口且无法形成当前页时返回 `[]`。
+- 附近活动只接受 `tb_activity.status=1`，以及 `biz_type=ACTIVITY`、`status=1`、`start_time>NOW()` 的场次。Showtime 必须具有合法时间、Venue/Hall 关系、正数 `total_seats` 和 `0≤available_seats≤total_seats`。Activity 记录物理缺失、Hall 缺失或归属错误、场次核心字段非法均失败关闭为 `INTERNAL_ERROR`；已下线 Activity 被过滤，不作为系统异常。
+- `available_seats=0` 的未来在售场次仍可参与附近活动发现，响应通过 `nextAvailableSeats=0` 表达售罄；本阶段不把发现资格等同于可立即购票资格。
+- 同一 Activity 跨场馆或多场次时只返回一次：先选择距离最近的有效 Venue，距离相同时选择 `venueId` 较小者；再在该 Venue 内选择 `start_time ASC, showtimeId ASC` 的下一场。最终结果按 `distance ASC, nextStartTime ASC, activityId ASC` 排序，完成 Activity 去重和业务过滤后再按 `page/pageSize` 截取。
+- 实现必须批量读取 Venue、Showtime、Activity 和 Hall，禁止按 Venue、Activity 或 Showtime 循环查询；普通 Activity 列表、MOVIE Nearby 和阶段 10 的所有票务行为保持不变。
+
+##### 3.3.4 Step 11.1 验收矩阵与后续拆分
+
+| 层级 | Step 11.1 冻结的验收范围 |
+| --- | --- |
+| 参数与 Controller | 两个公开 GET 场景、默认值、坐标/距离/分页边界、VenueType 与 bizType 错误映射 |
+| Service | 多 GEO Key 合并、MySQL 过滤、Activity 去重、最近 Venue/下一场选择、稳定排序、过滤后分页、禁止 N+1 |
+| 数据异常 | 空 Key、历史 member、停用 Venue/Activity、过期或停售 Showtime、损坏的 Hall/Venue/Showtime 关系 |
+| 真实联调 | 真实 Redis GEO + MySQL + 随机端口 HTTP，覆盖跨 VenueType、跨场馆、多场次、售罄展示和指定 Activity 场馆过滤 |
+| 只读边界 | 联调前后 MySQL 表、现有 GEO member、`seat:lock:*`、订单、ShowtimeSeat 和 `available_seats` 均不变化 |
+
+后续实现按独立小 Step 推进：Step 11.2 只扩展指定 Activity 的附近场馆；Step 11.3 只实现附近活动主接口；Step 11.4 加固异常、候选窗口和分页；Step 11.5 完成真实主链路、全量回归、`BUILD SUCCESS`、文档同步、commit 并冻结阶段 11。不得提前合并后续 Step。
 
 ### 3.4 社区动态
 

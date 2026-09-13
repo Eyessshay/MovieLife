@@ -1847,7 +1847,66 @@ TicketOrderQueryService 在列表分页取得当前页 TicketOrder 后，一次�
 
 真实联调使用隔离 MySQL 8.0.17、当前 `movielife.sql` 和兼容 GEO 的 Redis。Activity 定向 29 项测试通过；全量 404 项自动化测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。Step 10.11 不修改生产 Java、SQL、Redis Lua、DTO、VO 或公开接口，不实现非固定座位票务、第三方支付、部分退款、核销撤销、Redis Stream 或 MQ。阶段 10 至此完成并冻结；下一阶段尚未指定，必须先从活动票务或 AI 能力中明确独立阶段，再拆分单个小 Step。
 
-## 8. 服务端模块建议
+## 8. 阶段 11：Activity Nearby
+
+### 8.1 Step 11.1：详细契约设计与冻结
+
+阶段 11 独立实现 Activity Nearby，只覆盖“浏览附近活动”和“查询指定活动的附近场馆”两个互补的只读场景。前者新增 `GET /api/activities/nearby`，后者在既有 `GET /api/venues/nearby` 上增加 `bizType=ACTIVITY&bizId={activityId}`；两者共用 Venue GEO 和 MySQL 场次事实，不复制 Activity GEO、Venue、Showtime 或票务模型。Step 11.1 只冻结设计，不修改生产 Java、SQL、Redis Key 或当前公开接口实现。
+
+#### 8.1.1 数据来源与职责边界
+
+Activity 不直接持有可用于附近搜索的稳定位置，同一活动可通过 Showtime 在多个城市和 Venue 巡演，因此不得建立 `activity:geo:*`。附近活动统一从 `venue:geo:{city}:{VenueType}` 召回 `venueId + distance`，再由 MySQL 批量确认 Venue、Activity、Showtime 和 Hall 的业务事实：
+
+```text
+city + x/y + distance
+  ↓
+一个或全部 VenueType 的 venue:geo Key
+  ↓
+合并 venueId + 最小 distance
+  ↓
+MySQL 批量校验启用 Venue
+  ↓
+批量查询未来有效 ACTIVITY Showtime
+  ↓
+批量补齐 Activity 与 Hall 并校验关系
+  ↓
+按 Activity 去重，选择最近 Venue 与该 Venue 下一场
+  ↓
+稳定排序，过滤后分页
+```
+
+Redis 只负责空间候选召回，不保存活动可见性、场次有效性、余票或订单事实。MySQL 决定 Activity 是否上架、Showtime 是否未来有效、Venue 是否启用以及 Hall 是否属于 Venue。查询全程不新增或修改 Redis member，不创建活动缓存，不触碰 `seat:lock:*`，也不修改 Activity、Showtime、ShowtimeSeat、`available_seats`、TicketOrder 或 TicketOrderItem。
+
+#### 8.1.2 两个查询场景
+
+`GET /api/venues/nearby?bizType=ACTIVITY&bizId={activityId}` 用于活动详情页查找附近承办场馆。它复用现有 `VenueNearbyQueryDTO` 和 `VenueNearbyVO`，继续要求单个 `VenueType`，先校验 Activity 为 `status=1`，再从对应 GEO Key 召回并通过 `tb_showtime` 的 `biz_type=ACTIVITY`、`biz_id`、`status=1`、`start_time>NOW()` 过滤。MOVIE 分支的参数、返回、排序和错误行为保持不变。
+
+`GET /api/activities/nearby` 用于发现页浏览附近活动。它使用独立 `ActivityNearbyQueryDTO`，要求 `city/x/y`，支持 `distance/page/pageSize` 默认值、可选活动 `type` 和可选 `venueType`；未指定 VenueType 时并行逻辑等价地查询 `CINEMA/THEATER/LIVEHOUSE/EXHIBITION` 四个现有 GEO Key。响应为 `List<ActivityNearbyVO>`，提供活动展示字段、最近场馆、距离、下一场次和下一场余票，不返回无法在有界 GEO 召回下精确计算的 total。城市资格以所选 Venue.city 为准，不依赖 `tb_activity.city`，避免破坏 Activity 经 Showtime 跨城市巡演的关系。
+
+#### 8.1.3 候选窗口、去重与稳定顺序
+
+两个场景统一采用 `min(page × pageSize × 5, 200)` 的 GEO 候选窗口，并在 MySQL 业务过滤后分页。附近活动对每个被查询的 VenueType Key 使用同一上限，合并时按 venueId 保留最小距离；MySQL 重新校验 Venue 的启用状态、城市、类型和经纬度，忽略删除、停用、跨城市或错误 Key 的历史 member。Key 不存在返回空列表，Redis 调用异常或无法解析的 member 返回 `INTERNAL_ERROR`，不增加 MySQL 经纬度计算降级。
+
+同一 Activity 只返回一次。先按 `distance ASC, venueId ASC` 选择最近有效 Venue，再按 `start_time ASC, showtimeId ASC` 选择该 Venue 的下一场；最终按 `distance ASC, nextStartTime ASC, activityId ASC` 排序并截取当前页。有效发现场次要求 Activity 上架、Showtime 为未来在售 ACTIVITY 场次、Venue 启用、Hall 归属正确，且场次核心时间、座位总数和余票范围合法。`available_seats=0` 只表示下一场售罄，不隐藏活动；真正锁座和下单仍由阶段 7～10 的完整资格校验决定。
+
+#### 8.1.4 异常与实现约束
+
+请求字段缺失、越界或参数组合错误映射为 `INVALID_PARAM`，非法 VenueType 映射为 `INVALID_VENUE_TYPE`，不支持的 bizType 映射为 `INVALID_BIZ_TYPE`，指定 Activity 不存在、草稿或下线映射为 `ACTIVITY_NOT_FOUND`。普通附近活动发现会过滤已下线 Activity；Showtime 指向物理缺失的 Activity、Hall 缺失或不属于 Venue、场次核心字段损坏等结构异常统一失败关闭为 `INTERNAL_ERROR`。实现必须批量读取 Venue、Showtime、Activity 和 Hall，禁止 N+1，不引入表、字段、索引、新 Redis Key、Redis Stream、MQ 或事务写入。
+
+#### 8.1.5 后续 Step 与验收矩阵
+
+| Step | 独立范围 | 完成门槛 |
+| --- | --- | --- |
+| 11.2 | 只扩展指定 Activity 的附近场馆 | DTO/Service/Mapper、自动化测试、真实 Redis/MySQL/HTTP、全量回归、BUILD SUCCESS、commit、冻结 |
+| 11.3 | 只实现 `GET /api/activities/nearby` | 多 VenueType 合并、批量关联、去重排序、过滤后分页及对应完整验证 |
+| 11.4 | 只加固异常数据、候选窗口、分页与只读边界 | 历史 member、停售/过期场次、跨城市/错误类型、售罄活动、N+1 与零写入证据 |
+| 11.5 | 完整主链路与阶段冻结 | Activity Nearby → Detail → Showtimes → Showtime Detail → Seat Map，定向/全量测试、真实联调、BUILD SUCCESS、文档、commit、冻结 |
+
+真实联调必须同时覆盖：单 VenueType 与全 VenueType、同一 Activity 多场馆和多场次、跨类型距离合并、指定 Activity 的场馆过滤、GEO 空 Key、Redis 异常、历史 member、停用 Activity/Venue、过期或停售 Showtime、Hall/Venue 关系损坏、售罄但仍展示、过滤后分页和稳定排序。联调前后比较 MySQL 核心表、GEO member、`seat:lock:*` 和订单事实，证明阶段 11 全链路只读。
+
+Step 11.1 至此冻结：本 Step 只更新 `API接口设计.md` 和 `MovieLife_项目技术设计.md`，不实施 Step 11.2～11.5，不包含非固定座位活动票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端或 GEO 自动同步。
+
+## 9. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
 
@@ -1867,7 +1926,7 @@ ai         评价总结的异步生成、持久化和读取
 common     统一响应、异常、鉴权、限流、幂等
 ```
 
-## 9. 关键非功能要求
+## 10. 关键非功能要求
 
 - 所有写接口校验当前用户和资源归属。
 - 订单、支付、锁座操作必须支持幂等。
@@ -1882,4 +1941,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.15，阶段 10 Step 10.11 已完成固定座位 Activity 完整票务闭环回归，阶段 10 至此冻结；下一阶段尚未指定。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.16，阶段 10 固定座位 Activity 票务保持冻结，阶段 11 已确定为 Activity Nearby，Step 11.1 已完成详细契约设计与冻结，尚未实现生产代码。
