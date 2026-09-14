@@ -162,6 +162,8 @@ class CollectionServiceImplTest {
                 .isInstanceOf(com.movielife.vo.ActivityListItemVO.class);
         assertThat(((com.movielife.vo.ActivityListItemVO) result.getList().get(0).getTarget())
                 .getTitle()).isEqualTo("活动101");
+        assertThat(((com.movielife.vo.ActivityListItemVO) result.getList().get(0).getTarget())
+                .getCollected()).isTrue();
         verify(collectionMapper).selectVisibleActivityPage(any(), org.mockito.ArgumentMatchers.eq(1L));
         verify(activityMapper, times(1)).selectBatchIds(any());
         verify(collectionMapper, never()).selectPage(any(), any());

@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.22（阶段 12 Step 12.2 Activity 收藏列表冻结版）
+- 版本：v0.23（阶段 12 Step 12.3 Activity 普通列表与详情收藏状态冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -114,6 +114,8 @@ Step 10.1 冻结、Step 10.2 已实现以下公开只读查询契约：
 1. `GET /api/activities`：无需登录。Query 参数为 `city`、`type`、`keyword`、`page` 和 `pageSize`；`page` 默认 1 且必须大于等于 1，`pageSize` 默认 20 且范围为 1～100。只返回 `tb_activity.status=1` 的活动，`keyword` 对 `title` 做包含匹配，结果按 `create_time DESC, id DESC` 稳定排序。响应列表项包含 `id`、`title`、`coverUrl`、`type`、`city`、`priceMin` 和 `priceMax`。无匹配数据返回空分页，不返回 `ACTIVITY_NOT_FOUND`。`priceMin/priceMax` 只用于活动发现页展示，锁座和订单金额始终以具体 ShowtimeSeat.price 为准。
 2. `GET /api/activities/{id}`：无需登录。只返回 `status=1` 的活动；不存在、草稿或已下线统一返回 `404 ACTIVITY_NOT_FOUND`。响应包含列表字段及 `description`，本 Step 不附带收藏、评价或 AI 总结状态。
 3. `GET /api/activities/{id}/showtimes`：无需登录。Query 参数为可选 `date=yyyy-MM-dd` 和 `venueId`；非法日期或非正数 venueId 返回 `400 INVALID_PARAM`。只返回活动有效、`biz_type=ACTIVITY`、`biz_id=活动 ID`、`status=1`、`start_time>NOW()`，且 Venue 有效、Hall 属于该 Venue 的场次；有日期时限定当地自然日范围。每项包含 `showtimeId`、`venueId`、`venueName`、`hallId`、`hallName`、`startTime`、`endTime`、`basePrice` 和 `availableSeats`，实现时批量读取 Venue 与 Hall，禁止 N+1。结果按 `start_time ASC, id ASC` 排序，无匹配数据返回 `[]`。
+
+Step 12.3 对前两项普通 Activity 查询做兼容扩展：`ActivityListItemVO` 与 `ActivityDetailVO` 均新增 `collected: Boolean`。匿名访问继续允许并固定返回 `false`；携带有效登录态时，按当前用户、`target_type=ACTIVITY` 和目标 ID 从 `tb_collection` 返回真实状态。列表只对已经完成业务分页的本页 Activity ID 执行一次批量关系查询，详情最多执行一次关系查询；`collected` 不参与 Activity 状态、城市、类型、关键词筛选，不影响 `create_time DESC, id DESC` 排序、分页 `total`、价格或可见性规则。用户私有收藏状态不得写入公共缓存；Nearby、场次及票务响应不在本 Step 增加该字段。
 
 固定座位活动场次进入 Seat Map 和购票链路前，必须具有至少一个启用物理 Seat，并为全部启用 Seat 建立同场次 ShowtimeSeat；`total_seats` 必须与启用座位数量一致，`available_seats` 仍是由 ShowtimeSeat 状态派生的计数。关联缺失、重复或数量不一致属于 `500 INTERNAL_ERROR`，不能默认补成 AVAILABLE。Step 10.2 已将初始化 Activity 场次补成 Hall 3 下 6 个启用物理 Seat 和 6 条 ShowtimeSeat，并提供可重复执行的 `V10_2__seated_activity_seed.sql`；迁移按现有 ShowtimeSeat 状态重新计算余票，不把已售座位重置为可售。
 
@@ -362,6 +364,15 @@ Step 12.1 已完成并冻结：8 项 Collection Service 单元测试与 5 项真
 5. 数据库 / Redis 行为：接口只读 MySQL，不清理 `tb_collection`，不写 Activity、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem 或 `available_seats`，不读取或写入 Venue GEO、`seat:lock:*`、`seat:lock:token:*`，也不新增 Redis Key、缓存、表、字段或索引。MOVIE/POST/REVIEW 收藏列表继续走阶段 4 原有路径；本 Step 不向 Activity 列表、详情或 Nearby VO 增加 `collected`。
 
 Step 12.2 已完成并冻结：9 项 Collection Service 单元测试与 6 项真实 MySQL/Redis/随机端口 HTTP 测试通过，定向共 15 项，覆盖有效目标约束分页、相同时间下 ID 倒序、第二页、失效目标过滤、过滤后 `total`、用户隔离、登录校验、一次批量 Activity 读取、零关系清理和其他收藏类型路径隔离。全量 441 项测试通过，0 failure、0 error、0 skipped；Maven `clean package` 为 `BUILD SUCCESS`。真实联调确认读取前后全部测试收藏关系、Activity 和 Redis Key 集合不变。
+
+#### 3.6.3 Step 12.3 Activity 普通列表和详情补充 collected
+
+1. URL：`GET /api/activities` 与 `GET /api/activities/{id}`。Method：`GET`。是否登录：否；可选 Bearer 登录态只用于补充用户私有状态。两个既有响应 VO 兼容新增 `collected`，不删除或重命名原字段。
+2. 匿名请求返回 `collected=false` 且不查询 `tb_collection`。登录列表在 Activity 原分页完成后，按当前用户、`target_type=ACTIVITY` 和本页全部 Activity ID 执行一次 `IN` 查询；登录详情在有效 Activity 查出后最多执行一次对应关系计数。不同用户的关系严格隔离。
+3. `collected` 只属于响应组装，不进入 Activity 查询条件、排序、分页或公共缓存。Activity 不存在、草稿、下线、价格范围、筛选和稳定排序继续遵循阶段 10 契约。Activity 收藏列表因复用 `ActivityListItemVO`，其已成立关系对应摘要返回 `collected=true`，不增加额外数据库查询。
+4. 数据库 / Redis 行为：只读 `tb_collection`，不新增、删除或更新收藏关系；不修改 Activity、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、`available_seats` 或 GEO，不新增 Redis Key、缓存、表、字段或索引。MOVIE 收藏查询实现及 Nearby 接口保持不变。
+
+Step 12.3 已完成并冻结：Activity Service 14 项、Activity Controller 8 项、真实 MySQL/Redis/随机端口 Activity Collection HTTP 7 项、Collection Service 9 项及 Movie Service 4 项定向测试全部通过，共 42 项；覆盖匿名 false、登录收藏前 false/收藏后 true、列表与详情、用户隔离、列表单次批量关系查询、详情单次关系查询、共享收藏摘要状态及 MOVIE 回归。全量 445 项测试通过，0 failure、0 error、0 skipped；Maven `clean package` 为 `BUILD SUCCESS`。
 
 ### 3.7 场馆
 

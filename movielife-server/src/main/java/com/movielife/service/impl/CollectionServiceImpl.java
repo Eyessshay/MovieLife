@@ -165,6 +165,7 @@ public class CollectionServiceImpl implements CollectionService {
                 target.setCity(activity.getCity());
                 target.setPriceMin(activity.getPriceMin());
                 target.setPriceMax(activity.getPriceMax());
+                target.setCollected(true);
                 result.put(activity.getId(), target);
             }
         }

@@ -6,6 +6,7 @@ import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.service.ActivityService;
 import com.movielife.vo.ActivityDetailVO;
+import com.movielife.vo.ActivityListItemVO;
 import com.movielife.vo.ActivityNearbyVO;
 import com.movielife.vo.ActivityShowtimeVO;
 import com.movielife.vo.PageVO;
@@ -40,13 +41,16 @@ class ActivityControllerTest {
 
     @Test
     void shouldAllowPublicActivityList() throws Exception {
+        ActivityListItemVO item = new ActivityListItemVO();
+        item.setId(1L);
+        item.setCollected(false);
         when(activityService.queryActivities(any()))
-                .thenReturn(new PageVO<>(Collections.emptyList(), 0L, 1, 20));
+                .thenReturn(new PageVO<>(Collections.singletonList(item), 1L, 1, 20));
 
         mockMvc.perform(get("/api/activities").param("city", "上海"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value("OK"))
-                .andExpect(jsonPath("$.data.list").isEmpty());
+                .andExpect(jsonPath("$.data.list[0].collected").value(false));
     }
 
     @Test
@@ -106,12 +110,14 @@ class ActivityControllerTest {
         detail.setId(1L);
         detail.setTitle("示例现场活动");
         detail.setPriceMin(new BigDecimal("199.00"));
+        detail.setCollected(false);
         when(activityService.queryActivityDetail(1L)).thenReturn(detail);
 
         mockMvc.perform(get("/api/activities/1"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.id").value(1))
-                .andExpect(jsonPath("$.data.title").value("示例现场活动"));
+                .andExpect(jsonPath("$.data.title").value("示例现场活动"))
+                .andExpect(jsonPath("$.data.collected").value(false));
     }
 
     @Test

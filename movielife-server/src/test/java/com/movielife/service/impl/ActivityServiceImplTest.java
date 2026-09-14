@@ -1,8 +1,11 @@
 package com.movielife.service.impl;
 
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.movielife.dto.ActivityNearbyQueryDTO;
+import com.movielife.dto.ActivityQueryDTO;
 import com.movielife.dto.ActivityShowtimeQueryDTO;
 import com.movielife.entity.Activity;
+import com.movielife.entity.Collection;
 import com.movielife.entity.Hall;
 import com.movielife.entity.Showtime;
 import com.movielife.entity.Venue;
@@ -10,11 +13,15 @@ import com.movielife.enums.VenueType;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.mapper.ActivityMapper;
+import com.movielife.mapper.CollectionMapper;
 import com.movielife.mapper.HallMapper;
 import com.movielife.mapper.ShowtimeMapper;
 import com.movielife.mapper.VenueMapper;
+import com.movielife.utils.UserHolder;
+import com.movielife.vo.ActivityListItemVO;
 import com.movielife.vo.ActivityShowtimeVO;
 import com.movielife.vo.ActivityNearbyVO;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -50,6 +57,7 @@ import static org.mockito.Mockito.when;
 class ActivityServiceImplTest {
 
     @Mock private ActivityMapper activityMapper;
+    @Mock private CollectionMapper collectionMapper;
     @Mock private ShowtimeMapper showtimeMapper;
     @Mock private VenueMapper venueMapper;
     @Mock private HallMapper hallMapper;
@@ -61,8 +69,14 @@ class ActivityServiceImplTest {
     @BeforeEach
     void setUp() {
         service = new ActivityServiceImpl(
-                activityMapper, showtimeMapper, venueMapper, hallMapper, redisTemplate);
+                activityMapper, collectionMapper, showtimeMapper, venueMapper, hallMapper,
+                redisTemplate);
         lenient().when(redisTemplate.opsForGeo()).thenReturn(geoOperations);
+    }
+
+    @AfterEach
+    void cleanupUserContext() {
+        UserHolder.removeUser();
     }
 
     @Test
@@ -72,10 +86,62 @@ class ActivityServiceImplTest {
         when(activityMapper.selectById(1L)).thenReturn(activity);
 
         assertThat(service.queryActivityDetail(1L).getDescription()).isEqualTo("现场演出");
+        assertThat(service.queryActivityDetail(1L).getCollected()).isFalse();
+        verify(collectionMapper, never()).selectCount(any());
 
         when(activityMapper.selectById(2L)).thenReturn(activity(2L, 0));
         assertError(() -> service.queryActivityDetail(2L), ErrorCode.ACTIVITY_NOT_FOUND);
         assertError(() -> service.queryActivityDetail(0L), ErrorCode.INVALID_ID);
+    }
+
+    @Test
+    void loggedActivityListShouldBatchCollectionRelationsOnce() {
+        com.movielife.dto.UserDTO user = new com.movielife.dto.UserDTO();
+        user.setId(7L);
+        UserHolder.saveUser(user);
+        Activity first = activity(1L, 1);
+        Activity second = activity(2L, 1);
+        Page<Activity> page = new Page<>(1, 20, 2);
+        page.setRecords(Arrays.asList(first, second));
+        when(activityMapper.selectPage(any(), any())).thenReturn(page);
+        Collection relation = new Collection();
+        relation.setUserId(7L);
+        relation.setTargetType("ACTIVITY");
+        relation.setTargetId(2L);
+        when(collectionMapper.selectList(any())).thenReturn(Collections.singletonList(relation));
+
+        List<ActivityListItemVO> result = service.queryActivities(new ActivityQueryDTO()).getList();
+
+        assertThat(result).extracting(ActivityListItemVO::getId).containsExactly(1L, 2L);
+        assertThat(result).extracting(ActivityListItemVO::getCollected)
+                .containsExactly(false, true);
+        verify(collectionMapper).selectList(any());
+        verify(collectionMapper, never()).selectCount(any());
+    }
+
+    @Test
+    void anonymousActivityListShouldReturnFalseWithoutCollectionQuery() {
+        Page<Activity> page = new Page<>(1, 20, 1);
+        page.setRecords(Collections.singletonList(activity(1L, 1)));
+        when(activityMapper.selectPage(any(), any())).thenReturn(page);
+
+        assertThat(service.queryActivities(new ActivityQueryDTO()).getList())
+                .extracting(ActivityListItemVO::getCollected)
+                .containsExactly(false);
+        verify(collectionMapper, never()).selectList(any());
+    }
+
+    @Test
+    void loggedActivityDetailShouldQueryCollectionRelationOnce() {
+        com.movielife.dto.UserDTO user = new com.movielife.dto.UserDTO();
+        user.setId(7L);
+        UserHolder.saveUser(user);
+        when(activityMapper.selectById(1L)).thenReturn(activity(1L, 1));
+        when(collectionMapper.selectCount(any())).thenReturn(1L);
+
+        assertThat(service.queryActivityDetail(1L).getCollected()).isTrue();
+        verify(collectionMapper).selectCount(any());
+        verify(collectionMapper, never()).selectList(any());
     }
 
     @Test

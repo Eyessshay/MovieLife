@@ -15,4 +15,5 @@ public class ActivityDetailVO {
     private String description;
     private BigDecimal priceMin;
     private BigDecimal priceMax;
+    private Boolean collected;
 }

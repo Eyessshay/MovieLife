@@ -14,4 +14,5 @@ public class ActivityListItemVO {
     private String city;
     private BigDecimal priceMin;
     private BigDecimal priceMax;
+    private Boolean collected;
 }

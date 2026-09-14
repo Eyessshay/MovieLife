@@ -253,6 +253,25 @@ class ActivityCollectionHttpIntegrationTest {
                 HttpStatus.UNAUTHORIZED, "UNAUTHORIZED");
     }
 
+    @Test
+    void ordinaryActivityListAndDetailShouldExposeIsolatedCollectionState()
+            throws Exception {
+        String listPath = "/api/activities?city=Step121City&page=1&pageSize=20";
+        String detailPath = "/api/activities/" + activeActivityId;
+
+        assertActivityCollected(listPath, null, true, false);
+        assertActivityCollected(detailPath, null, false, false);
+        assertActivityCollected(listPath, ownerToken, true, false);
+        assertActivityCollected(detailPath, ownerToken, false, false);
+
+        assertOk(exchange(HttpMethod.PUT, activityPath(activeActivityId), ownerToken));
+
+        assertActivityCollected(listPath, ownerToken, true, true);
+        assertActivityCollected(detailPath, ownerToken, false, true);
+        assertActivityCollected(listPath, otherUserToken, true, false);
+        assertActivityCollected(detailPath, otherUserToken, false, false);
+    }
+
     private ResponseEntity<String> exchange(HttpMethod method, String path, String token) {
         HttpHeaders headers = new HttpHeaders();
         if (token != null) {
@@ -306,6 +325,21 @@ class ActivityCollectionHttpIntegrationTest {
         assertThat(data.path("page").asInt()).isEqualTo(page);
         assertThat(data.path("pageSize").asInt()).isEqualTo(pageSize);
         return data;
+    }
+
+    private void assertActivityCollected(String path,
+                                         String token,
+                                         boolean listResponse,
+                                         boolean expected) throws Exception {
+        ResponseEntity<String> response = exchange(HttpMethod.GET, path, token);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode body = objectMapper.readTree(response.getBody());
+        assertThat(body.path("code").asText()).isEqualTo("OK");
+        JsonNode activity = listResponse
+                ? body.path("data").path("list").get(0)
+                : body.path("data");
+        assertThat(activity.path("id").asLong()).isEqualTo(activeActivityId);
+        assertThat(activity.path("collected").asBoolean()).isEqualTo(expected);
     }
 
     private Long insertCollection(Long userId, Long activityId, LocalDateTime createTime) {

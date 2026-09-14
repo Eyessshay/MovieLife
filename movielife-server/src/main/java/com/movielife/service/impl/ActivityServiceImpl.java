@@ -7,6 +7,7 @@ import com.movielife.dto.ActivityNearbyQueryDTO;
 import com.movielife.dto.ActivityQueryDTO;
 import com.movielife.dto.ActivityShowtimeQueryDTO;
 import com.movielife.entity.Activity;
+import com.movielife.entity.Collection;
 import com.movielife.entity.Hall;
 import com.movielife.entity.Showtime;
 import com.movielife.entity.Venue;
@@ -14,10 +15,12 @@ import com.movielife.enums.VenueType;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.mapper.ActivityMapper;
+import com.movielife.mapper.CollectionMapper;
 import com.movielife.mapper.HallMapper;
 import com.movielife.mapper.ShowtimeMapper;
 import com.movielife.mapper.VenueMapper;
 import com.movielife.service.ActivityService;
+import com.movielife.utils.UserHolder;
 import com.movielife.vo.ActivityDetailVO;
 import com.movielife.vo.ActivityListItemVO;
 import com.movielife.vo.ActivityNearbyVO;
@@ -56,11 +59,13 @@ import java.util.stream.Collectors;
 public class ActivityServiceImpl implements ActivityService {
 
     private static final String ACTIVITY_BIZ_TYPE = "ACTIVITY";
+    private static final String ACTIVITY_COLLECTION_TYPE = "ACTIVITY";
     private static final int ACTIVE_STATUS = 1;
     private static final int NEARBY_CANDIDATE_MULTIPLIER = 5;
     private static final int MAX_NEARBY_CANDIDATES = 200;
 
     private final ActivityMapper activityMapper;
+    private final CollectionMapper collectionMapper;
     private final ShowtimeMapper showtimeMapper;
     private final VenueMapper venueMapper;
     private final HallMapper hallMapper;
@@ -81,8 +86,10 @@ public class ActivityServiceImpl implements ActivityService {
 
         Page<Activity> page = activityMapper.selectPage(
                 new Page<>(query.getPage(), query.getPageSize()), wrapper);
+        Set<Long> collectedIds = findCollectedActivityIds(page.getRecords());
         List<ActivityListItemVO> items = page.getRecords().stream()
-                .map(this::toListItem)
+                .map(activity -> toListItem(
+                        activity, collectedIds.contains(activity.getId())))
                 .collect(Collectors.toList());
         return new PageVO<>(items, page.getTotal(), query.getPage(), query.getPageSize());
     }
@@ -192,6 +199,7 @@ public class ActivityServiceImpl implements ActivityService {
         ActivityDetailVO result = new ActivityDetailVO();
         copyDiscoveryFields(activity, result);
         result.setDescription(activity.getDescription());
+        result.setCollected(isCollected(activity.getId()));
         return result;
     }
 
@@ -458,9 +466,39 @@ public class ActivityServiceImpl implements ActivityService {
         return new BusinessException(ErrorCode.INTERNAL_ERROR);
     }
 
-    private ActivityListItemVO toListItem(Activity activity) {
+    private Set<Long> findCollectedActivityIds(List<Activity> activities) {
+        Long userId = UserHolder.getUserId();
+        if (userId == null || activities.isEmpty()) {
+            return Collections.emptySet();
+        }
+        List<Long> activityIds = activities.stream()
+                .map(Activity::getId)
+                .collect(Collectors.toList());
+        return collectionMapper.selectList(new LambdaQueryWrapper<Collection>()
+                        .eq(Collection::getUserId, userId)
+                        .eq(Collection::getTargetType, ACTIVITY_COLLECTION_TYPE)
+                        .in(Collection::getTargetId, activityIds))
+                .stream()
+                .map(Collection::getTargetId)
+                .collect(Collectors.toSet());
+    }
+
+    private boolean isCollected(Long activityId) {
+        Long userId = UserHolder.getUserId();
+        if (userId == null) {
+            return false;
+        }
+        Long count = collectionMapper.selectCount(new LambdaQueryWrapper<Collection>()
+                .eq(Collection::getUserId, userId)
+                .eq(Collection::getTargetType, ACTIVITY_COLLECTION_TYPE)
+                .eq(Collection::getTargetId, activityId));
+        return count != null && count > 0;
+    }
+
+    private ActivityListItemVO toListItem(Activity activity, boolean collected) {
         ActivityListItemVO result = new ActivityListItemVO();
         copyDiscoveryFields(activity, result);
+        result.setCollected(collected);
         return result;
     }
 

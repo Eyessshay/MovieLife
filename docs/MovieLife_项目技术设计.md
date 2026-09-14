@@ -1990,6 +1990,18 @@ Step 12.2 定向验证由 9 项 Collection Service 单元测试和 6 项真实 M
 
 Step 12.2 至此正式冻结。后续只有在明确指定新 Step 后，才能向 Activity 列表、详情或 Nearby 增加当前用户 `collected` 状态；不得在本 Step 扩入评价、管理端、AI 或票务能力。
 
+### 9.3 Step 12.3：Activity 普通列表和详情补充 collected
+
+Step 12.3 只兼容扩展 `GET /api/activities` 和 `GET /api/activities/{id}`，在既有 `ActivityListItemVO`、`ActivityDetailVO` 末尾增加 `Boolean collected`。接口继续允许匿名访问；没有有效登录用户时 Service 直接返回 `false`，不访问收藏 Mapper。有效登录态仍由现有通用拦截器写入 `UserHolder`，不为 Activity 新建鉴权路径。
+
+普通列表先按阶段 10 规则完成 `status=1`、城市、类型、关键词、`create_time DESC, id DESC` 和分页，再从本页 Activity 提取 ID，以当前用户和 `target_type=ACTIVITY` 执行一次 `tb_collection` 批量查询。内存集合只参与响应组装，不改变查询条件、顺序、页内元素或 `total`。详情先完成有效 Activity 校验，再最多执行一次当前用户对应关系计数。两条路径均不把用户私有状态写入公共缓存。
+
+Nearby、Activity 场次、Showtime、锁座和订单路径未注入收藏查询或新增响应字段；MOVIE 继续使用自身已冻结的收藏状态逻辑。Step 12.2 收藏列表复用 `ActivityListItemVO`，该路径中的关系本身已证明收藏成立，因此仅在原批量组装时写入 `collected=true`，没有增加 Mapper 调用。
+
+Step 12.3 不修改 SQL 结构，不新增 Redis Key 或缓存，不写 `tb_collection`、Activity、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、`available_seats` 或 Venue GEO。定向验证包含 Activity Service 14 项、Activity Controller 8 项、真实 HTTP 7 项、Collection Service 9 项和 Movie Service 4 项，共 42 项通过；覆盖匿名与登录状态、收藏前后、用户隔离、列表一次批量查询、详情一次查询、共享 VO 和 MOVIE 回归。全量 445 项测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。
+
+Step 12.3 至此正式冻结。Nearby 的 `collected` 或其他 Activity 用户态只能在后续明确 Step 中实现，不得在本 Step 扩入评价、管理端、AI 或票务能力。
+
 ## 10. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -2025,4 +2037,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.22，阶段 10 固定座位 Activity 票务与阶段 11 Activity Nearby 保持冻结，阶段 12 Step 12.1 收藏写路径/关系检查及 Step 12.2 Activity 收藏列表均已完成并冻结，尚未向 Activity 列表、详情或 Nearby 增加 `collected` 字段。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.23，阶段 10 固定座位 Activity 票务与阶段 11 Activity Nearby 保持冻结，阶段 12 Step 12.1 收藏写路径/关系检查、Step 12.2 Activity 收藏列表及 Step 12.3 普通列表/详情 `collected` 均已完成并冻结；Nearby 尚未增加 `collected` 字段。
