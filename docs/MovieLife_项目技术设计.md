@@ -2014,6 +2014,18 @@ Step 12.4 只在 `ActivityNearbyVO` 末尾兼容增加 `Boolean collected`。`Ac
 
 Step 12.4 至此正式冻结。阶段 12 Activity 收藏的写路径、关系检查、收藏列表、普通 Activity 列表/详情及 Nearby 用户态已经闭环；不得在本 Step 扩入评价、管理端、AI 或票务能力。
 
+### 9.5 Step 12.5 边界加固与阶段冻结
+
+Step 12.5 不修改生产代码、SQL、API 契约或 Redis 数据结构，只通过自动化测试把阶段 12 的跨接口一致性和边界证据闭合。真实 MySQL、Redis 和随机端口 HTTP 主链路从未收藏状态开始，依次验证 Activity 普通列表、详情、Nearby、收藏写入、重复写入、收藏列表、关系检查、取消及重复取消，最终所有读接口与 `tb_collection` 恢复一致的未收藏状态。
+
+并发证据包含同一用户并发收藏由唯一索引收敛为一条关系，以及收藏与取消并发后以 MySQL 最终关系为准，关系检查和收藏列表不得维护第二份状态。用户隔离证据包含两个用户同时收藏同一 Activity，各自关系独立，任一用户取消不会影响另一用户。失效目标、非法类型和非法 ID 继续沿用 Step 12.1 规则；已收藏 Activity 下线后在收藏列表分页前被过滤，但关系不会在读取中删除，并仍可取消。
+
+分页证据覆盖相同收藏时间下按记录 ID 倒序、第二页、重复查询稳定性、深分页空列表和过滤后准确 `total`。Activity 普通列表与 Nearby 对本页最终 Activity ID 各执行一次收藏关系批量查询，详情最多执行一次关系查询；匿名路径不查询收藏表。MOVIE、POST、REVIEW 的收藏、检查、列表和取消生命周期回归继续走阶段 4 通用路径。
+
+真实联调在请求前后比较 Activity、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、`available_seats`、Venue GEO member、临时锁 Key、token 锁 Key 和 Redis Key 集合；除链路中预期创建后又删除的 Activity 收藏关系外，所有业务事实保持不变。测试清理后 Step 12.5 用户、Activity、Venue、Hall、Showtime、收藏关系和 GEO Key 均无残留。
+
+阶段 12 与阶段 11 交叉定向测试共 103 项通过；全量 452 项测试通过，0 failure、0 error、0 skipped；真实 MySQL、Redis、随机端口 HTTP 联调通过，Maven `clean package` 为 `BUILD SUCCESS`。Step 12.5 至此正式冻结，阶段 12 完成；后续不得在阶段 12 内追加 Activity Review、Venue Review、管理端、AI 或票务能力。
+
 ## 10. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -2049,4 +2061,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.24，阶段 10 固定座位 Activity 票务与阶段 11 Activity Nearby 保持冻结，阶段 12 Step 12.1～12.4 Activity 收藏写路径、关系检查、收藏列表及普通/Nearby 查询 `collected` 均已完成并冻结。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.25，阶段 10 固定座位 Activity 票务与阶段 11 Activity Nearby 保持冻结，阶段 12 Step 12.1～12.5 Activity 收藏写路径、关系检查、收藏列表、普通/Nearby 查询 `collected`、边界与完整联调均已完成并最终冻结。

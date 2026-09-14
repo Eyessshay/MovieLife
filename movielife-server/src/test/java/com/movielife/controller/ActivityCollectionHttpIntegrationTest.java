@@ -6,23 +6,28 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.movielife.constants.RedisConstants;
 import com.movielife.entity.Activity;
 import com.movielife.entity.Collection;
+import com.movielife.entity.Hall;
 import com.movielife.entity.Showtime;
 import com.movielife.entity.ShowtimeSeat;
 import com.movielife.entity.TicketOrder;
 import com.movielife.entity.User;
+import com.movielife.entity.Venue;
 import com.movielife.mapper.ActivityMapper;
 import com.movielife.mapper.CollectionMapper;
+import com.movielife.mapper.HallMapper;
 import com.movielife.mapper.ShowtimeMapper;
 import com.movielife.mapper.ShowtimeSeatMapper;
 import com.movielife.mapper.TicketOrderItemMapper;
 import com.movielife.mapper.TicketOrderMapper;
 import com.movielife.mapper.UserMapper;
+import com.movielife.mapper.VenueMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
+import org.springframework.data.geo.Point;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.http.HttpEntity;
@@ -53,12 +58,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 )
 class ActivityCollectionHttpIntegrationTest {
 
+    private static final String FREEZE_CITY = "STEP125HTTP";
+    private static final String FREEZE_GEO_KEY =
+            RedisConstants.VENUE_GEO_KEY + FREEZE_CITY + ":THEATER";
+
     @Autowired private TestRestTemplate restTemplate;
     @Autowired private ObjectMapper objectMapper;
     @Autowired private StringRedisTemplate redisTemplate;
     @Autowired private UserMapper userMapper;
     @Autowired private ActivityMapper activityMapper;
     @Autowired private CollectionMapper collectionMapper;
+    @Autowired private VenueMapper venueMapper;
+    @Autowired private HallMapper hallMapper;
     @Autowired private ShowtimeMapper showtimeMapper;
     @Autowired private ShowtimeSeatMapper showtimeSeatMapper;
     @Autowired private TicketOrderMapper ticketOrderMapper;
@@ -66,6 +77,9 @@ class ActivityCollectionHttpIntegrationTest {
 
     private final List<Long> userIds = new ArrayList<>();
     private final List<Long> activityIds = new ArrayList<>();
+    private final List<Long> venueIds = new ArrayList<>();
+    private final List<Long> hallIds = new ArrayList<>();
+    private final List<Long> showtimeIds = new ArrayList<>();
     private final List<String> loginTokens = new ArrayList<>();
 
     private Long ownerId;
@@ -89,10 +103,14 @@ class ActivityCollectionHttpIntegrationTest {
 
     @AfterEach
     void tearDown() {
+        redisTemplate.delete(FREEZE_GEO_KEY);
         if (!userIds.isEmpty()) {
             collectionMapper.delete(new LambdaQueryWrapper<Collection>()
                     .in(Collection::getUserId, userIds));
         }
+        showtimeIds.forEach(showtimeMapper::deleteById);
+        hallIds.forEach(hallMapper::deleteById);
+        venueIds.forEach(venueMapper::deleteById);
         activityIds.forEach(activityMapper::deleteById);
         userIds.forEach(userMapper::deleteById);
         loginTokens.forEach(token -> redisTemplate.delete(RedisConstants.LOGIN_TOKEN_KEY + token));
@@ -159,6 +177,56 @@ class ActivityCollectionHttpIntegrationTest {
         } finally {
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    void twoUsersShouldOwnIndependentActivityRelations() throws Exception {
+        assertOk(exchange(HttpMethod.PUT, activityPath(activeActivityId), ownerToken));
+        assertOk(exchange(HttpMethod.PUT, activityPath(activeActivityId), otherUserToken));
+
+        assertThat(collectionCount(ownerId, activeActivityId)).isEqualTo(1L);
+        assertThat(collectionCount(otherUserId, activeActivityId)).isEqualTo(1L);
+        assertCollected(ownerToken, activeActivityId, true);
+        assertCollected(otherUserToken, activeActivityId, true);
+
+        assertOk(exchange(HttpMethod.DELETE, activityPath(activeActivityId), ownerToken));
+        assertCollected(ownerToken, activeActivityId, false);
+        assertCollected(otherUserToken, activeActivityId, true);
+        assertThat(collectionCount(otherUserId, activeActivityId)).isEqualTo(1L);
+    }
+
+    @Test
+    void concurrentCollectAndUncollectShouldMatchMysqlFinalState() throws Exception {
+        assertOk(exchange(HttpMethod.PUT, activityPath(activeActivityId), ownerToken));
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<ResponseEntity<String>> collect = executor.submit(() -> {
+                ready.countDown();
+                start.await();
+                return exchange(HttpMethod.PUT, activityPath(activeActivityId), ownerToken);
+            });
+            Future<ResponseEntity<String>> uncollect = executor.submit(() -> {
+                ready.countDown();
+                start.await();
+                return exchange(HttpMethod.DELETE, activityPath(activeActivityId), ownerToken);
+            });
+            ready.await();
+            start.countDown();
+
+            assertOk(collect.get());
+            assertOk(uncollect.get());
+        } finally {
+            executor.shutdownNow();
+        }
+
+        long mysqlCount = collectionCount(ownerId, activeActivityId);
+        assertThat(mysqlCount).isBetween(0L, 1L);
+        boolean expected = mysqlCount == 1L;
+        assertCollected(ownerToken, activeActivityId, expected);
+        JsonNode page = assertActivityList(ownerToken, 1, 20, mysqlCount);
+        assertThat(page.path("list").isEmpty()).isEqualTo(!expected);
     }
 
     @Test
@@ -233,6 +301,11 @@ class ActivityCollectionHttpIntegrationTest {
         assertThat(secondPage.path("list").get(0).path("targetId").asLong())
                 .isEqualTo(activeActivityId);
 
+        JsonNode repeatedFirstPage = assertActivityList(ownerToken, 1, 2, 3L);
+        assertThat(repeatedFirstPage.path("list")).isEqualTo(firstPage.path("list"));
+        JsonNode deepPage = assertActivityList(ownerToken, 100, 2, 3L);
+        assertThat(deepPage.path("list")).isEmpty();
+
         JsonNode otherUserPage = assertActivityList(otherUserToken, 1, 20, 1L);
         assertThat(otherUserPage.path("list")).hasSize(1);
         assertThat(otherUserPage.path("list").get(0).path("targetId").asLong())
@@ -270,6 +343,61 @@ class ActivityCollectionHttpIntegrationTest {
         assertActivityCollected(detailPath, ownerToken, false, true);
         assertActivityCollected(listPath, otherUserToken, true, false);
         assertActivityCollected(detailPath, otherUserToken, false, false);
+    }
+
+    @Test
+    void stageTwelveHttpMainChainShouldExposeOnlyExpectedCollectionTransitions()
+            throws Exception {
+        Showtime freezeShowtime = insertNearbyFixture();
+        String listPath = "/api/activities?city=Step121City&page=1&pageSize=20";
+        String detailPath = "/api/activities/" + activeActivityId;
+
+        Activity activityBefore = activityMapper.selectById(activeActivityId);
+        Showtime showtimeBefore = showtimeMapper.selectById(freezeShowtime.getId());
+        Long showtimeSeatCountBefore = showtimeSeatMapper.selectCount(null);
+        Long orderCountBefore = ticketOrderMapper.selectCount(null);
+        Long orderItemCountBefore = ticketOrderItemMapper.selectCount(null);
+        Set<String> redisKeysBefore = redisTemplate.keys("*");
+        Set<ZSetOperations.TypedTuple<String>> geoBefore =
+                redisTemplate.opsForZSet().rangeWithScores(FREEZE_GEO_KEY, 0, -1);
+
+        assertActivityCollected(listPath, ownerToken, true, false);
+        assertActivityCollected(detailPath, ownerToken, false, false);
+        assertNearbyCollected(ownerToken, false);
+        assertThat(assertActivityList(ownerToken, 1, 20, 0L).path("list")).isEmpty();
+        assertCollected(ownerToken, activeActivityId, false);
+
+        assertOk(exchange(HttpMethod.PUT, activityPath(activeActivityId), ownerToken));
+        assertOk(exchange(HttpMethod.PUT, activityPath(activeActivityId), ownerToken));
+        assertThat(collectionCount(ownerId, activeActivityId)).isEqualTo(1L);
+        assertActivityCollected(listPath, ownerToken, true, true);
+        assertActivityCollected(detailPath, ownerToken, false, true);
+        assertNearbyCollected(ownerToken, true);
+        JsonNode collectedPage = assertActivityList(ownerToken, 1, 20, 1L);
+        assertThat(collectedPage.path("list")).hasSize(1);
+        assertThat(collectedPage.path("list").get(0).path("targetId").asLong())
+                .isEqualTo(activeActivityId);
+        assertCollected(ownerToken, activeActivityId, true);
+
+        assertOk(exchange(HttpMethod.DELETE, activityPath(activeActivityId), ownerToken));
+        assertOk(exchange(HttpMethod.DELETE, activityPath(activeActivityId), ownerToken));
+        assertThat(collectionCount(ownerId, activeActivityId)).isZero();
+        assertActivityCollected(listPath, ownerToken, true, false);
+        assertActivityCollected(detailPath, ownerToken, false, false);
+        assertNearbyCollected(ownerToken, false);
+        assertThat(assertActivityList(ownerToken, 1, 20, 0L).path("list")).isEmpty();
+        assertCollected(ownerToken, activeActivityId, false);
+
+        assertThat(activityMapper.selectById(activeActivityId)).isEqualTo(activityBefore);
+        assertThat(showtimeMapper.selectById(freezeShowtime.getId())).isEqualTo(showtimeBefore);
+        assertThat(showtimeMapper.selectById(freezeShowtime.getId()).getAvailableSeats())
+                .isEqualTo(showtimeBefore.getAvailableSeats());
+        assertThat(showtimeSeatMapper.selectCount(null)).isEqualTo(showtimeSeatCountBefore);
+        assertThat(ticketOrderMapper.selectCount(null)).isEqualTo(orderCountBefore);
+        assertThat(ticketOrderItemMapper.selectCount(null)).isEqualTo(orderItemCountBefore);
+        assertThat(redisTemplate.keys("*")).isEqualTo(redisKeysBefore);
+        assertThat(redisTemplate.opsForZSet().rangeWithScores(FREEZE_GEO_KEY, 0, -1))
+                .isEqualTo(geoBefore);
     }
 
     private ResponseEntity<String> exchange(HttpMethod method, String path, String token) {
@@ -340,6 +468,56 @@ class ActivityCollectionHttpIntegrationTest {
                 : body.path("data");
         assertThat(activity.path("id").asLong()).isEqualTo(activeActivityId);
         assertThat(activity.path("collected").asBoolean()).isEqualTo(expected);
+    }
+
+    private void assertNearbyCollected(String token, boolean expected) throws Exception {
+        ResponseEntity<String> response = exchange(HttpMethod.GET,
+                "/api/activities/nearby?city=" + FREEZE_CITY
+                        + "&x=121.47&y=31.23&distance=5000&page=1&pageSize=20",
+                token);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode data = objectMapper.readTree(response.getBody()).path("data");
+        assertThat(data).hasSize(1);
+        assertThat(data.get(0).path("id").asLong()).isEqualTo(activeActivityId);
+        assertThat(data.get(0).path("collected").asBoolean()).isEqualTo(expected);
+    }
+
+    private Showtime insertNearbyFixture() {
+        Venue venue = new Venue();
+        venue.setName("Step125阶段冻结剧场");
+        venue.setType("theater");
+        venue.setCity(FREEZE_CITY);
+        venue.setAddress("Step 12.5 HTTP 测试地址");
+        venue.setLongitude(new BigDecimal("121.471000"));
+        venue.setLatitude(new BigDecimal("31.230000"));
+        venue.setAvgScore(BigDecimal.ZERO);
+        venue.setStatus(1);
+        assertThat(venueMapper.insert(venue)).isEqualTo(1);
+        venueIds.add(venue.getId());
+
+        Hall hall = new Hall();
+        hall.setVenueId(venue.getId());
+        hall.setName("Step125阶段冻结厅");
+        assertThat(hallMapper.insert(hall)).isEqualTo(1);
+        hallIds.add(hall.getId());
+
+        Showtime showtime = new Showtime();
+        showtime.setBizType("ACTIVITY");
+        showtime.setBizId(activeActivityId);
+        showtime.setVenueId(venue.getId());
+        showtime.setHallId(hall.getId());
+        showtime.setStartTime(LocalDateTime.now().plusDays(2).withSecond(0).withNano(0));
+        showtime.setEndTime(showtime.getStartTime().plusHours(2));
+        showtime.setBasePrice(new BigDecimal("99.00"));
+        showtime.setTotalSeats(100);
+        showtime.setAvailableSeats(40);
+        showtime.setStatus(1);
+        assertThat(showtimeMapper.insert(showtime)).isEqualTo(1);
+        showtimeIds.add(showtime.getId());
+
+        redisTemplate.opsForGeo().add(FREEZE_GEO_KEY,
+                new Point(121.471000D, 31.230000D), venue.getId().toString());
+        return showtime;
     }
 
     private Long insertCollection(Long userId, Long activityId, LocalDateTime createTime) {

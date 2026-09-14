@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.24（阶段 12 Step 12.4 Activity Nearby 收藏状态冻结版）
+- 版本：v0.25（阶段 12 Activity 收藏最终冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -384,6 +384,17 @@ Step 12.3 已完成并冻结：Activity Service 14 项、Activity Controller 8 �
 4. 数据库 / Redis 行为：只读既有 Venue GEO 和 MySQL，不新增、删除、刷新或修复 GEO，不写 `tb_collection`、Activity、Venue、Hall、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem 或 `available_seats`，不新增 Redis Key、缓存、表、字段或索引。候选窗口仍为 `min(page × pageSize × 5, 200)`。
 
 Step 12.4 已完成并冻结：阶段 11 DTO、Controller、Service、边界、真实 MySQL/Redis/随机端口 HTTP 与 Activity 主链路扩展定向回归 81 项通过，覆盖返回集合、顺序、过滤后分页、最近 Venue、下一 Showtime、售罄发现、候选窗口、无 N+1 和业务快照不变；新增登录单元测试证明收藏关系只在最终页批量查询一次，真实 HTTP 证明匿名、收藏用户和其他用户除 `collected` 外得到完全相同的 Activity/场馆/场次上下文。全量 446 项测试通过，0 failure、0 error、0 skipped；Maven `clean package` 为 `BUILD SUCCESS`。
+
+#### 3.6.5 Step 12.5 边界加固与阶段冻结
+
+1. 本 Step 不增加或修改生产接口、DTO、VO、Mapper、Service、数据库结构和 Redis 结构，只补充 Activity 收藏跨接口、并发、边界、回归及数据快照证据。
+2. 真实 MySQL、Redis 和随机端口 HTTP 主链路固定验证：列表、详情、Nearby 初始 `collected=false` → 收藏及重复收藏 → 三类查询均为 `true`、收藏列表出现、关系检查为 `true` → 取消及重复取消 → 三类查询均恢复 `false`、收藏列表消失、关系检查为 `false`。关系变化期间 MySQL 最多存在一条当前用户 Activity 收藏记录。
+3. 两个用户收藏同一 Activity 时分别形成自己的唯一关系；同一用户并发收藏收敛为一条关系；收藏与取消并发允许按数据库实际执行顺序最终为未收藏或已收藏，但关系检查和收藏列表必须与最终 MySQL 事实一致。
+4. 下线、草稿和不存在 Activity 继续统一拒绝新收藏；既有收藏在目标下线后不进入收藏列表，但仍可检查关系并取消。Activity 收藏列表继续在分页前过滤有效目标，并按 `create_time DESC, id DESC` 稳定排序；深分页返回空列表但保留准确 `total`。
+5. Activity 普通列表、详情和 Nearby 的无 N+1 约束保持不变；MOVIE、POST、REVIEW 收藏继续沿用阶段 4 的收藏、检查、列表和取消路径。本 Step 不新增任何收藏 Redis Key。
+6. 数据库 / Redis 行为：真实主链路只允许 `tb_collection` 出现预期的临时 Activity 关系变化，结束后恢复基线；`tb_activity`、`tb_showtime`、`tb_showtime_seat`、`tb_ticket_order`、`tb_ticket_order_item`、`available_seats`、Venue GEO member、`seat:lock:*`、`seat:lock:token:*` 和 Redis Key 集合保持不变。
+
+Step 12.5 已完成并冻结：阶段 12 与阶段 11 交叉定向测试 103 项通过；全量 452 项测试通过，0 failure、0 error、0 skipped；真实 MySQL、Redis、随机端口 HTTP 联调及前后快照验证通过，Maven `clean package` 为 `BUILD SUCCESS`。阶段 12 不再接受功能扩展，后续能力必须作为新的独立阶段设计。
 
 ### 3.7 场馆
 

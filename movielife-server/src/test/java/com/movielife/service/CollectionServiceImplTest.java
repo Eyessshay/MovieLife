@@ -3,6 +3,9 @@ package com.movielife.service;
 import com.movielife.dto.CollectionQueryDTO;
 import com.movielife.entity.Activity;
 import com.movielife.entity.Collection;
+import com.movielife.entity.Movie;
+import com.movielife.entity.Post;
+import com.movielife.entity.Review;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.mapper.ActivityMapper;
@@ -26,6 +29,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.Arrays;
+import java.util.Collections;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -182,6 +186,93 @@ class CollectionServiceImplTest {
         verify(collectionMapper).selectPage(any(), any());
         verify(collectionMapper, never()).selectVisibleActivityPage(any(), any());
         verifyNoInteractions(activityMapper);
+    }
+
+    @Test
+    void movieCollectionLifecycleShouldRemainCompatible() {
+        Movie movie = new Movie();
+        movie.setId(2L);
+        movie.setTitle("阶段十二电影回归");
+        movie.setStatus(1);
+        when(movieMapper.selectById(2L)).thenReturn(movie);
+        when(collectionMapper.selectCount(any())).thenReturn(0L, 1L);
+        Collection relation = collection(20L, 2L, LocalDateTime.now());
+        relation.setTargetType("MOVIE");
+        Page<Collection> page = new Page<>(1, 20, 1);
+        page.setRecords(Collections.singletonList(relation));
+        when(collectionMapper.selectPage(any(), any())).thenReturn(page);
+        when(movieMapper.selectBatchIds(any())).thenReturn(Collections.singletonList(movie));
+
+        service.collect("MOVIE", 2L);
+        assertThat(service.check("MOVIE", 2L).getCollected()).isTrue();
+        assertThat(service.queryCollections(query("MOVIE")).getList()).hasSize(1);
+        service.uncollect("MOVIE", 2L);
+
+        verify(collectionMapper).insert(any());
+        verify(collectionMapper).delete(any());
+        verify(movieMapper).selectBatchIds(any());
+    }
+
+    @Test
+    void postCollectionLifecycleShouldRemainCompatible() {
+        Post post = new Post();
+        post.setId(3L);
+        post.setTitle("阶段十二帖子回归");
+        post.setContent("保持阶段四行为");
+        post.setLiked(0);
+        post.setComments(0);
+        when(postMapper.selectById(3L)).thenReturn(post);
+        when(collectionMapper.selectCount(any())).thenReturn(0L, 1L);
+        Collection relation = collection(21L, 3L, LocalDateTime.now());
+        relation.setTargetType("POST");
+        Page<Collection> page = new Page<>(1, 20, 1);
+        page.setRecords(Collections.singletonList(relation));
+        when(collectionMapper.selectPage(any(), any())).thenReturn(page);
+        when(postMapper.selectBatchIds(any())).thenReturn(Collections.singletonList(post));
+
+        service.collect("POST", 3L);
+        assertThat(service.check("POST", 3L).getCollected()).isTrue();
+        assertThat(service.queryCollections(query("POST")).getList()).hasSize(1);
+        service.uncollect("POST", 3L);
+
+        verify(collectionMapper).insert(any());
+        verify(collectionMapper).delete(any());
+        verify(postMapper).selectBatchIds(any());
+    }
+
+    @Test
+    void reviewCollectionLifecycleShouldRemainCompatible() {
+        Review review = new Review();
+        review.setId(4L);
+        review.setStatus(1);
+        review.setScore(new BigDecimal("4.50"));
+        review.setContent("阶段十二影评回归");
+        review.setLikeCount(0);
+        when(reviewMapper.selectById(4L)).thenReturn(review);
+        when(collectionMapper.selectCount(any())).thenReturn(0L, 1L);
+        Collection relation = collection(22L, 4L, LocalDateTime.now());
+        relation.setTargetType("REVIEW");
+        Page<Collection> page = new Page<>(1, 20, 1);
+        page.setRecords(Collections.singletonList(relation));
+        when(collectionMapper.selectPage(any(), any())).thenReturn(page);
+        when(reviewMapper.selectBatchIds(any())).thenReturn(Collections.singletonList(review));
+
+        service.collect("REVIEW", 4L);
+        assertThat(service.check("REVIEW", 4L).getCollected()).isTrue();
+        assertThat(service.queryCollections(query("REVIEW")).getList()).hasSize(1);
+        service.uncollect("REVIEW", 4L);
+
+        verify(collectionMapper).insert(any());
+        verify(collectionMapper).delete(any());
+        verify(reviewMapper).selectBatchIds(any());
+    }
+
+    private CollectionQueryDTO query(String targetType) {
+        CollectionQueryDTO query = new CollectionQueryDTO();
+        query.setTargetType(targetType);
+        query.setPage(1);
+        query.setPageSize(20);
+        return query;
     }
 
     private Collection collection(Long id, Long targetId, LocalDateTime createTime) {
