@@ -24,4 +24,5 @@ public class ActivityNearbyVO {
     private Long nextShowtimeId;
     private LocalDateTime nextStartTime;
     private Integer nextAvailableSeats;
+    private Boolean collected;
 }

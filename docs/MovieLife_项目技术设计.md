@@ -2002,6 +2002,18 @@ Step 12.3 不修改 SQL 结构，不新增 Redis Key 或缓存，不写 `tb_coll
 
 Step 12.3 至此正式冻结。Nearby 的 `collected` 或其他 Activity 用户态只能在后续明确 Step 中实现，不得在本 Step 扩入评价、管理端、AI 或票务能力。
 
+### 9.4 Step 12.4：Activity Nearby 补充 collected
+
+Step 12.4 只在 `ActivityNearbyVO` 末尾兼容增加 `Boolean collected`。`ActivityServiceImpl.queryNearbyActivities` 的阶段 11 主算法保持原顺序：多 VenueType GEO 候选及 `min(page × pageSize × 5, 200)` 有界窗口、MySQL 有效性过滤、Activity 去重、最近 Venue 与下一场次选择、稳定排序和过滤后分页均先独立完成。Service 随后才从最终页 VO 提取 Activity ID，批量读取当前用户收藏关系并填充字段。
+
+收藏状态不进入 `NearbyActivityChoice`，不参与候选合并、Activity 去重、场馆或场次选择、排序、分页及售罄资格。匿名用户和空结果直接跳过收藏 Mapper；匿名非空结果明确填充 `false`。登录用户无论最终页包含多少 Activity，都只执行一次 `tb_collection` 的 `IN` 查询，不进行逐 Activity 查询。
+
+本 Step 没有修改 Redis GEO 读法、候选窗口、Showtime/Activity/Hall 批量读取次数或任何阶段 11 失败关闭条件，不写或清理 GEO、Redis 与 MySQL 业务数据，不新增缓存、Key、表、字段或索引。有效 Bearer 请求触发的既有登录 TTL 刷新属于通用认证机制，不是 Nearby 收藏业务状态。
+
+验证重新运行阶段 11 相关 DTO、Controller、Service、边界、真实 MySQL/Redis/随机端口 HTTP 及 Activity 主链路扩展定向测试，共 81 项通过。测试证明匿名与不同登录用户的 Activity 集合、顺序、最近 Venue、下一 Showtime 完全一致，过滤后分页和 200 候选上限不变，售罄 Activity 仍可发现；收藏用户仅对应 `collected=true`，其他用户为 false。请求前后 Activity、Venue、Hall、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、收藏关系、余票、GEO member 与临时锁快照保持不变。全量 446 项测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。
+
+Step 12.4 至此正式冻结。阶段 12 Activity 收藏的写路径、关系检查、收藏列表、普通 Activity 列表/详情及 Nearby 用户态已经闭环；不得在本 Step 扩入评价、管理端、AI 或票务能力。
+
 ## 10. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -2037,4 +2049,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.23，阶段 10 固定座位 Activity 票务与阶段 11 Activity Nearby 保持冻结，阶段 12 Step 12.1 收藏写路径/关系检查、Step 12.2 Activity 收藏列表及 Step 12.3 普通列表/详情 `collected` 均已完成并冻结；Nearby 尚未增加 `collected` 字段。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.24，阶段 10 固定座位 Activity 票务与阶段 11 Activity Nearby 保持冻结，阶段 12 Step 12.1～12.4 Activity 收藏写路径、关系检查、收藏列表及普通/Nearby 查询 `collected` 均已完成并冻结。

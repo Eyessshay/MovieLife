@@ -4,17 +4,21 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.movielife.constants.RedisConstants;
 import com.movielife.entity.Activity;
+import com.movielife.entity.Collection;
 import com.movielife.entity.Hall;
 import com.movielife.entity.Showtime;
 import com.movielife.entity.ShowtimeSeat;
 import com.movielife.entity.TicketOrder;
+import com.movielife.entity.User;
 import com.movielife.entity.Venue;
 import com.movielife.mapper.ActivityMapper;
+import com.movielife.mapper.CollectionMapper;
 import com.movielife.mapper.HallMapper;
 import com.movielife.mapper.ShowtimeMapper;
 import com.movielife.mapper.ShowtimeSeatMapper;
 import com.movielife.mapper.TicketOrderItemMapper;
 import com.movielife.mapper.TicketOrderMapper;
+import com.movielife.mapper.UserMapper;
 import com.movielife.mapper.VenueMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -26,6 +30,9 @@ import org.springframework.data.geo.Point;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
 
 import java.math.BigDecimal;
@@ -36,6 +43,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -53,17 +61,23 @@ class ActivityNearbyHttpIntegrationTest {
     @Autowired private ObjectMapper objectMapper;
     @Autowired private StringRedisTemplate redisTemplate;
     @Autowired private ActivityMapper activityMapper;
+    @Autowired private CollectionMapper collectionMapper;
     @Autowired private VenueMapper venueMapper;
     @Autowired private HallMapper hallMapper;
     @Autowired private ShowtimeMapper showtimeMapper;
     @Autowired private ShowtimeSeatMapper showtimeSeatMapper;
     @Autowired private TicketOrderMapper ticketOrderMapper;
     @Autowired private TicketOrderItemMapper ticketOrderItemMapper;
+    @Autowired private UserMapper userMapper;
 
     private final List<Long> activityIds = new ArrayList<>();
     private final List<Long> venueIds = new ArrayList<>();
     private final List<Long> hallIds = new ArrayList<>();
     private final List<Long> showtimeIds = new ArrayList<>();
+    private final List<Long> userIds = new ArrayList<>();
+    private final List<String> loginTokens = new ArrayList<>();
+    private String ownerToken;
+    private String otherUserToken;
 
     @BeforeEach
     void setUp() {
@@ -85,11 +99,28 @@ class ActivityNearbyHttpIntegrationTest {
                 THEATER_KEY, new Point(121.471000D, 31.230000D), theater.getId().toString());
         redisTemplate.opsForGeo().add(
                 LIVEHOUSE_KEY, new Point(121.480000D, 31.230000D), livehouse.getId().toString());
+
+        Long ownerId = insertUser("Step124Owner");
+        Long otherUserId = insertUser("Step124Other");
+        ownerToken = createLoginToken(ownerId);
+        otherUserToken = createLoginToken(otherUserId);
+        Collection relation = new Collection();
+        relation.setUserId(ownerId);
+        relation.setTargetType("ACTIVITY");
+        relation.setTargetId(drama.getId());
+        assertThat(collectionMapper.insert(relation)).isEqualTo(1);
     }
 
     @AfterEach
     void tearDown() {
         redisTemplate.delete(Arrays.asList(THEATER_KEY, LIVEHOUSE_KEY));
+        loginTokens.forEach(token ->
+                redisTemplate.delete(RedisConstants.LOGIN_TOKEN_KEY + token));
+        if (!userIds.isEmpty()) {
+            collectionMapper.delete(new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<Collection>()
+                    .in(Collection::getUserId, userIds));
+        }
+        userIds.forEach(userMapper::deleteById);
         showtimeIds.forEach(showtimeMapper::deleteById);
         hallIds.forEach(hallMapper::deleteById);
         venueIds.forEach(venueMapper::deleteById);
@@ -109,6 +140,9 @@ class ActivityNearbyHttpIntegrationTest {
                 new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<TicketOrder>()
                         .in(TicketOrder::getShowtimeId, showtimeIds));
         Long orderItemCountBefore = ticketOrderItemMapper.selectCount(null);
+        Long collectionCountBefore = collectionMapper.selectCount(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<Collection>()
+                        .in(Collection::getUserId, userIds));
         Set<String> seatLockKeysBefore = redisTemplate.keys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*");
         Set<String> seatLockTokenKeysBefore = redisTemplate.keys(
                 RedisConstants.SEAT_LOCK_TOKEN_KEY_PREFIX + "*");
@@ -127,6 +161,7 @@ class ActivityNearbyHttpIntegrationTest {
         assertThat(allTypes.path("code").asText()).isEqualTo("OK");
         assertThat(allTypes.path("data")).hasSize(2);
         JsonNode drama = allTypes.path("data").get(0);
+        assertThat(drama.path("collected").asBoolean()).isFalse();
         assertThat(drama.path("title").asText()).isEqualTo("Step113巡演话剧");
         assertThat(drama.path("nearestVenueName").asText()).isEqualTo("Step113最近剧场");
         assertThat(drama.path("nearestVenueType").asText()).isEqualTo("THEATER");
@@ -135,6 +170,29 @@ class ActivityNearbyHttpIntegrationTest {
                         .getStartTime());
         assertThat(allTypes.path("data").get(1).path("nextAvailableSeats").asInt())
                 .isZero();
+        assertThat(allTypes.path("data").get(1).path("collected").asBoolean()).isFalse();
+
+        JsonNode ownerData = nearbyWithToken(ownerToken);
+        assertThat(ownerData).hasSize(2);
+        assertThat(ownerData.get(0).path("collected").asBoolean()).isTrue();
+        assertThat(ownerData.get(1).path("collected").asBoolean()).isFalse();
+
+        JsonNode otherUserData = nearbyWithToken(otherUserToken);
+        assertThat(otherUserData).hasSize(2);
+        assertThat(otherUserData.get(0).path("collected").asBoolean()).isFalse();
+        assertThat(otherUserData.get(1).path("collected").asBoolean()).isFalse();
+        for (int index = 0; index < 2; index++) {
+            JsonNode anonymousItem = allTypes.path("data").get(index);
+            for (JsonNode authenticatedItem : Arrays.asList(
+                    ownerData.get(index), otherUserData.get(index))) {
+                assertThat(authenticatedItem.path("id").asLong())
+                        .isEqualTo(anonymousItem.path("id").asLong());
+                assertThat(authenticatedItem.path("nearestVenueId").asLong())
+                        .isEqualTo(anonymousItem.path("nearestVenueId").asLong());
+                assertThat(authenticatedItem.path("nextShowtimeId").asLong())
+                        .isEqualTo(anonymousItem.path("nextShowtimeId").asLong());
+            }
+        }
 
         ResponseEntity<String> filteredResponse = restTemplate.getForEntity(
                 "/api/activities/nearby?city=" + TEST_CITY
@@ -160,6 +218,9 @@ class ActivityNearbyHttpIntegrationTest {
                         .in(TicketOrder::getShowtimeId, showtimeIds)))
                 .isEqualTo(orderCountBefore);
         assertThat(ticketOrderItemMapper.selectCount(null)).isEqualTo(orderItemCountBefore);
+        assertThat(collectionMapper.selectCount(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<Collection>()
+                        .in(Collection::getUserId, userIds))).isEqualTo(collectionCountBefore);
         assertThat(redisTemplate.keys(RedisConstants.SEAT_LOCK_KEY_PREFIX + "*"))
                 .isEqualTo(seatLockKeysBefore);
         assertThat(redisTemplate.keys(RedisConstants.SEAT_LOCK_TOKEN_KEY_PREFIX + "*"))
@@ -168,6 +229,36 @@ class ActivityNearbyHttpIntegrationTest {
                 .isEqualTo(theaterGeoBefore);
         assertThat(redisTemplate.opsForZSet().rangeWithScores(LIVEHOUSE_KEY, 0, -1))
                 .isEqualTo(livehouseGeoBefore);
+    }
+
+    private JsonNode nearbyWithToken(String token) throws Exception {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setBearerAuth(token);
+        ResponseEntity<String> response = restTemplate.exchange(
+                "/api/activities/nearby?city=" + TEST_CITY
+                        + "&x=121.47&y=31.23&distance=5000&page=1&pageSize=20",
+                HttpMethod.GET, new HttpEntity<>(headers), String.class);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        return objectMapper.readTree(response.getBody()).path("data");
+    }
+
+    private Long insertUser(String nickName) {
+        User user = new User();
+        user.setPhone(String.format("137%08d", Math.floorMod(System.nanoTime(), 100_000_000L)));
+        user.setNickName(nickName);
+        user.setGender(0);
+        user.setCity(TEST_CITY);
+        assertThat(userMapper.insert(user)).isEqualTo(1);
+        userIds.add(user.getId());
+        return user.getId();
+    }
+
+    private String createLoginToken(Long userId) {
+        String token = UUID.randomUUID().toString().replace("-", "");
+        redisTemplate.opsForValue().set(RedisConstants.LOGIN_TOKEN_KEY + token,
+                String.valueOf(userId), RedisConstants.LOGIN_TOKEN_TTL);
+        loginTokens.add(token);
+        return token;
     }
 
     private Activity insertActivity(String title, String type, int status) {

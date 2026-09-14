@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.23（阶段 12 Step 12.3 Activity 普通列表与详情收藏状态冻结版）
+- 版本：v0.24（阶段 12 Step 12.4 Activity Nearby 收藏状态冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -116,6 +116,8 @@ Step 10.1 冻结、Step 10.2 已实现以下公开只读查询契约：
 3. `GET /api/activities/{id}/showtimes`：无需登录。Query 参数为可选 `date=yyyy-MM-dd` 和 `venueId`；非法日期或非正数 venueId 返回 `400 INVALID_PARAM`。只返回活动有效、`biz_type=ACTIVITY`、`biz_id=活动 ID`、`status=1`、`start_time>NOW()`，且 Venue 有效、Hall 属于该 Venue 的场次；有日期时限定当地自然日范围。每项包含 `showtimeId`、`venueId`、`venueName`、`hallId`、`hallName`、`startTime`、`endTime`、`basePrice` 和 `availableSeats`，实现时批量读取 Venue 与 Hall，禁止 N+1。结果按 `start_time ASC, id ASC` 排序，无匹配数据返回 `[]`。
 
 Step 12.3 对前两项普通 Activity 查询做兼容扩展：`ActivityListItemVO` 与 `ActivityDetailVO` 均新增 `collected: Boolean`。匿名访问继续允许并固定返回 `false`；携带有效登录态时，按当前用户、`target_type=ACTIVITY` 和目标 ID 从 `tb_collection` 返回真实状态。列表只对已经完成业务分页的本页 Activity ID 执行一次批量关系查询，详情最多执行一次关系查询；`collected` 不参与 Activity 状态、城市、类型、关键词筛选，不影响 `create_time DESC, id DESC` 排序、分页 `total`、价格或可见性规则。用户私有收藏状态不得写入公共缓存；Nearby、场次及票务响应不在本 Step 增加该字段。
+
+Step 12.4 继续兼容扩展 `GET /api/activities/nearby`，仅在阶段 11 完成 Venue GEO 候选、MySQL 有效性过滤、Activity 去重、最近 Venue/下一场选择、稳定排序和过滤后分页之后，对最终一页 Activity ID 补充 `collected`。匿名请求统一返回 `false` 且不查询收藏表；登录请求只执行一次当前用户 `target_type=ACTIVITY AND target_id IN (...)` 的批量关系查询。收藏状态不参与候选合并、去重、上下文选择、排序或分页，`min(page × pageSize × 5, 200)` 与阶段 11 全部只读边界保持不变。
 
 固定座位活动场次进入 Seat Map 和购票链路前，必须具有至少一个启用物理 Seat，并为全部启用 Seat 建立同场次 ShowtimeSeat；`total_seats` 必须与启用座位数量一致，`available_seats` 仍是由 ShowtimeSeat 状态派生的计数。关联缺失、重复或数量不一致属于 `500 INTERNAL_ERROR`，不能默认补成 AVAILABLE。Step 10.2 已将初始化 Activity 场次补成 Hall 3 下 6 个启用物理 Seat 和 6 条 ShowtimeSeat，并提供可重复执行的 `V10_2__seated_activity_seed.sql`；迁移按现有 ShowtimeSeat 状态重新计算余票，不把已售座位重置为可售。
 
@@ -373,6 +375,15 @@ Step 12.2 已完成并冻结：9 项 Collection Service 单元测试与 6 项真
 4. 数据库 / Redis 行为：只读 `tb_collection`，不新增、删除或更新收藏关系；不修改 Activity、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、`available_seats` 或 GEO，不新增 Redis Key、缓存、表、字段或索引。MOVIE 收藏查询实现及 Nearby 接口保持不变。
 
 Step 12.3 已完成并冻结：Activity Service 14 项、Activity Controller 8 项、真实 MySQL/Redis/随机端口 Activity Collection HTTP 7 项、Collection Service 9 项及 Movie Service 4 项定向测试全部通过，共 42 项；覆盖匿名 false、登录收藏前 false/收藏后 true、列表与详情、用户隔离、列表单次批量关系查询、详情单次关系查询、共享收藏摘要状态及 MOVIE 回归。全量 445 项测试通过，0 failure、0 error、0 skipped；Maven `clean package` 为 `BUILD SUCCESS`。
+
+#### 3.6.4 Step 12.4 Activity Nearby 补充 collected
+
+1. URL：`GET /api/activities/nearby`。Method：`GET`。是否登录：否；可选 Bearer 登录态仅用于补充当前用户收藏状态。`ActivityNearbyVO` 在原字段末尾兼容增加 `collected: Boolean`。
+2. 处理顺序固定为：Venue GEO 候选 → MySQL 有效性过滤 → Activity 去重 → 最近 Venue 选择 → 下一场次选择 → 稳定排序 → 过滤后分页 → 最终页 Activity ID 批量查询收藏关系 → 填充 `collected`。收藏状态绝不参与前七步。
+3. 匿名请求统一填充 `false`，不访问 `tb_collection`；登录请求只对最终一页 ID 执行一次 `user_id + target_type=ACTIVITY + target_id IN (...)` 查询，不逐条查询。空结果不查询收藏表。
+4. 数据库 / Redis 行为：只读既有 Venue GEO 和 MySQL，不新增、删除、刷新或修复 GEO，不写 `tb_collection`、Activity、Venue、Hall、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem 或 `available_seats`，不新增 Redis Key、缓存、表、字段或索引。候选窗口仍为 `min(page × pageSize × 5, 200)`。
+
+Step 12.4 已完成并冻结：阶段 11 DTO、Controller、Service、边界、真实 MySQL/Redis/随机端口 HTTP 与 Activity 主链路扩展定向回归 81 项通过，覆盖返回集合、顺序、过滤后分页、最近 Venue、下一 Showtime、售罄发现、候选窗口、无 N+1 和业务快照不变；新增登录单元测试证明收藏关系只在最终页批量查询一次，真实 HTTP 证明匿名、收藏用户和其他用户除 `collected` 外得到完全相同的 Activity/场馆/场次上下文。全量 446 项测试通过，0 failure、0 error、0 skipped；Maven `clean package` 为 `BUILD SUCCESS`。
 
 ### 3.7 场馆
 

@@ -188,9 +188,14 @@ public class ActivityServiceImpl implements ActivityService {
             return Collections.emptyList();
         }
         int toIndex = (int) Math.min(from + query.getPageSize(), sorted.size());
-        return sorted.subList((int) from, toIndex).stream()
+        List<ActivityNearbyVO> result = sorted.subList((int) from, toIndex).stream()
                 .map(this::toNearbyVO)
                 .collect(Collectors.toList());
+        Set<Long> collectedIds = findCollectedIds(result.stream()
+                .map(ActivityNearbyVO::getId)
+                .collect(Collectors.toList()));
+        result.forEach(item -> item.setCollected(collectedIds.contains(item.getId())));
+        return result;
     }
 
     @Override
@@ -467,13 +472,19 @@ public class ActivityServiceImpl implements ActivityService {
     }
 
     private Set<Long> findCollectedActivityIds(List<Activity> activities) {
-        Long userId = UserHolder.getUserId();
-        if (userId == null || activities.isEmpty()) {
+        if (activities.isEmpty()) {
             return Collections.emptySet();
         }
-        List<Long> activityIds = activities.stream()
+        return findCollectedIds(activities.stream()
                 .map(Activity::getId)
-                .collect(Collectors.toList());
+                .collect(Collectors.toList()));
+    }
+
+    private Set<Long> findCollectedIds(List<Long> activityIds) {
+        Long userId = UserHolder.getUserId();
+        if (userId == null || activityIds.isEmpty()) {
+            return Collections.emptySet();
+        }
         return collectionMapper.selectList(new LambdaQueryWrapper<Collection>()
                         .eq(Collection::getUserId, userId)
                         .eq(Collection::getTargetType, ACTIVITY_COLLECTION_TYPE)

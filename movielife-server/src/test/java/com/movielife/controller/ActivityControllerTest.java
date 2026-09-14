@@ -72,6 +72,7 @@ class ActivityControllerTest {
         nearby.setNearestVenueId(2L);
         nearby.setNextShowtimeId(3L);
         nearby.setDistance(125.5D);
+        nearby.setCollected(false);
         when(activityService.queryNearbyActivities(any(ActivityNearbyQueryDTO.class)))
                 .thenReturn(Collections.singletonList(nearby));
 
@@ -83,7 +84,8 @@ class ActivityControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data[0].id").value(1))
                 .andExpect(jsonPath("$.data[0].nearestVenueId").value(2))
-                .andExpect(jsonPath("$.data[0].nextShowtimeId").value(3));
+                .andExpect(jsonPath("$.data[0].nextShowtimeId").value(3))
+                .andExpect(jsonPath("$.data[0].collected").value(false));
     }
 
     @Test

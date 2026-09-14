@@ -218,6 +218,8 @@ class ActivityServiceImplTest {
         assertThat(result.get(0).getNextShowtimeId()).isEqualTo(102L);
         assertThat(result.get(1).getNearestVenueId()).isEqualTo(20L);
         assertThat(result.get(1).getNextShowtimeId()).isEqualTo(201L);
+        assertThat(result).extracting(ActivityNearbyVO::getCollected)
+                .containsExactly(false, false);
         verify(venueMapper).selectBatchIds(any());
         verify(showtimeMapper).selectFutureActivityShowtimesByVenueIds(any());
         verify(activityMapper).selectBatchIds(any());
@@ -225,6 +227,42 @@ class ActivityServiceImplTest {
         verify(activityMapper, never()).selectById(any());
         verify(venueMapper, never()).selectById(any());
         verify(hallMapper, never()).selectById(any());
+        verify(collectionMapper, never()).selectList(any());
+    }
+
+    @Test
+    void loggedNearbyShouldBatchCollectionsForFinalPageWithoutChangingDiscovery() {
+        com.movielife.dto.UserDTO user = new com.movielife.dto.UserDTO();
+        user.setId(7L);
+        UserHolder.saveUser(user);
+        ActivityNearbyQueryDTO query = nearbyQuery();
+        query.setVenueType(VenueType.CINEMA);
+        query.setPageSize(1);
+        when(geoOperations.radius(eq("venue:geo:上海:CINEMA"), any(Circle.class), any()))
+                .thenReturn(geoResults(geoResult("10", 100D), geoResult("20", 200D)));
+        when(venueMapper.selectBatchIds(any())).thenReturn(Arrays.asList(
+                nearbyVenue(10L, "cinema", "最近影院"),
+                nearbyVenue(20L, "cinema", "较远影院")));
+        when(showtimeMapper.selectFutureActivityShowtimesByVenueIds(any())).thenReturn(Arrays.asList(
+                nearbyShowtime(101L, 1L, 10L, 101L, 2),
+                nearbyShowtime(201L, 2L, 20L, 201L, 1)));
+        when(activityMapper.selectBatchIds(any())).thenReturn(Arrays.asList(
+                activity(1L, 1), activity(2L, 1)));
+        when(hallMapper.selectBatchIds(any())).thenReturn(Arrays.asList(
+                hall(101L, 10L, "最近厅"), hall(201L, 20L, "较远厅")));
+        Collection relation = new Collection();
+        relation.setUserId(7L);
+        relation.setTargetType("ACTIVITY");
+        relation.setTargetId(1L);
+        when(collectionMapper.selectList(any())).thenReturn(Collections.singletonList(relation));
+        List<ActivityNearbyVO> result = service.queryNearbyActivities(query);
+
+        assertThat(result).hasSize(1);
+        assertThat(result.get(0).getId()).isEqualTo(1L);
+        assertThat(result.get(0).getNearestVenueId()).isEqualTo(10L);
+        assertThat(result.get(0).getNextShowtimeId()).isEqualTo(101L);
+        assertThat(result.get(0).getCollected()).isTrue();
+        verify(collectionMapper).selectList(any());
     }
 
     @Test
