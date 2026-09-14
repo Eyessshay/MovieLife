@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.20（阶段 11 Activity Nearby 完整链路冻结版）
+- 版本：v0.21（阶段 12 Step 12.1 Activity 收藏写路径与状态检查冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -339,9 +339,19 @@ GET    /api/collections/check                      # 查询指定目标是否已
        &targetId=1001
 ```
 
-收藏统一使用 `targetType + targetId`。阶段 4 已支持 `MOVIE`、`POST`、`REVIEW`，`ACTIVITY` 在活动模块落地后接入。创建和删除接口均为幂等操作，数据库唯一索引作为并发兜底。
+收藏统一使用 `targetType + targetId`。阶段 4 已支持 `MOVIE`、`POST`、`REVIEW`；阶段 12 Step 12.1 在既有通用接口上增加 `ACTIVITY`，不新增 Activity 专用收藏路径。创建和删除接口均为幂等操作，数据库唯一索引作为并发兜底。
 
 电影详情和活动详情的 VO 优先直接返回当前用户的附加状态，例如 `collected`、`liked` 等，减少详情页额外请求。`GET /api/collections/check` 保留为通用兜底接口，适用于批量预检查、非详情页场景或新目标类型接入。
+
+#### 3.6.1 Step 12.1 Activity 收藏写路径与状态检查
+
+1. URL：`PUT /api/collections/ACTIVITY/{activityId}`。Method：`PUT`。是否登录：是。Path 参数 `activityId` 必须为正整数；无 Request DTO，成功响应 `data=null`。Service 将 `targetType` 去除首尾空白并转为大写，严格允许 `MOVIE/POST/REVIEW/ACTIVITY`；Activity 必须物理存在且 `status=1`，不存在、草稿或下线统一返回 `404 COLLECTION_TARGET_NOT_FOUND`。相同用户重复收藏幂等成功；并发请求由 `uk_collection_user_target(user_id, target_type, target_id)` 收敛，命中重复键视为另一个等价 PUT 已完成，不重复创建关系。
+2. URL：`DELETE /api/collections/ACTIVITY/{activityId}`。Method：`DELETE`。是否登录：是。Path 参数 `activityId` 必须为正整数；无 Request DTO，成功响应 `data=null`。取消收藏只按当前用户、规范化目标类型和目标 ID 删除关系，不要求 Activity 当前仍存在或在线；无关系、重复取消、目标后来下线或删除均幂等成功。
+3. URL：`GET /api/collections/check?targetType=ACTIVITY&targetId={activityId}`。Method：`GET`。是否登录：是。Query 参数 `targetType` 必填，`targetId` 必须为正整数；Request DTO 沿用 `CollectionCheckDTO`，Response VO 沿用 `CollectionCheckVO { collected }`。该接口只检查当前用户的 MySQL 收藏关系，不校验 Activity 当前可见性；无关系返回 `collected=false`。
+4. 业务错误码：未登录返回 `401 UNAUTHORIZED`；目标 ID 非正数返回 `400 INVALID_ID`；未知收藏类型返回 `400 INVALID_COLLECTION_TARGET_TYPE`；新增收藏时 Activity 不存在、草稿或下线返回 `404 COLLECTION_TARGET_NOT_FOUND`。
+5. 数据库 / Redis 行为：收藏关系仍只写 `tb_collection`，不修改 `sql/movielife.sql`，不新增 Redis Key 或缓存，不写 Activity、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、`available_seats` 或 Venue GEO。Step 12.1 不实现 `GET /api/collections?targetType=ACTIVITY`，不向 Activity 列表、详情或 Nearby VO 增加 `collected`。
+
+Step 12.1 已完成并冻结：8 项 Collection Service 单元测试与 5 项真实 MySQL/Redis/随机端口 HTTP 测试通过，覆盖正常、重复、并发收藏，重复取消，关系检查，用户隔离，未登录、非法 ID、非法类型，以及 Activity 不存在、草稿、下线和下线后仍可检查、取消。定向共 13 项通过；全量 439 项测试通过，0 failure、0 error、0 skipped；Maven `clean package` 为 `BUILD SUCCESS`。真实联调确认并发收藏最终只有一条 MySQL 关系，除预期 `tb_collection` 变化外，Activity、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、Venue GEO、`seat:lock:*` 和 `seat:lock:token:*` 均保持不变。
 
 ### 3.7 场馆
 

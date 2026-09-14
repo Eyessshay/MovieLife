@@ -4,12 +4,14 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.movielife.constants.MovieStatus;
 import com.movielife.dto.CollectionQueryDTO;
+import com.movielife.entity.Activity;
 import com.movielife.entity.Collection;
 import com.movielife.entity.Movie;
 import com.movielife.entity.Post;
 import com.movielife.entity.Review;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
+import com.movielife.mapper.ActivityMapper;
 import com.movielife.mapper.CollectionMapper;
 import com.movielife.mapper.MovieMapper;
 import com.movielife.mapper.PostMapper;
@@ -43,11 +45,13 @@ public class CollectionServiceImpl implements CollectionService {
     private static final String MOVIE = "MOVIE";
     private static final String POST = "POST";
     private static final String REVIEW = "REVIEW";
+    private static final String ACTIVITY = "ACTIVITY";
 
     private final CollectionMapper collectionMapper;
     private final MovieMapper movieMapper;
     private final PostMapper postMapper;
     private final ReviewMapper reviewMapper;
+    private final ActivityMapper activityMapper;
     private final JsonListUtils jsonListUtils;
 
     @Override
@@ -81,7 +85,7 @@ public class CollectionServiceImpl implements CollectionService {
     @Override
     public PageVO<CollectionVO> queryCollections(CollectionQueryDTO query) {
         Long userId = requireUserId();
-        String targetType = normalizeType(query.getTargetType());
+        String targetType = normalizeListType(query.getTargetType());
         Page<Collection> page = collectionMapper.selectPage(
                 new Page<>(query.getPage(), query.getPageSize()),
                 new LambdaQueryWrapper<Collection>()
@@ -151,9 +155,14 @@ public class CollectionServiceImpl implements CollectionService {
             exists = movieMapper.selectById(targetId) != null;
         } else if (POST.equals(targetType)) {
             exists = postMapper.selectById(targetId) != null;
-        } else {
+        } else if (REVIEW.equals(targetType)) {
             Review review = reviewMapper.selectById(targetId);
             exists = review != null && review.getStatus() != null && review.getStatus() == 1;
+        } else {
+            Activity activity = activityMapper.selectById(targetId);
+            exists = activity != null
+                    && activity.getStatus() != null
+                    && activity.getStatus() == 1;
         }
         if (!exists) {
             throw new BusinessException(ErrorCode.COLLECTION_TARGET_NOT_FOUND);
@@ -172,7 +181,16 @@ public class CollectionServiceImpl implements CollectionService {
             throw new BusinessException(ErrorCode.INVALID_COLLECTION_TARGET_TYPE);
         }
         String normalized = targetType.trim().toUpperCase(Locale.ROOT);
-        if (!MOVIE.equals(normalized) && !POST.equals(normalized) && !REVIEW.equals(normalized)) {
+        if (!MOVIE.equals(normalized) && !POST.equals(normalized)
+                && !REVIEW.equals(normalized) && !ACTIVITY.equals(normalized)) {
+            throw new BusinessException(ErrorCode.INVALID_COLLECTION_TARGET_TYPE);
+        }
+        return normalized;
+    }
+
+    private String normalizeListType(String targetType) {
+        String normalized = normalizeType(targetType);
+        if (ACTIVITY.equals(normalized)) {
             throw new BusinessException(ErrorCode.INVALID_COLLECTION_TARGET_TYPE);
         }
         return normalized;

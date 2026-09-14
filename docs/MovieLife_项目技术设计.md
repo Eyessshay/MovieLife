@@ -1958,7 +1958,25 @@ Activity Nearby 与完整 Activity 票务定向 56 项通过；真实 MySQL、Re
 
 阶段 11 Activity Nearby 至此正式冻结。阶段成果包含指定 Activity 的附近场馆、附近活动主接口、多 VenueType 有界召回、批量 MySQL 资格过滤、Activity 去重与稳定排序、边界失败关闭、过滤后分页和完整跨阶段真实链路。非固定座位活动票务、Activity 收藏、Venue/Activity Review、Activity 管理端、AI、前端和 GEO 自动同步仍不属于本阶段；下一阶段必须重新明确单一能力范围后再拆分 Step。
 
-## 9. 服务端模块建议
+## 9. 阶段 12 Activity 收藏
+
+### 9.1 Step 12.1：Activity 收藏写路径与状态检查
+
+Step 12.1 只把 `ACTIVITY` 接入阶段 4 已冻结的通用收藏写路径与关系检查，不新增 Activity 专用 Controller、Service 接口、DTO、VO、错误码、数据库表或 Redis Key。公开路径仍为 `PUT /api/collections/{targetType}/{targetId}`、`DELETE /api/collections/{targetType}/{targetId}` 和 `GET /api/collections/check`，且均要求登录；`targetType` 继续统一去除首尾空白并转为大写。
+
+新增 Activity 收藏前必须读取 MySQL `tb_activity`，要求记录物理存在且 `status=1`；不存在、草稿或下线统一返回 `COLLECTION_TARGET_NOT_FOUND`。已存在相同关系时直接成功；并发首次收藏继续依靠 `tb_collection.uk_collection_user_target(user_id, target_type, target_id)` 唯一约束收敛，捕获重复键后按幂等成功处理，不新增额外分布式锁或 Redis 状态。
+
+取消收藏保持既有关系删除语义：只校验登录态、目标类型和正数 ID，然后按用户、类型、目标 ID 删除；Activity 后续下线或物理删除不阻止用户清理已有关系，无关系和重复取消均成功。`GET /api/collections/check` 同样保持阶段 4 的关系检查语义，只判断当前用户对应 MySQL 关系是否存在，不重新校验 Activity 可见性。
+
+本 Step 的自动化与真实联调必须覆盖正常、重复和并发收藏，正常与重复取消，未登录、非法 ID、非法类型，Activity 不存在、草稿、下线及用户隔离。联调前后除预期 `tb_collection` 关系外，Activity、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、`available_seats`、Venue GEO、`seat:lock:*` 和 `seat:lock:token:*` 均保持不变。
+
+Step 12.1 不实现 Activity 收藏列表，不修改 Activity 列表、详情或 Nearby VO，不增加 `collected`，不引入 Review、AI、Activity 管理端、非固定座位票务、Redis Stream、MQ、前端或 GEO 自动同步。
+
+Step 12.1 定向验证由 8 项 Collection Service 单元测试和 5 项真实 MySQL/Redis/随机端口 HTTP 测试组成，共 13 项通过。真实 HTTP 覆盖正常、重复和并发收藏、重复取消、关系检查、用户隔离、未登录、非法 ID、非法类型、Activity 不存在/草稿/下线，以及收藏后下线仍可检查和取消；并发请求由唯一索引收敛为一条关系。联调快照证明除预期 `tb_collection` 关系外，Activity、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、`available_seats`、Venue GEO、`seat:lock:*` 和 `seat:lock:token:*` 均未改变。全量 439 项测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。
+
+Step 12.1 至此正式冻结。下一步只能在明确指定后进入独立 Step 12.2 Activity 收藏列表；不得在本 Step 继续加入 Activity `collected` 字段或其他阶段 12 后续能力。
+
+## 10. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
 
@@ -1978,7 +1996,7 @@ ai         评价总结的异步生成、持久化和读取
 common     统一响应、异常、鉴权、限流、幂等
 ```
 
-## 10. 关键非功能要求
+## 11. 关键非功能要求
 
 - 所有写接口校验当前用户和资源归属。
 - 订单、支付、锁座操作必须支持幂等。
@@ -1993,4 +2011,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.20，阶段 10 固定座位 Activity 票务保持冻结，阶段 11 Activity Nearby 的 Step 11.1～11.5 已完成设计、实现、边界加固、真实跨阶段验收、提交与冻结，阶段 11 已正式完成。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.21，阶段 10 固定座位 Activity 票务与阶段 11 Activity Nearby 保持冻结，阶段 12 Step 12.1 Activity 收藏写路径与状态检查已完成并冻结，尚未实现收藏列表或 Activity `collected` 字段。
