@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.21（阶段 12 Step 12.1 Activity 收藏写路径与状态检查冻结版）
+- 版本：v0.22（阶段 12 Step 12.2 Activity 收藏列表冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -352,6 +352,16 @@ GET    /api/collections/check                      # 查询指定目标是否已
 5. 数据库 / Redis 行为：收藏关系仍只写 `tb_collection`，不修改 `sql/movielife.sql`，不新增 Redis Key 或缓存，不写 Activity、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、`available_seats` 或 Venue GEO。Step 12.1 不实现 `GET /api/collections?targetType=ACTIVITY`，不向 Activity 列表、详情或 Nearby VO 增加 `collected`。
 
 Step 12.1 已完成并冻结：8 项 Collection Service 单元测试与 5 项真实 MySQL/Redis/随机端口 HTTP 测试通过，覆盖正常、重复、并发收藏，重复取消，关系检查，用户隔离，未登录、非法 ID、非法类型，以及 Activity 不存在、草稿、下线和下线后仍可检查、取消。定向共 13 项通过；全量 439 项测试通过，0 failure、0 error、0 skipped；Maven `clean package` 为 `BUILD SUCCESS`。真实联调确认并发收藏最终只有一条 MySQL 关系，除预期 `tb_collection` 变化外，Activity、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、Venue GEO、`seat:lock:*` 和 `seat:lock:token:*` 均保持不变。
+
+#### 3.6.2 Step 12.2 Activity 收藏列表
+
+1. URL：`GET /api/collections?targetType=ACTIVITY&page={page}&pageSize={pageSize}`。Method：`GET`。是否登录：是。Query 参数沿用 `CollectionQueryDTO`：`targetType` 必填并按既有规则规范化，`page` 默认 1 且必须大于等于 1，`pageSize` 默认 20 且范围为 1～100。Response 沿用 `PageVO<CollectionVO>`，每项为 `CollectionVO { targetType, targetId, target, collectTime }`，其中 `target` 使用既有 `ActivityListItemVO { id, title, coverUrl, type, city, priceMin, priceMax }`。
+2. 只返回当前登录用户 `target_type=ACTIVITY` 且关联 `tb_activity.status=1` 的收藏。Activity 物理缺失、草稿或下线时不展示，但不删除、修改或修复原 `tb_collection` 关系。`total` 是完成有效 Activity 约束后的可展示关系总数，不是原始收藏关系数。
+3. 分页在 MySQL 有效目标约束之后执行，按 `tb_collection.create_time DESC, tb_collection.id DESC` 稳定排序；因此失效关系不会制造空洞页，相同收藏时间由收藏记录 ID 确定顺序。Service 对当前页 Activity ID 只执行一次批量读取，并按收藏关系页顺序组装，禁止逐条查询。
+4. 业务错误码：未登录返回 `401 UNAUTHORIZED`；未知收藏类型返回 `400 INVALID_COLLECTION_TARGET_TYPE`；非法分页参数沿用 `400 INVALID_PARAM`。无有效 Activity 收藏时返回 `list=[]`、`total=0`。
+5. 数据库 / Redis 行为：接口只读 MySQL，不清理 `tb_collection`，不写 Activity、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem 或 `available_seats`，不读取或写入 Venue GEO、`seat:lock:*`、`seat:lock:token:*`，也不新增 Redis Key、缓存、表、字段或索引。MOVIE/POST/REVIEW 收藏列表继续走阶段 4 原有路径；本 Step 不向 Activity 列表、详情或 Nearby VO 增加 `collected`。
+
+Step 12.2 已完成并冻结：9 项 Collection Service 单元测试与 6 项真实 MySQL/Redis/随机端口 HTTP 测试通过，定向共 15 项，覆盖有效目标约束分页、相同时间下 ID 倒序、第二页、失效目标过滤、过滤后 `total`、用户隔离、登录校验、一次批量 Activity 读取、零关系清理和其他收藏类型路径隔离。全量 441 项测试通过，0 failure、0 error、0 skipped；Maven `clean package` 为 `BUILD SUCCESS`。真实联调确认读取前后全部测试收藏关系、Activity 和 Redis Key 集合不变。
 
 ### 3.7 场馆
 

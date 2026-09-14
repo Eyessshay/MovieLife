@@ -21,6 +21,7 @@ import com.movielife.utils.JsonListUtils;
 import com.movielife.utils.UserHolder;
 import com.movielife.vo.CollectionCheckVO;
 import com.movielife.vo.CollectionVO;
+import com.movielife.vo.ActivityListItemVO;
 import com.movielife.vo.MovieListItemVO;
 import com.movielife.vo.PageVO;
 import com.movielife.vo.PostSummaryVO;
@@ -85,15 +86,21 @@ public class CollectionServiceImpl implements CollectionService {
     @Override
     public PageVO<CollectionVO> queryCollections(CollectionQueryDTO query) {
         Long userId = requireUserId();
-        String targetType = normalizeListType(query.getTargetType());
-        Page<Collection> page = collectionMapper.selectPage(
-                new Page<>(query.getPage(), query.getPageSize()),
-                new LambdaQueryWrapper<Collection>()
-                        .eq(Collection::getUserId, userId)
-                        .eq(Collection::getTargetType, targetType)
-                        .orderByDesc(Collection::getCreateTime)
-                        .orderByDesc(Collection::getId)
-        );
+        String targetType = normalizeType(query.getTargetType());
+        Page<Collection> page;
+        if (ACTIVITY.equals(targetType)) {
+            page = collectionMapper.selectVisibleActivityPage(
+                    new Page<>(query.getPage(), query.getPageSize()), userId);
+        } else {
+            page = collectionMapper.selectPage(
+                    new Page<>(query.getPage(), query.getPageSize()),
+                    new LambdaQueryWrapper<Collection>()
+                            .eq(Collection::getUserId, userId)
+                            .eq(Collection::getTargetType, targetType)
+                            .orderByDesc(Collection::getCreateTime)
+                            .orderByDesc(Collection::getId)
+            );
+        }
         Map<Long, Object> targets = findTargets(targetType, page.getRecords());
         List<CollectionVO> items = page.getRecords().stream()
                 .filter(item -> targets.containsKey(item.getTargetId()))
@@ -136,7 +143,7 @@ public class CollectionServiceImpl implements CollectionService {
                 result.put(post.getId(), new PostSummaryVO(post.getId(), post.getTitle(), post.getContent(),
                         jsonListUtils.readStrings(post.getImages()), post.getLiked(), post.getComments()));
             }
-        } else {
+        } else if (REVIEW.equals(targetType)) {
             Map<Long, Review> reviews = reviewMapper.selectBatchIds(ids).stream()
                     .filter(review -> review.getStatus() != null && review.getStatus() == 1)
                     .collect(Collectors.toMap(Review::getId, Function.identity()));
@@ -144,6 +151,21 @@ public class CollectionServiceImpl implements CollectionService {
                 result.put(review.getId(), new ReviewSummaryVO(review.getId(), review.getScore(),
                         review.getContent(), jsonListUtils.readStrings(review.getImages()),
                         review.getLikeCount()));
+            }
+        } else {
+            for (Activity activity : activityMapper.selectBatchIds(ids)) {
+                if (activity.getStatus() == null || activity.getStatus() != 1) {
+                    continue;
+                }
+                ActivityListItemVO target = new ActivityListItemVO();
+                target.setId(activity.getId());
+                target.setTitle(activity.getTitle());
+                target.setCoverUrl(activity.getCoverUrl());
+                target.setType(activity.getType());
+                target.setCity(activity.getCity());
+                target.setPriceMin(activity.getPriceMin());
+                target.setPriceMax(activity.getPriceMax());
+                result.put(activity.getId(), target);
             }
         }
         return result;
@@ -183,14 +205,6 @@ public class CollectionServiceImpl implements CollectionService {
         String normalized = targetType.trim().toUpperCase(Locale.ROOT);
         if (!MOVIE.equals(normalized) && !POST.equals(normalized)
                 && !REVIEW.equals(normalized) && !ACTIVITY.equals(normalized)) {
-            throw new BusinessException(ErrorCode.INVALID_COLLECTION_TARGET_TYPE);
-        }
-        return normalized;
-    }
-
-    private String normalizeListType(String targetType) {
-        String normalized = normalizeType(targetType);
-        if (ACTIVITY.equals(normalized)) {
             throw new BusinessException(ErrorCode.INVALID_COLLECTION_TARGET_TYPE);
         }
         return normalized;

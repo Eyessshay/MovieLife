@@ -2,6 +2,7 @@ package com.movielife.service;
 
 import com.movielife.dto.CollectionQueryDTO;
 import com.movielife.entity.Activity;
+import com.movielife.entity.Collection;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.mapper.ActivityMapper;
@@ -20,6 +21,12 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.dao.DuplicateKeyException;
 
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.util.Arrays;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -27,6 +34,7 @@ import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -127,14 +135,72 @@ class CollectionServiceImplTest {
     }
 
     @Test
-    void activityCollectionListShouldRemainOutsideStep121() {
+    void activityCollectionListShouldUseVisiblePageAndBatchLoadTargets() {
         CollectionQueryDTO query = new CollectionQueryDTO();
         query.setTargetType("ACTIVITY");
+        query.setPage(2);
+        query.setPageSize(2);
+        Collection first = collection(11L, 101L, LocalDateTime.of(2026, 9, 14, 12, 0));
+        Collection second = collection(10L, 100L, LocalDateTime.of(2026, 9, 14, 12, 0));
+        Page<Collection> page = new Page<>(2, 2, 5);
+        page.setRecords(Arrays.asList(first, second));
+        when(collectionMapper.selectVisibleActivityPage(any(), org.mockito.ArgumentMatchers.eq(1L)))
+                .thenReturn(page);
+        Activity activity101 = activity(101L, "活动101");
+        Activity activity100 = activity(100L, "活动100");
+        when(activityMapper.selectBatchIds(any())).thenReturn(Arrays.asList(activity100, activity101));
 
-        assertThatThrownBy(() -> service.queryCollections(query))
-                .isInstanceOf(BusinessException.class)
-                .extracting(error -> ((BusinessException) error).getErrorCode())
-                .isEqualTo(ErrorCode.INVALID_COLLECTION_TARGET_TYPE);
+        com.movielife.vo.PageVO<com.movielife.vo.CollectionVO> result =
+                service.queryCollections(query);
+
+        assertThat(result.getTotal()).isEqualTo(5L);
+        assertThat(result.getPage()).isEqualTo(2);
+        assertThat(result.getPageSize()).isEqualTo(2);
+        assertThat(result.getList()).extracting(com.movielife.vo.CollectionVO::getTargetId)
+                .containsExactly(101L, 100L);
+        assertThat(result.getList().get(0).getTarget())
+                .isInstanceOf(com.movielife.vo.ActivityListItemVO.class);
+        assertThat(((com.movielife.vo.ActivityListItemVO) result.getList().get(0).getTarget())
+                .getTitle()).isEqualTo("活动101");
+        verify(collectionMapper).selectVisibleActivityPage(any(), org.mockito.ArgumentMatchers.eq(1L));
+        verify(activityMapper, times(1)).selectBatchIds(any());
+        verify(collectionMapper, never()).selectPage(any(), any());
+    }
+
+    @Test
+    void movieCollectionListShouldKeepGenericPagePath() {
+        CollectionQueryDTO query = new CollectionQueryDTO();
+        query.setTargetType("MOVIE");
+        Page<Collection> page = new Page<>(1, 20, 0);
+        page.setRecords(java.util.Collections.emptyList());
+        when(collectionMapper.selectPage(any(), any())).thenReturn(page);
+
+        service.queryCollections(query);
+
+        verify(collectionMapper).selectPage(any(), any());
+        verify(collectionMapper, never()).selectVisibleActivityPage(any(), any());
+        verifyNoInteractions(activityMapper);
+    }
+
+    private Collection collection(Long id, Long targetId, LocalDateTime createTime) {
+        Collection collection = new Collection();
+        collection.setId(id);
+        collection.setUserId(1L);
+        collection.setTargetType("ACTIVITY");
+        collection.setTargetId(targetId);
+        collection.setCreateTime(createTime);
+        return collection;
+    }
+
+    private Activity activity(Long id, String title) {
+        Activity activity = activeActivity(id);
+        activity.setTitle(title);
+        activity.setCoverUrl("https://example.com/activity.jpg");
+        activity.setType("drama");
+        activity.setCity("上海");
+        activity.setPriceMin(new BigDecimal("99.00"));
+        activity.setPriceMax(new BigDecimal("199.00"));
+        return activity;
     }
 
     private void assertActivityTargetNotFound(Long id) {

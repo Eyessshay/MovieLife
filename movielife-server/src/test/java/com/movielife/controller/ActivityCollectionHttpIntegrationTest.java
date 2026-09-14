@@ -32,6 +32,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
 import java.math.BigDecimal;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -195,10 +196,61 @@ class ActivityCollectionHttpIntegrationTest {
     }
 
     @Test
-    void activityCollectionListShouldRemainOutsideStep121() throws Exception {
+    void activityCollectionListShouldFilterBeforeStablePagingAndNotDeleteRelations()
+            throws Exception {
+        Long secondVisibleId = insertActivity("Step122有效活动B", 1);
+        Long thirdVisibleId = insertActivity("Step122有效活动C", 1);
+        LocalDateTime collectedAt = LocalDateTime.of(2026, 9, 14, 12, 22, 0);
+
+        insertCollection(ownerId, activeActivityId, collectedAt);
+        insertCollection(ownerId, draftActivityId, collectedAt);
+        insertCollection(ownerId, secondVisibleId, collectedAt);
+        insertCollection(ownerId, Long.MAX_VALUE, collectedAt);
+        insertCollection(ownerId, offlineActivityId, collectedAt);
+        insertCollection(ownerId, thirdVisibleId, collectedAt);
+        insertCollection(otherUserId, thirdVisibleId, collectedAt.plusSeconds(1));
+
+        Long relationCountBefore = collectionMapper.selectCount(new LambdaQueryWrapper<Collection>()
+                .in(Collection::getUserId, userIds)
+                .eq(Collection::getTargetType, "ACTIVITY"));
+        List<Activity> activitiesBefore = activityMapper.selectBatchIds(activityIds);
+        Set<String> redisKeysBefore = redisTemplate.keys("*");
+
+        JsonNode firstPage = assertActivityList(ownerToken, 1, 2, 3L);
+        assertThat(firstPage.path("list")).hasSize(2);
+        assertThat(firstPage.path("list").get(0).path("targetId").asLong())
+                .isEqualTo(thirdVisibleId);
+        assertThat(firstPage.path("list").get(1).path("targetId").asLong())
+                .isEqualTo(secondVisibleId);
+        assertThat(firstPage.path("list").get(0).path("target").path("title").asText())
+                .isEqualTo("Step122有效活动C");
+        assertThat(firstPage.path("list").get(0).path("target").path("priceMin").decimalValue())
+                .isEqualByComparingTo("99.00");
+        assertThat(firstPage.path("list").get(0).path("collectTime").asText()).isNotBlank();
+
+        JsonNode secondPage = assertActivityList(ownerToken, 2, 2, 3L);
+        assertThat(secondPage.path("list")).hasSize(1);
+        assertThat(secondPage.path("list").get(0).path("targetId").asLong())
+                .isEqualTo(activeActivityId);
+
+        JsonNode otherUserPage = assertActivityList(otherUserToken, 1, 20, 1L);
+        assertThat(otherUserPage.path("list")).hasSize(1);
+        assertThat(otherUserPage.path("list").get(0).path("targetId").asLong())
+                .isEqualTo(thirdVisibleId);
+
+        assertThat(collectionMapper.selectCount(new LambdaQueryWrapper<Collection>()
+                .in(Collection::getUserId, userIds)
+                .eq(Collection::getTargetType, "ACTIVITY"))).isEqualTo(relationCountBefore);
+        assertThat(activityMapper.selectBatchIds(activityIds)).containsExactlyInAnyOrderElementsOf(
+                activitiesBefore);
+        assertThat(redisTemplate.keys("*")).isEqualTo(redisKeysBefore);
+    }
+
+    @Test
+    void activityCollectionListShouldRequireLogin() throws Exception {
         assertError(exchange(HttpMethod.GET,
-                        "/api/collections?targetType=ACTIVITY&page=1&pageSize=20", ownerToken),
-                HttpStatus.BAD_REQUEST, "INVALID_COLLECTION_TARGET_TYPE");
+                        "/api/collections?targetType=ACTIVITY&page=1&pageSize=20", null),
+                HttpStatus.UNAUTHORIZED, "UNAUTHORIZED");
     }
 
     private ResponseEntity<String> exchange(HttpMethod method, String path, String token) {
@@ -239,6 +291,31 @@ class ActivityCollectionHttpIntegrationTest {
                 .eq(Collection::getUserId, userId)
                 .eq(Collection::getTargetType, "ACTIVITY")
                 .eq(Collection::getTargetId, activityId));
+    }
+
+    private JsonNode assertActivityList(String token, int page, int pageSize, long total)
+            throws Exception {
+        ResponseEntity<String> response = exchange(HttpMethod.GET,
+                "/api/collections?targetType=ACTIVITY&page=" + page + "&pageSize=" + pageSize,
+                token);
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        JsonNode body = objectMapper.readTree(response.getBody());
+        assertThat(body.path("code").asText()).isEqualTo("OK");
+        JsonNode data = body.path("data");
+        assertThat(data.path("total").asLong()).isEqualTo(total);
+        assertThat(data.path("page").asInt()).isEqualTo(page);
+        assertThat(data.path("pageSize").asInt()).isEqualTo(pageSize);
+        return data;
+    }
+
+    private Long insertCollection(Long userId, Long activityId, LocalDateTime createTime) {
+        Collection collection = new Collection();
+        collection.setUserId(userId);
+        collection.setTargetType("ACTIVITY");
+        collection.setTargetId(activityId);
+        collection.setCreateTime(createTime);
+        assertThat(collectionMapper.insert(collection)).isEqualTo(1);
+        return collection.getId();
     }
 
     private Long insertUser(String nickName) {

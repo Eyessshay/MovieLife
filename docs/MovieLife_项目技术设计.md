@@ -1976,6 +1976,20 @@ Step 12.1 定向验证由 8 项 Collection Service 单元测试和 5 项真实 M
 
 Step 12.1 至此正式冻结。下一步只能在明确指定后进入独立 Step 12.2 Activity 收藏列表；不得在本 Step 继续加入 Activity `collected` 字段或其他阶段 12 后续能力。
 
+### 9.2 Step 12.2：Activity 收藏列表
+
+Step 12.2 只开放既有通用列表接口 `GET /api/collections?targetType=ACTIVITY`，继续复用 `CollectionQueryDTO`、`PageVO<CollectionVO>` 和 `ActivityListItemVO`，不增加 Activity 专用 Controller、DTO、VO、表、字段或 Redis Key。接口必须登录，只能读取当前用户关系，并按收藏时间倒序、收藏记录 ID 倒序稳定分页。
+
+ACTIVITY 不沿用阶段 4 的“关系先分页、目标后批量读取并过滤”路径。`CollectionMapper.selectVisibleActivityPage` 在 MySQL 中通过 `tb_collection INNER JOIN tb_activity`，先限定当前用户、`target_type='ACTIVITY'` 和 `activity.status=1`，再进行 count、排序与分页。因此物理缺失、草稿和下线目标不会占据页内名额，分页 `total` 表示可展示 Activity 收藏总数，第二页也不会因为事后过滤出现空洞。
+
+Service 从有效关系页提取本页全部 Activity ID，只调用一次 `ActivityMapper.selectBatchIds`，转换为既有活动摘要并按收藏关系页顺序恢复结果；循环内不执行 Mapper 查询。第二次状态过滤只用于防御关系分页与批量读取之间目标状态变化，不承担正常分页过滤。MOVIE、POST、REVIEW 继续走原 `selectPage` 和各自批量组装分支，不改变阶段 4 行为。
+
+列表读取不会删除失效 `tb_collection`，也不会写 Activity、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、`available_seats` 或任何 Redis/GEO 状态。本 Step 不增加 Activity 列表、详情或 Nearby 的 `collected` 字段，不实现阶段 12 的后续用户态注入能力。
+
+Step 12.2 定向验证由 9 项 Collection Service 单元测试和 6 项真实 MySQL/Redis/随机端口 HTTP 测试组成，共 15 项通过。单元测试证明 ACTIVITY 使用专用有效关系分页且每页只批量读取一次目标，MOVIE 保持原通用分页路径；真实 HTTP 覆盖相同收藏时间的 ID 稳定倒序、第一页与第二页、物理缺失/草稿/下线过滤、过滤后 `total`、用户隔离、未登录，以及查询前后收藏关系、Activity 与 Redis Key 集合不变。全量 441 项测试通过，0 failure、0 error、0 skipped，Maven `clean package` 为 `BUILD SUCCESS`。
+
+Step 12.2 至此正式冻结。后续只有在明确指定新 Step 后，才能向 Activity 列表、详情或 Nearby 增加当前用户 `collected` 状态；不得在本 Step 扩入评价、管理端、AI 或票务能力。
+
 ## 10. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -2011,4 +2025,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.21，阶段 10 固定座位 Activity 票务与阶段 11 Activity Nearby 保持冻结，阶段 12 Step 12.1 Activity 收藏写路径与状态检查已完成并冻结，尚未实现收藏列表或 Activity `collected` 字段。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.22，阶段 10 固定座位 Activity 票务与阶段 11 Activity Nearby 保持冻结，阶段 12 Step 12.1 收藏写路径/关系检查及 Step 12.2 Activity 收藏列表均已完成并冻结，尚未向 Activity 列表、详情或 Nearby 增加 `collected` 字段。
