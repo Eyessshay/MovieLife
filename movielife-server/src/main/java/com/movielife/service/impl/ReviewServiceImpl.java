@@ -9,11 +9,13 @@ import com.movielife.constants.RedisConstants;
 import com.movielife.dto.CreateReviewDTO;
 import com.movielife.dto.ReviewQueryDTO;
 import com.movielife.dto.UpdateReviewDTO;
+import com.movielife.entity.Activity;
 import com.movielife.entity.Movie;
 import com.movielife.entity.Review;
 import com.movielife.entity.User;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
+import com.movielife.mapper.ActivityMapper;
 import com.movielife.mapper.MovieMapper;
 import com.movielife.mapper.ReviewMapper;
 import com.movielife.mapper.UserMapper;
@@ -48,6 +50,8 @@ import java.util.stream.Collectors;
 public class ReviewServiceImpl implements ReviewService {
 
     private static final String MOVIE = "MOVIE";
+    private static final String ACTIVITY = "ACTIVITY";
+    private static final int ACTIVITY_ACTIVE = 1;
     private static final int REVIEW_ACTIVE = 1;
     private static final BigDecimal MIN_SCORE = new BigDecimal("1.0");
     private static final BigDecimal MAX_SCORE = new BigDecimal("5.0");
@@ -65,6 +69,7 @@ public class ReviewServiceImpl implements ReviewService {
 
     private final ReviewMapper reviewMapper;
     private final MovieMapper movieMapper;
+    private final ActivityMapper activityMapper;
     private final UserMapper userMapper;
     private final StringRedisTemplate stringRedisTemplate;
     private final ObjectMapper objectMapper;
@@ -73,17 +78,21 @@ public class ReviewServiceImpl implements ReviewService {
     @Transactional(rollbackFor = Exception.class)
     public ReviewVO createReview(CreateReviewDTO request) {
         Long userId = requireUserId();
-        validateTarget(request.getTargetType(), request.getTargetId());
+        validateWriteTarget(request.getTargetType(), request.getTargetId());
         validateScore(request.getScore());
+        validateCreateTargetExists(request.getTargetType(), request.getTargetId());
         String images = writeImages(request.getImages());
 
-        Review existing = reviewMapper.selectByUserAndTargetForUpdate(userId, MOVIE, request.getTargetId());
+        Review existing = reviewMapper.selectByUserAndTargetForUpdate(
+                userId, request.getTargetType(), request.getTargetId()
+        );
         Review review;
+        boolean restored = false;
         LocalDateTime now = LocalDateTime.now();
         if (existing == null) {
             review = new Review();
             review.setUserId(userId);
-            review.setTargetType(MOVIE);
+            review.setTargetType(request.getTargetType());
             review.setTargetId(request.getTargetId());
             review.setScore(request.getScore());
             review.setContent(request.getContent().trim());
@@ -94,7 +103,9 @@ public class ReviewServiceImpl implements ReviewService {
             review.setCreateTime(now);
             review.setUpdateTime(now);
             try {
-                reviewMapper.insert(review);
+                if (reviewMapper.insert(review) != 1) {
+                    throw new BusinessException(ErrorCode.INTERNAL_ERROR);
+                }
             } catch (DuplicateKeyException exception) {
                 throw new BusinessException(ErrorCode.DUPLICATE_REVIEW);
             }
@@ -113,10 +124,12 @@ public class ReviewServiceImpl implements ReviewService {
             existing.setCreateTime(now);
             existing.setUpdateTime(now);
             review = existing;
+            restored = true;
         }
 
-        ensureAggregateUpdated(movieMapper.addReviewScore(request.getTargetId(), request.getScore()));
-        invalidateAfterCommit(request.getTargetId(), review.getId(), true);
+        addReviewScore(request.getTargetType(), request.getTargetId(), request.getScore());
+        invalidateAfterCommit(request.getTargetType(), request.getTargetId(), review.getId(),
+                MOVIE.equals(request.getTargetType()) || restored);
         return toReviewVO(review, currentUserMap(userId), false);
     }
 
@@ -161,6 +174,7 @@ public class ReviewServiceImpl implements ReviewService {
         Review review = reviewMapper.selectByIdForUpdate(id);
         requireActiveReview(review);
         requireOwner(review, userId);
+        validateExistingReviewTarget(review);
 
         BigDecimal oldScore = review.getScore();
         String images = writeImages(request.getImages());
@@ -169,15 +183,13 @@ public class ReviewServiceImpl implements ReviewService {
         if (updated != 1) {
             throw new BusinessException(ErrorCode.REVIEW_NOT_FOUND);
         }
-        ensureAggregateUpdated(movieMapper.replaceReviewScore(
-                review.getTargetId(), oldScore, request.getScore()
-        ));
+        replaceReviewScore(review, oldScore, request.getScore());
 
         review.setScore(request.getScore());
         review.setContent(request.getContent().trim());
         review.setImages(images);
         review.setUpdateTime(now);
-        invalidateAfterCommit(review.getTargetId(), review.getId(), false);
+        invalidateAfterCommit(review.getTargetType(), review.getTargetId(), review.getId(), false);
         return toReviewVO(review, currentUserMap(userId), isLiked(id));
     }
 
@@ -197,12 +209,13 @@ public class ReviewServiceImpl implements ReviewService {
         if (review.getStatus() != REVIEW_ACTIVE) {
             throw new BusinessException(ErrorCode.REVIEW_NOT_FOUND);
         }
+        validateExistingReviewTarget(review);
 
         if (reviewMapper.softDelete(id, LocalDateTime.now()) != 1) {
             throw new BusinessException(ErrorCode.REVIEW_NOT_FOUND);
         }
-        ensureAggregateUpdated(movieMapper.removeReviewScore(review.getTargetId(), review.getScore()));
-        invalidateAfterCommit(review.getTargetId(), review.getId(), true);
+        removeReviewScore(review);
+        invalidateAfterCommit(review.getTargetType(), review.getTargetId(), review.getId(), true);
     }
 
     @Override
@@ -276,6 +289,39 @@ public class ReviewServiceImpl implements ReviewService {
         }
     }
 
+    private void validateWriteTarget(String targetType, Long targetId) {
+        if (!MOVIE.equals(targetType) && !ACTIVITY.equals(targetType)) {
+            throw new BusinessException(ErrorCode.INVALID_TARGET_TYPE);
+        }
+        validateId(targetId);
+    }
+
+    private void validateCreateTargetExists(String targetType, Long targetId) {
+        if (MOVIE.equals(targetType)) {
+            if (movieMapper.selectById(targetId) == null) {
+                throw new BusinessException(ErrorCode.MOVIE_NOT_FOUND);
+            }
+            return;
+        }
+        Activity activity = activityMapper.selectById(targetId);
+        if (activity == null || activity.getStatus() == null || activity.getStatus() != ACTIVITY_ACTIVE) {
+            throw new BusinessException(ErrorCode.ACTIVITY_NOT_FOUND);
+        }
+    }
+
+    private void validateExistingReviewTarget(Review review) {
+        if (MOVIE.equals(review.getTargetType())) {
+            return;
+        }
+        if (ACTIVITY.equals(review.getTargetType())) {
+            if (activityMapper.selectById(review.getTargetId()) == null) {
+                throw new BusinessException(ErrorCode.INTERNAL_ERROR);
+            }
+            return;
+        }
+        throw new BusinessException(ErrorCode.INTERNAL_ERROR);
+    }
+
     private void validateScore(BigDecimal score) {
         if (score == null || score.compareTo(MIN_SCORE) < 0 || score.compareTo(MAX_SCORE) > 0) {
             throw new BusinessException(ErrorCode.INVALID_SCORE);
@@ -329,6 +375,34 @@ public class ReviewServiceImpl implements ReviewService {
         if (updated != 1) {
             throw new BusinessException(ErrorCode.INTERNAL_ERROR);
         }
+    }
+
+    private void addReviewScore(String targetType, Long targetId, BigDecimal score) {
+        int updated = MOVIE.equals(targetType)
+                ? movieMapper.addReviewScore(targetId, score)
+                : activityMapper.addReviewScore(targetId, score);
+        ensureAggregateUpdated(updated);
+    }
+
+    private void replaceReviewScore(Review review, BigDecimal oldScore, BigDecimal newScore) {
+        if (ACTIVITY.equals(review.getTargetType())) {
+            if (oldScore.compareTo(newScore) != 0) {
+                ensureAggregateUpdated(activityMapper.replaceReviewScore(
+                        review.getTargetId(), oldScore, newScore
+                ));
+            }
+            return;
+        }
+        ensureAggregateUpdated(movieMapper.replaceReviewScore(
+                review.getTargetId(), oldScore, newScore
+        ));
+    }
+
+    private void removeReviewScore(Review review) {
+        int updated = MOVIE.equals(review.getTargetType())
+                ? movieMapper.removeReviewScore(review.getTargetId(), review.getScore())
+                : activityMapper.removeReviewScore(review.getTargetId(), review.getScore());
+        ensureAggregateUpdated(updated);
     }
 
     private String writeImages(List<String> images) {
@@ -426,13 +500,15 @@ public class ReviewServiceImpl implements ReviewService {
         }
     }
 
-    private void invalidateAfterCommit(Long movieId, Long reviewId, boolean removeLikes) {
+    private void invalidateAfterCommit(String targetType, Long targetId, Long reviewId, boolean removeLikes) {
         Runnable invalidation = () -> {
-            deleteWithRetry(RedisConstants.MOVIE_DETAIL_KEY + movieId,
-                    "movie detail", movieId, reviewId);
+            if (MOVIE.equals(targetType)) {
+                deleteWithRetry(RedisConstants.MOVIE_DETAIL_KEY + targetId,
+                        "movie detail", targetType, targetId, reviewId);
+            }
             if (removeLikes) {
                 deleteWithRetry(RedisConstants.REVIEW_LIKE_KEY + reviewId,
-                        "review likes", movieId, reviewId);
+                        "review likes", targetType, targetId, reviewId);
             }
         };
         if (TransactionSynchronizationManager.isSynchronizationActive()) {
@@ -447,7 +523,8 @@ public class ReviewServiceImpl implements ReviewService {
         }
     }
 
-    private boolean deleteWithRetry(String key, String cacheType, Long movieId, Long reviewId) {
+    private boolean deleteWithRetry(String key, String cacheType, String targetType,
+                                    Long targetId, Long reviewId) {
         RuntimeException lastException = null;
         for (int attempt = 1; attempt <= CACHE_DELETE_RETRIES; attempt++) {
             try {
@@ -467,8 +544,9 @@ public class ReviewServiceImpl implements ReviewService {
                 }
             }
         }
-        log.error("Review cache invalidation failed after retries, type={}, movieId={}, reviewId={}",
-                cacheType, movieId, reviewId, lastException);
+        log.error("Review cache invalidation failed after retries, cacheType={}, targetType={}, " +
+                        "targetId={}, reviewId={}",
+                cacheType, targetType, targetId, reviewId, lastException);
         return false;
     }
 }

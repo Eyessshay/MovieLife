@@ -20,7 +20,8 @@ public interface ReviewMapper extends BaseMapper<Review> {
     Review selectByIdForUpdate(@Param("id") Long id);
 
     @Update("UPDATE tb_review SET score = #{score}, content = #{content}, images = #{images}, " +
-            "status = 1, like_count = 0, create_time = #{now}, update_time = #{now} WHERE id = #{id}")
+            "status = 1, like_count = 0, create_time = #{now}, update_time = #{now} " +
+            "WHERE id = #{id} AND status = 0")
     int restoreReview(@Param("id") Long id,
                       @Param("score") java.math.BigDecimal score,
                       @Param("content") String content,

@@ -8,6 +8,7 @@ import com.movielife.entity.Review;
 import com.movielife.entity.User;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
+import com.movielife.mapper.ActivityMapper;
 import com.movielife.mapper.MovieMapper;
 import com.movielife.mapper.ReviewMapper;
 import com.movielife.mapper.UserMapper;
@@ -45,6 +46,8 @@ class ReviewServiceImplTest {
     @Mock
     private MovieMapper movieMapper;
     @Mock
+    private ActivityMapper activityMapper;
+    @Mock
     private UserMapper userMapper;
     @Mock
     private StringRedisTemplate redisTemplate;
@@ -56,7 +59,7 @@ class ReviewServiceImplTest {
     @BeforeEach
     void setUp() {
         reviewService = new ReviewServiceImpl(
-                reviewMapper, movieMapper, userMapper, redisTemplate, new ObjectMapper()
+                reviewMapper, movieMapper, activityMapper, userMapper, redisTemplate, new ObjectMapper()
         );
         UserHolder.saveUser(userContext(1L));
     }
@@ -100,8 +103,6 @@ class ReviewServiceImplTest {
 
     @Test
     void invalidScoreRangeAndStepShouldHaveDifferentErrors() {
-        when(movieMapper.selectById(1L)).thenReturn(movie());
-
         assertBusinessError(() -> reviewService.createReview(createRequest("6.0")),
                 ErrorCode.INVALID_SCORE);
         assertBusinessError(() -> reviewService.createReview(createRequest("4.3")),
