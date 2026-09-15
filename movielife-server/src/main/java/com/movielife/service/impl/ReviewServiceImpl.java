@@ -31,6 +31,7 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -75,7 +76,7 @@ public class ReviewServiceImpl implements ReviewService {
     private final ObjectMapper objectMapper;
 
     @Override
-    @Transactional(rollbackFor = Exception.class)
+    @Transactional(rollbackFor = Exception.class, isolation = Isolation.READ_COMMITTED)
     public ReviewVO createReview(CreateReviewDTO request) {
         Long userId = requireUserId();
         validateWriteTarget(request.getTargetType(), request.getTargetId());
