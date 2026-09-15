@@ -21,6 +21,8 @@ public class Activity {
     private String description;
     private BigDecimal priceMin;
     private BigDecimal priceMax;
+    private BigDecimal avgScore;
+    private Integer scoreCount;
     private Integer status;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
