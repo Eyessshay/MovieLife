@@ -2026,7 +2026,45 @@ Step 12.5 不修改生产代码、SQL、API 契约或 Redis 数据结构，只�
 
 阶段 12 与阶段 11 交叉定向测试共 103 项通过；全量 452 项测试通过，0 failure、0 error、0 skipped；真实 MySQL、Redis、随机端口 HTTP 联调通过，Maven `clean package` 为 `BUILD SUCCESS`。Step 12.5 至此正式冻结，阶段 12 完成；后续不得在阶段 12 内追加 Activity Review、Venue Review、管理端、AI 或票务能力。
 
-## 10. 服务端模块建议
+## 10. 阶段 13 Activity Review
+
+### 10.1 Step 13.1 Activity Review 契约设计与冻结
+
+阶段 13 独立实现 Activity Review，只把 `ACTIVITY` 接入阶段 3 已冻结的通用评价创建、列表、详情、修改、软删除和点赞能力，不复制 Activity 专用 Controller、Service、DTO、VO 或评价表。公开入口统一复用 `/api/reviews`、`/api/reviews/{id}` 和 `/api/reviews/{id}/like`；不实现 `/api/activities/{id}/reviews` 嵌套接口。Step 13.1 只更新设计文档，不修改生产 Java、SQL、表结构、DTO、VO、Mapper、Redis Key 或现有公开接口行为。
+
+#### 10.1.1 目标与生命周期契约
+
+Activity Review 的 `targetType` 固定为严格大写 `ACTIVITY`，`targetId` 为正整数。创建和软删除后的恢复都要求 `tb_activity` 物理存在且 `status=1`；不存在、草稿或下线统一返回 `ACTIVITY_NOT_FOUND`。同一用户对同一 Activity 继续由 `tb_review.uk_review_user_target(user_id, target_type, target_id)` 收敛为一条历史记录，已有有效记录再次创建返回 `DUPLICATE_REVIEW`，已有软删除记录则恢复原记录。
+
+修改和删除以已经存在的 Review 及作者归属为入口，不因 Activity 后续变为 `status=2` 而阻止作者维护自己的内容；两条写路径仍要求目标 Activity 物理存在，若多态目标异常缺失则以 `INTERNAL_ERROR` 失败关闭，不能只改 Review 而跳过评分聚合。Activity 评价列表是目标资源下的公开集合，查询前要求 Activity 当前 `status=1`；不存在、草稿或下线返回 `ACTIVITY_NOT_FOUND`。单条 `GET /api/reviews/{id}` 延续阶段 3 语义，只要求 Review 自身 `status=1`，Activity 后续下线不使已知评价 ID 失效。
+
+Activity 第一版评价资格不读取订单、支付、出票或核销事实，不要求用户购买或使用过对应活动票。购买后评价、核销后评价、认证标识和防刷审核都不属于阶段 13，避免把 Review 与阶段 7～10 已冻结的交易状态机耦合。
+
+#### 10.1.2 接口、DTO、VO 与错误契约
+
+创建使用 `POST /api/reviews`，Request DTO 复用 `CreateReviewDTO`，必须登录；列表使用 `GET /api/reviews?targetType=ACTIVITY&targetId={activityId}`，Query 参数继续封装为 `ReviewQueryDTO`，允许匿名；详情使用 `GET /api/reviews/{id}`，允许匿名；修改使用 `PUT /api/reviews/{id}` 和 `UpdateReviewDTO`，必须为作者；删除使用 `DELETE /api/reviews/{id}`，必须为作者；点赞和取消点赞继续使用 `PUT/DELETE /api/reviews/{id}/like`。所有接口继续返回 `ReviewVO`、`PageVO<ReviewVO>` 或 `ReviewLikeVO`，不增加 Activity 专用评价 DTO、VO 或 Controller。
+
+评分范围继续为 `1.0～5.0`，步长固定 `0.5`；内容、图片、分页和排序沿用阶段 3 现有 DTO 规则。列表支持 `latest`、`likeCount` 和 `score`，分别以创建时间、点赞数和评分降序，并统一追加评价 ID 降序保证稳定分页。作者按本页批量查询，禁止 MySQL N+1；匿名用户 `liked=false`，有效登录用户读取现有 Review Like ZSet。
+
+主要业务错误沿用 `UNAUTHORIZED`、`INVALID_TARGET_TYPE`、`INVALID_ID`、`ACTIVITY_NOT_FOUND`、`INVALID_SCORE`、`INVALID_SCORE_STEP`、`CONTENT_REQUIRED`、`DUPLICATE_REVIEW`、`REVIEW_NOT_FOUND`、`REVIEW_FORBIDDEN`、`LIKE_TARGET_INVALID` 和 `INTERNAL_ERROR`，不新增 Activity Review 专用错误码。各接口的 URL、Method、登录、参数、DTO、VO、错误码及数据库/Redis行为以 `API接口设计.md` 的 Step 13.1 契约为准。
+
+#### 10.1.3 MySQL 与聚合职责
+
+`tb_review` 已预留 `target_type='ACTIVITY'`，阶段 13 不新增 Activity 评价表。Step 13.2 才允许通过主 SQL 和兼容 MySQL 8.0.17 的可重复迁移为 `tb_activity` 增加 `avg_score DECIMAL(3,2) NOT NULL DEFAULT 0.00` 与 `score_count INT NOT NULL DEFAULT 0`，并按有效 Activity Review 回填一致聚合；Step 13.1 不修改数据库。
+
+后续创建、恢复、修改和首次删除必须在单个 MySQL 事务中同时写 Review 和 Activity 聚合。聚合只能使用数据库单条原子 SQL，禁止先 SELECT 后由 Java 计算再 UPDATE；创建或恢复增加一次计数，修改只替换旧、新评分且计数不变，删除减少一次计数，最后一条删除固定恢复 `0.00/0`。所有条件 UPDATE 必须严格校验 `affectedRows`，任何异常整体回滚，不能接受 Review 和聚合部分成功。
+
+#### 10.1.4 Redis、查询展示与冻结边界
+
+Activity Review 点赞继续使用 `review:like:{reviewId}` ZSet 和 `tb_review.like_count` 聚合，只有 Redis 关系实际变化时才更新 MySQL，数据库失败执行阶段 3 既有反向补偿。恢复或删除评价后仅在数据库事务 COMMIT 后清理对应 Review Like ZSet。Activity 评价列表和详情不增加缓存，不创建 Activity Review、评分或用户私有状态 Redis Key，也不提前发送 AI Summary Stream 或行为事件。
+
+Step 13.4 才允许在 `ActivityListItemVO`、`ActivityDetailVO`、`ActivityNearbyVO` 末尾兼容增加 `avgScore` 和 `scoreCount`。Activity 收藏列表因复用 `ActivityListItemVO` 必须返回同一聚合值；评分不进入 `ActivityShowtimeVO`、Showtime、订单或票券 VO。评分只用于展示，不参与 Activity 普通列表筛选和排序，不进入 Nearby 候选、去重、最近场馆、下一场次、售罄资格或分页算法。
+
+阶段 11 的 Venue GEO 只提供候选、MySQL 保存最终事实、多 VenueType 合并、`min(page × pageSize × 5, 200)` 候选窗口、过滤后分页和稳定排序全部保持冻结。阶段 12 的 `collected` 批量注入、用户隔离和 MySQL 唯一事实同样保持冻结。Activity Review 不写 Activity 票务、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、`available_seats`、Venue GEO、`seat:lock:*` 或 `seat:lock:token:*`。
+
+Step 13.1 只冻结设计，不实现 Step 13.2 及以后能力。后续必须按持久化基础、写路径、查询展示、并发边界、完整真实联调和最终冻结逐个小 Step 推进；不得在本 Step 加入 Venue Review、购买/核销后评价、评价评论、审核工作流、AI、Activity 管理端、非固定座位票务、Redis Stream、MQ、第三方支付、部分退款或核销撤销。
+
+## 11. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
 
@@ -2046,7 +2084,7 @@ ai         评价总结的异步生成、持久化和读取
 common     统一响应、异常、鉴权、限流、幂等
 ```
 
-## 11. 关键非功能要求
+## 12. 关键非功能要求
 
 - 所有写接口校验当前用户和资源归属。
 - 订单、支付、锁座操作必须支持幂等。
@@ -2061,4 +2099,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.25，阶段 10 固定座位 Activity 票务与阶段 11 Activity Nearby 保持冻结，阶段 12 Step 12.1～12.5 Activity 收藏写路径、关系检查、收藏列表、普通/Nearby 查询 `collected`、边界与完整联调均已完成并最终冻结。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.26，阶段 10 固定座位 Activity 票务、阶段 11 Activity Nearby 与阶段 12 Activity 收藏保持冻结，阶段 13 Step 13.1 已冻结 Activity Review 的接口、生命周期、聚合、Redis 和后续实现边界，但尚未修改生产 Java、SQL、数据库结构或公开接口实现。

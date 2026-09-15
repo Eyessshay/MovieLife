@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.25（阶段 12 Activity 收藏最终冻结版）
+- 版本：v0.26（阶段 13 Step 13.1 Activity Review 契约冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -103,7 +103,6 @@ GET /api/activities                     # 活动列表、筛选和分页
 GET /api/activities/{id}                # 活动详情
 GET /api/activities/hot                 # 热门活动
 GET /api/activities/nearby              # 附近活动
-GET /api/activities/{id}/reviews        # 活动评价
 GET /api/activities/{id}/showtimes      # 活动场次
 ```
 
@@ -330,7 +329,7 @@ GET    /api/reviews/{id}/comments        # 评价评论
 POST   /api/reviews/{id}/comments        # 发表评论
 ```
 
-评价目标统一使用 `targetType + targetId`，支持 `MOVIE`、`ACTIVITY`、`VENUE`。资源嵌套接口和 `GET /api/reviews?targetType=MOVIE&targetId=1` 可以同时保留，但后端必须统一调用 `queryReviews(targetType, targetId, page)`，不得按电影、活动和场馆复制三套业务逻辑。同一用户对同一目标默认只能保留一条有效评价；是否需要购票/核销后评价，在业务规则版确定。
+评价目标统一使用 `targetType + targetId`。阶段 3 已实现 `MOVIE`；阶段 13 Step 13.1 只冻结 `ACTIVITY` 的兼容扩展契约，尚未修改生产接口。Activity Review 后续实现继续复用 `/api/reviews`，不新增 `/api/activities/{id}/reviews` 嵌套入口，不复制 Activity 专用 Controller、Service、DTO 或 VO。同一用户对同一目标最多保留一条有效评价；Activity 第一版不校验购票、支付、出票或核销记录。
 
 ### 3.6 收藏
 
@@ -1026,6 +1025,86 @@ WHERE id = #{movieId} AND score_count = 1;
 6. Response VO：返回 `{ "liked": false, "likeCount": 23 }`。
 7. 业务错误码：`UNAUTHORIZED`、`REVIEW_NOT_FOUND`、`LIKE_TARGET_INVALID`
 8. 数据库 / Redis 行为：校验评价有效；通过 Lua 原子读取旧 score 并执行 `ZREM`，仅确实移除当前用户时原子减少 `tb_review.like_count`，并保证不会小于 0。数据库异常时按旧 score 恢复 ZSet 关系；ZSet 按 score 可支持最近点赞用户和前 N 个点赞用户查询。
+
+### 4.5 阶段 13 Step 13.1 Activity Review 契约
+
+Step 13.1 只冻结 Activity Review 的公开契约、生命周期和后续实现边界，不修改生产 Java、`sql/movielife.sql`、数据库结构、DTO、VO、Mapper、Redis Key 或现有公开接口行为。阶段 1～12 与 MOVIE Review 继续保持冻结；以下 `ACTIVITY` 能力只能从 Step 13.2 开始按后续独立 Step 实现。
+
+Activity Review 复用 `targetType + targetId` 多态模型和 `/api/reviews` 通用入口。`targetType` 第一版要求严格大写 `ACTIVITY`，不在本阶段顺带改变 `MOVIE` 的参数规范化行为。活动评价不要求用户持有订单、已支付、已出票或已核销；不得读取 TicketOrder 或 TicketOrderItem 作为评价资格条件。
+
+#### 4.5.1 创建或恢复 Activity 评价
+
+1. URL：`/api/reviews`。
+2. Method：`POST`。
+3. 是否登录：是，使用现有 `@LoginRequired` 和 `UserHolder` 获取当前用户。
+4. Query / Path / Body 参数：无 Query、Path 参数；Body 中 `targetType` 必须为 `ACTIVITY`，`targetId` 必须为正整数，`score` 范围为 `1.0～5.0` 且步长为 `0.5`，`content` 和 `images` 沿用阶段 3 的校验规则。
+5. Request DTO：继续复用 `CreateReviewDTO { targetType, targetId, score, content, images }`，不新增 Activity 专用 DTO。
+6. Response VO：继续返回 `ReviewVO`，包括 `id`、作者公开信息、`targetType=ACTIVITY`、`targetId`、`score`、`content`、`images`、`likeCount`、`commentCount`、`liked`、`createTime` 和 `updateTime`。
+7. 业务错误码：`UNAUTHORIZED`、`INVALID_TARGET_TYPE`、`INVALID_ID`、`ACTIVITY_NOT_FOUND`、`INVALID_SCORE`、`INVALID_SCORE_STEP`、`CONTENT_REQUIRED`、`DUPLICATE_REVIEW`、`INTERNAL_ERROR`。
+8. 数据库 / Redis 行为：创建或恢复前读取 `tb_activity`，要求目标物理存在且 `status=1`；不存在、草稿或下线统一返回 `ACTIVITY_NOT_FOUND`。同一用户、`ACTIVITY` 和目标 ID 已有 `status=1` 记录时返回 `DUPLICATE_REVIEW`；已有 `status=0` 记录时恢复原记录并重置评价内容、评分、图片、点赞计数和时间。后续实现必须在同一 MySQL 事务中写 `tb_review` 并用单条原子 SQL 更新 `tb_activity.avg_score/score_count`，严格校验 `affectedRows`；不得在 Java 中先读聚合再计算写回。恢复成功后仅在 COMMIT 后清理该 Review 既有 `review:like:{reviewId}`，不新增 Activity Review Redis Key、Activity 公共缓存、AI 事件、行为事件或票务状态。
+
+#### 4.5.2 Activity 评价列表
+
+1. URL：`/api/reviews`，Activity 不新增嵌套列表路径。
+2. Method：`GET`。
+3. 是否登录：否；匿名用户的 `liked` 固定为 `false`，有效登录用户沿用现有点赞关系读取。
+4. Query / Path / Body 参数：`targetType=ACTIVITY`、正整数 `targetId`、`page` 默认 1、`pageSize` 默认 20 且最大 100、`sortBy=latest|likeCount|score` 默认 `latest`；无 Path 和 Body 参数。
+5. Request DTO：Query 参数继续封装为 `ReviewQueryDTO`，不新增 Activity 专用查询 DTO。
+6. Response VO：返回 `PageVO<ReviewVO>`；只包含 `status=1` 的 Activity 评价，排序分别为 `create_time DESC, id DESC`、`like_count DESC, id DESC` 或 `score DESC, id DESC`，保证稳定分页。
+7. 业务错误码：`INVALID_TARGET_TYPE`、`INVALID_ID`、`ACTIVITY_NOT_FOUND`、`INVALID_PAGE`、`PAGE_SIZE_TOO_LARGE`、`INTERNAL_ERROR`。
+8. 数据库 / Redis 行为：列表查询前要求 `tb_activity` 物理存在且 `status=1`；不存在、草稿或下线统一返回 `ACTIVITY_NOT_FOUND`，不暴露其评价列表。随后直接分页查询 `tb_review(target_type='ACTIVITY', target_id, status=1)`，一次批量读取本页作者，禁止 MySQL N+1，不缓存评价列表。登录用户继续通过现有 `review:like:{reviewId}` ZSet 补充 `liked`；查询不得写 MySQL、Activity、GEO、锁座或订单状态，通用登录 TTL 刷新不属于评价业务写入。
+
+#### 4.5.3 Activity 评价详情
+
+1. URL：`/api/reviews/{id}`。
+2. Method：`GET`。
+3. 是否登录：否；匿名 `liked=false`，有效登录用户返回自己的真实点赞状态。
+4. Query / Path / Body 参数：Path 参数 `id` 必须为正整数；无 Query 和 Body 参数。
+5. Request DTO：无。
+6. Response VO：继续返回完整 `ReviewVO`，不新增 Activity 专用详情 VO。
+7. 业务错误码：`INVALID_ID`、`REVIEW_NOT_FOUND`、`INTERNAL_ERROR`。
+8. 数据库 / Redis 行为：延续阶段 3 的通用 Review 详情语义，只要求命中的 `tb_review.status=1`，不重新校验 Activity 当前状态。Activity 后续下线不使已知评价 ID 失效；目标物理缺失属于异常数据，但本接口仍以 Review 本身是否有效为公开判定。评价和作者从 MySQL 读取，登录用户通过 `ZSCORE review:like:{id} userId` 补充 `liked`，不缓存详情、不写 Activity 或其他业务状态。
+
+#### 4.5.4 修改 Activity 评价
+
+1. URL：`/api/reviews/{id}`。
+2. Method：`PUT`。
+3. 是否登录：是，且只能修改本人评价。
+4. Query / Path / Body 参数：Path 参数 `id` 必须为正整数；Body 中 `score`、`content`、`images` 沿用阶段 3 规则，不允许通过 Body 改变 `targetType` 或 `targetId`。
+5. Request DTO：继续复用 `UpdateReviewDTO { score, content, images }`。
+6. Response VO：返回修改后的 `ReviewVO`。
+7. 业务错误码：`UNAUTHORIZED`、`INVALID_ID`、`REVIEW_NOT_FOUND`、`REVIEW_FORBIDDEN`、`INVALID_SCORE`、`INVALID_SCORE_STEP`、`CONTENT_REQUIRED`、`INTERNAL_ERROR`。
+8. 数据库 / Redis 行为：先按评价 ID 锁定 `tb_review`，要求评价有效、属于当前用户且 `target_type='ACTIVITY'`；目标 `tb_activity` 必须物理存在，但 `status=2` 下线不阻止作者修改既有评价，物理缺失作为 `INTERNAL_ERROR` 失败关闭。事务内更新评价并使用旧、新评分通过单条原子 SQL 替换 Activity 聚合，影响行数必须为 1；失败整体回滚。Activity 当前无详情缓存，因此不新增缓存失效、Redis Key、AI 事件或票务读写。
+
+#### 4.5.5 删除 Activity 评价
+
+1. URL：`/api/reviews/{id}`。
+2. Method：`DELETE`。
+3. 是否登录：是，且只能删除本人评价。
+4. Query / Path / Body 参数：Path 参数 `id` 必须为正整数；无 Query 和 Body 参数。
+5. Request DTO：无。
+6. Response VO：`data=null`；同一条已软删除评价重复删除按阶段 3 规则幂等成功。
+7. 业务错误码：`UNAUTHORIZED`、`INVALID_ID`、`REVIEW_NOT_FOUND`、`REVIEW_FORBIDDEN`、`INTERNAL_ERROR`。
+8. 数据库 / Redis 行为：先按评价 ID 锁定 `tb_review` 并校验作者；目标 Activity 后续下线不阻止删除，物理缺失作为 `INTERNAL_ERROR`。首次删除在同一事务内软删除 Review，并以原子 SQL 减少 `tb_activity.score_count`、重算 `avg_score`；删除最后一条有效评价时固定写为 `avg_score=0.00, score_count=0`。所有条件 UPDATE 严格校验 `affectedRows`，任何失败整体回滚；COMMIT 后清理 `review:like:{reviewId}`，不删除其他用户关系或写入 Activity、订单、GEO 和临时锁状态。
+
+#### 4.5.6 Activity 评价点赞与取消点赞
+
+1. URL：`/api/reviews/{id}/like`。
+2. Method：确保已点赞使用 `PUT`，确保未点赞使用 `DELETE`。
+3. 是否登录：是。
+4. Query / Path / Body 参数：Path 参数 `id` 必须为正整数；无 Query 和 Body 参数。
+5. Request DTO：无。
+6. Response VO：继续返回 `ReviewLikeVO { liked, likeCount }`。
+7. 业务错误码：`UNAUTHORIZED`、`INVALID_ID`、`LIKE_TARGET_INVALID`、`INTERNAL_ERROR`。
+8. 数据库 / Redis 行为：Activity Review 与 MOVIE Review 共用阶段 3 已冻结的点赞实现，只校验评价本身有效，不重新校验 Activity 当前状态。关系事实保存在 `review:like:{reviewId}` ZSet，`member=userId`、`score=首次点赞时间戳`；只有 ZSet 实际新增或移除时才原子增减 `tb_review.like_count`，数据库失败继续执行既有反向补偿。不得创建 `activity:review:like:*` 等新 Key。
+
+#### 4.5.7 Activity 评分展示与后续实现边界
+
+Step 13.2 才允许为 `tb_activity` 设计并实现 `avg_score DECIMAL(3,2) NOT NULL DEFAULT 0.00` 和 `score_count INT NOT NULL DEFAULT 0` 及可重复迁移；Step 13.1 不修改 SQL。Step 13.4 才允许在 `ActivityListItemVO`、`ActivityDetailVO` 和 `ActivityNearbyVO` 末尾兼容增加 `avgScore`、`scoreCount`。`GET /api/collections?targetType=ACTIVITY` 复用 `ActivityListItemVO`，因此收藏列表必须同步展示同一聚合值，不新增 Collection 专用评分字段。
+
+评分字段只用于响应展示，不参与 Activity 普通列表的查询条件和 `create_time DESC, id DESC` 顺序，也不进入阶段 11 `NearbyActivityChoice`，不得改变多 VenueType GEO 候选、`min(page × pageSize × 5, 200)` 窗口、Activity 去重、最近 Venue、下一 Showtime、售罄可发现、稳定排序或过滤后分页。`ActivityShowtimeVO`、Showtime、订单和票券 VO 不增加评分字段。
+
+Step 13.1 至此冻结。后续必须依次完成独立的持久化、写路径、查询展示、并发边界和最终联调 Step；本 Step 不实现 Step 13.2 及以后能力，不加入 Venue Review、购买/核销后评价、评价审核、评价评论、AI 总结、Activity 管理端、非固定座位票务、Redis Stream、MQ、第三方支付、部分退款或核销撤销。
 
 ## 5. 待细化事项
 
