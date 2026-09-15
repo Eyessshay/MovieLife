@@ -44,13 +44,17 @@ class ActivityControllerTest {
         ActivityListItemVO item = new ActivityListItemVO();
         item.setId(1L);
         item.setCollected(false);
+        item.setAvgScore(new BigDecimal("4.25"));
+        item.setScoreCount(2);
         when(activityService.queryActivities(any()))
                 .thenReturn(new PageVO<>(Collections.singletonList(item), 1L, 1, 20));
 
         mockMvc.perform(get("/api/activities").param("city", "上海"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value("OK"))
-                .andExpect(jsonPath("$.data.list[0].collected").value(false));
+                .andExpect(jsonPath("$.data.list[0].collected").value(false))
+                .andExpect(jsonPath("$.data.list[0].avgScore").value(4.25))
+                .andExpect(jsonPath("$.data.list[0].scoreCount").value(2));
     }
 
     @Test
@@ -73,6 +77,8 @@ class ActivityControllerTest {
         nearby.setNextShowtimeId(3L);
         nearby.setDistance(125.5D);
         nearby.setCollected(false);
+        nearby.setAvgScore(new BigDecimal("4.50"));
+        nearby.setScoreCount(3);
         when(activityService.queryNearbyActivities(any(ActivityNearbyQueryDTO.class)))
                 .thenReturn(Collections.singletonList(nearby));
 
@@ -85,7 +91,9 @@ class ActivityControllerTest {
                 .andExpect(jsonPath("$.data[0].id").value(1))
                 .andExpect(jsonPath("$.data[0].nearestVenueId").value(2))
                 .andExpect(jsonPath("$.data[0].nextShowtimeId").value(3))
-                .andExpect(jsonPath("$.data[0].collected").value(false));
+                .andExpect(jsonPath("$.data[0].collected").value(false))
+                .andExpect(jsonPath("$.data[0].avgScore").value(4.5))
+                .andExpect(jsonPath("$.data[0].scoreCount").value(3));
     }
 
     @Test
@@ -113,13 +121,17 @@ class ActivityControllerTest {
         detail.setTitle("示例现场活动");
         detail.setPriceMin(new BigDecimal("199.00"));
         detail.setCollected(false);
+        detail.setAvgScore(new BigDecimal("4.75"));
+        detail.setScoreCount(4);
         when(activityService.queryActivityDetail(1L)).thenReturn(detail);
 
         mockMvc.perform(get("/api/activities/1"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.id").value(1))
                 .andExpect(jsonPath("$.data.title").value("示例现场活动"))
-                .andExpect(jsonPath("$.data.collected").value(false));
+                .andExpect(jsonPath("$.data.collected").value(false))
+                .andExpect(jsonPath("$.data.avgScore").value(4.75))
+                .andExpect(jsonPath("$.data.scoreCount").value(4));
     }
 
     @Test

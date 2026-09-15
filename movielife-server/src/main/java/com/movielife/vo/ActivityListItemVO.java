@@ -15,4 +15,6 @@ public class ActivityListItemVO {
     private BigDecimal priceMin;
     private BigDecimal priceMax;
     private Boolean collected;
+    private BigDecimal avgScore;
+    private Integer scoreCount;
 }

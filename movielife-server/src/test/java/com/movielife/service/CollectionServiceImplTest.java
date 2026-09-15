@@ -168,6 +168,10 @@ class CollectionServiceImplTest {
                 .getTitle()).isEqualTo("活动101");
         assertThat(((com.movielife.vo.ActivityListItemVO) result.getList().get(0).getTarget())
                 .getCollected()).isTrue();
+        assertThat(((com.movielife.vo.ActivityListItemVO) result.getList().get(0).getTarget())
+                .getAvgScore()).isEqualByComparingTo("4.25");
+        assertThat(((com.movielife.vo.ActivityListItemVO) result.getList().get(0).getTarget())
+                .getScoreCount()).isEqualTo(2);
         verify(collectionMapper).selectVisibleActivityPage(any(), org.mockito.ArgumentMatchers.eq(1L));
         verify(activityMapper, times(1)).selectBatchIds(any());
         verify(collectionMapper, never()).selectPage(any(), any());
@@ -293,6 +297,8 @@ class CollectionServiceImplTest {
         activity.setCity("上海");
         activity.setPriceMin(new BigDecimal("99.00"));
         activity.setPriceMax(new BigDecimal("199.00"));
+        activity.setAvgScore(new BigDecimal("4.25"));
+        activity.setScoreCount(2);
         return activity;
     }
 

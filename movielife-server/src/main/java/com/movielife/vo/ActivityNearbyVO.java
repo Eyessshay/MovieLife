@@ -25,4 +25,6 @@ public class ActivityNearbyVO {
     private LocalDateTime nextStartTime;
     private Integer nextAvailableSeats;
     private Boolean collected;
+    private BigDecimal avgScore;
+    private Integer scoreCount;
 }

@@ -137,7 +137,7 @@ public class ReviewServiceImpl implements ReviewService {
     public PageVO<ReviewVO> queryReviews(ReviewQueryDTO query) {
         validateTarget(query.getTargetType(), query.getTargetId());
         LambdaQueryWrapper<Review> wrapper = new LambdaQueryWrapper<Review>()
-                .eq(Review::getTargetType, MOVIE)
+                .eq(Review::getTargetType, query.getTargetType())
                 .eq(Review::getTargetId, query.getTargetId())
                 .eq(Review::getStatus, REVIEW_ACTIVE);
         if ("likeCount".equals(query.getSortBy())) {
@@ -279,13 +279,20 @@ public class ReviewServiceImpl implements ReviewService {
     }
 
     private void validateTarget(String targetType, Long targetId) {
-        if (!MOVIE.equals(targetType)) {
+        if (!MOVIE.equals(targetType) && !ACTIVITY.equals(targetType)) {
             throw new BusinessException(ErrorCode.INVALID_TARGET_TYPE);
         }
         validateId(targetId);
-        Movie movie = movieMapper.selectById(targetId);
-        if (movie == null) {
-            throw new BusinessException(ErrorCode.MOVIE_NOT_FOUND);
+        if (MOVIE.equals(targetType)) {
+            Movie movie = movieMapper.selectById(targetId);
+            if (movie == null) {
+                throw new BusinessException(ErrorCode.MOVIE_NOT_FOUND);
+            }
+            return;
+        }
+        Activity activity = activityMapper.selectById(targetId);
+        if (activity == null || activity.getStatus() == null || activity.getStatus() != ACTIVITY_ACTIVE) {
+            throw new BusinessException(ErrorCode.ACTIVITY_NOT_FOUND);
         }
     }
 

@@ -454,6 +454,8 @@ public class ActivityServiceImpl implements ActivityService {
         result.setType(activity.getType());
         result.setPriceMin(activity.getPriceMin());
         result.setPriceMax(activity.getPriceMax());
+        result.setAvgScore(activity.getAvgScore());
+        result.setScoreCount(activity.getScoreCount());
         result.setNearestVenueId(venue.getId());
         result.setNearestVenueName(venue.getName());
         result.setNearestVenueType(VenueType.fromDbValue(venue.getType()));
@@ -521,6 +523,8 @@ public class ActivityServiceImpl implements ActivityService {
         result.setCity(activity.getCity());
         result.setPriceMin(activity.getPriceMin());
         result.setPriceMax(activity.getPriceMax());
+        result.setAvgScore(activity.getAvgScore());
+        result.setScoreCount(activity.getScoreCount());
     }
 
     private void copyDiscoveryFields(Activity activity, ActivityDetailVO result) {
@@ -531,6 +535,8 @@ public class ActivityServiceImpl implements ActivityService {
         result.setCity(activity.getCity());
         result.setPriceMin(activity.getPriceMin());
         result.setPriceMax(activity.getPriceMax());
+        result.setAvgScore(activity.getAvgScore());
+        result.setScoreCount(activity.getScoreCount());
     }
 
     private ActivityShowtimeVO toShowtimeVO(Showtime showtime, Venue venue, Hall hall) {

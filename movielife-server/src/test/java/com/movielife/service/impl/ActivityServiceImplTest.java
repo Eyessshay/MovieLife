@@ -87,6 +87,8 @@ class ActivityServiceImplTest {
 
         assertThat(service.queryActivityDetail(1L).getDescription()).isEqualTo("现场演出");
         assertThat(service.queryActivityDetail(1L).getCollected()).isFalse();
+        assertThat(service.queryActivityDetail(1L).getAvgScore()).isEqualByComparingTo("4.25");
+        assertThat(service.queryActivityDetail(1L).getScoreCount()).isEqualTo(2);
         verify(collectionMapper, never()).selectCount(any());
 
         when(activityMapper.selectById(2L)).thenReturn(activity(2L, 0));
@@ -115,6 +117,10 @@ class ActivityServiceImplTest {
         assertThat(result).extracting(ActivityListItemVO::getId).containsExactly(1L, 2L);
         assertThat(result).extracting(ActivityListItemVO::getCollected)
                 .containsExactly(false, true);
+        assertThat(result).extracting(ActivityListItemVO::getAvgScore)
+                .containsExactly(new BigDecimal("4.25"), new BigDecimal("4.25"));
+        assertThat(result).extracting(ActivityListItemVO::getScoreCount)
+                .containsExactly(2, 2);
         verify(collectionMapper).selectList(any());
         verify(collectionMapper, never()).selectCount(any());
     }
@@ -220,6 +226,10 @@ class ActivityServiceImplTest {
         assertThat(result.get(1).getNextShowtimeId()).isEqualTo(201L);
         assertThat(result).extracting(ActivityNearbyVO::getCollected)
                 .containsExactly(false, false);
+        assertThat(result).extracting(ActivityNearbyVO::getAvgScore)
+                .containsExactly(new BigDecimal("4.25"), new BigDecimal("4.25"));
+        assertThat(result).extracting(ActivityNearbyVO::getScoreCount)
+                .containsExactly(2, 2);
         verify(venueMapper).selectBatchIds(any());
         verify(showtimeMapper).selectFutureActivityShowtimesByVenueIds(any());
         verify(activityMapper).selectBatchIds(any());
@@ -386,6 +396,8 @@ class ActivityServiceImplTest {
         value.setCity("上海");
         value.setPriceMin(new BigDecimal("199.00"));
         value.setPriceMax(new BigDecimal("299.00"));
+        value.setAvgScore(new BigDecimal("4.25"));
+        value.setScoreCount(2);
         value.setStatus(status);
         return value;
     }
