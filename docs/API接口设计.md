@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.26（阶段 13 Step 13.1 Activity Review 契约冻结版）
+- 版本：v0.27（阶段 13 Activity Review 完整冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -1105,6 +1105,20 @@ Step 13.2 才允许为 `tb_activity` 设计并实现 `avg_score DECIMAL(3,2) NOT
 评分字段只用于响应展示，不参与 Activity 普通列表的查询条件和 `create_time DESC, id DESC` 顺序，也不进入阶段 11 `NearbyActivityChoice`，不得改变多 VenueType GEO 候选、`min(page × pageSize × 5, 200)` 窗口、Activity 去重、最近 Venue、下一 Showtime、售罄可发现、稳定排序或过滤后分页。`ActivityShowtimeVO`、Showtime、订单和票券 VO 不增加评分字段。
 
 Step 13.1 至此冻结。后续必须依次完成独立的持久化、写路径、查询展示、并发边界和最终联调 Step；本 Step 不实现 Step 13.2 及以后能力，不加入 Venue Review、购买/核销后评价、评价审核、评价评论、AI 总结、Activity 管理端、非固定座位票务、Redis Stream、MQ、第三方支付、部分退款或核销撤销。
+
+#### 4.5.8 Step 13.2～13.6 实施结果与最终冻结
+
+阶段 13 已按 13.1 契约完成实现，未新增 Activity 专用评价入口。`POST/GET /api/reviews`、`GET/PUT/DELETE /api/reviews/{id}` 和 `PUT/DELETE /api/reviews/{id}/like` 仍是唯一公开接口；DTO、VO、错误码和下线语义均保持 13.1 冻结结论。
+
+持久化层已为 `tb_activity` 增加 `avg_score DECIMAL(3,2) NOT NULL DEFAULT 0.00` 与 `score_count INT NOT NULL DEFAULT 0`，主 SQL 与增量迁移保持一致并支持聚合回填。创建、恢复、替换评分、删除和最后一条删除均由 ActivityMapper 单条原子 SQL 完成，所有条件更新严格要求 `affectedRows == 1`，没有 Java 先读平均分再回写的路径。
+
+写路径在单个 MySQL 事务内完成 Review 状态和 Activity 聚合更新。创建或恢复只增加一次计数，修改保持计数不变，重复删除幂等；恢复会重置旧点赞计数，并在 COMMIT 后清理旧 `review:like:{reviewId}`。为避免同一用户首次评价时 InnoDB 缺口锁竞争，创建事务使用 `READ_COMMITTED`，数据库唯一约束继续作为最终防重事实。
+
+`ActivityListItemVO`、`ActivityDetailVO` 和 `ActivityNearbyVO` 已统一返回 `avgScore`、`scoreCount`，Activity 收藏列表复用的 `ActivityListItemVO` 也填充相同值。普通列表仍按 `create_time DESC, id DESC`；Nearby 的 GEO 候选、去重、最近场馆、下一场次、稳定排序和过滤后分页未改变；`collected` 的查询与批量组装逻辑未改变，没有新增 MySQL N+1。
+
+Step 13.6 的真实 MySQL、Redis、随机端口 HTTP 链路验证了：初始 `0.00/0`，用户 A 创建 4.5、用户 B 创建 3.5 后为 `4.00/2`，A 修改为 5.0 后为 `4.25/2`，点赞与取消点赞一致，B 删除后为 `5.00/1`，B 恢复后聚合恢复，并覆盖 Activity 下线后的列表、详情、评价详情、修改、删除和禁止恢复语义。测试前后 Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、`available_seats`、Venue GEO、`seat:lock:*` 和 `seat:lock:token:*` 快照一致。
+
+阶段 10 的 `Activity → Showtime → Seat Map → Lock → Order → Pay → Issue → Verify` 真实 HTTP 闭环已重新通过。阶段 13 定向测试 19 项、阶段 11～12 交叉测试 20 项均通过；全量 486 项测试通过，0 failure、0 error、0 skipped，`mvn clean package` 为 `BUILD SUCCESS`。测试数据、Review Like 和锁座 Key 已清理，阶段 13 至此冻结。
 
 ## 5. 待细化事项
 

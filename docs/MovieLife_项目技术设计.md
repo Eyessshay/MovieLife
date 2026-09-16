@@ -2064,6 +2064,40 @@ Step 13.4 才允许在 `ActivityListItemVO`、`ActivityDetailVO`、`ActivityNear
 
 Step 13.1 只冻结设计，不实现 Step 13.2 及以后能力。后续必须按持久化基础、写路径、查询展示、并发边界、完整真实联调和最终冻结逐个小 Step 推进；不得在本 Step 加入 Venue Review、购买/核销后评价、评价评论、审核工作流、AI、Activity 管理端、非固定座位票务、Redis Stream、MQ、第三方支付、部分退款或核销撤销。
 
+### 10.2 Step 13.2：Activity 评分持久化基础
+
+主 SQL 与可重复增量迁移已为 `tb_activity` 增加 `avg_score` 和 `score_count`，并按 `tb_review` 中 `target_type='ACTIVITY' AND status=1` 的有效记录完成聚合回填。`Activity` Entity 同步增加两个字段。
+
+ActivityMapper 提供四类原子聚合更新：新增评分、替换评分、删除评分和删除最后一条评分。更新公式直接在 MySQL 中基于当前聚合计算，条件分支严格检查影响行数为 1；不存在 Service 先查询平均分、Java 计算、再回写的竞态窗口。持久化验证覆盖 `4.50/1 → 4.00/2 → 4.75/2 → 5.00/1 → 0.00/0`、迁移回填、重复迁移和并发更新基础，MOVIE、Showtime 与票务数据不受影响。
+
+### 10.3 Step 13.3：Activity Review 写路径
+
+通用 Review 写路径已开放 `ACTIVITY` 创建、软删除恢复、修改和删除。事务顺序为目标校验、锁定用户目标 Review、写 Review、原子更新 Activity 聚合并提交；任一侧失败都会整体回滚。恢复重置原点赞计数，并在事务提交后清理旧 Review Like ZSet。修改只替换分数，`score_count` 不变；首次删除减少一次聚合，重复删除保持幂等。
+
+创建和恢复要求 Activity `status=1`；Activity 后续下线不阻止已有评价作者修改或删除。评价资格不读取 TicketOrder、TicketOrderItem、支付、出票或核销事实。并发加固发现同一用户首次创建时默认隔离级别可能形成 InnoDB 缺口锁死锁，因此创建事务采用 `READ_COMMITTED`，仍由 MySQL 唯一约束保证最多一条有效关系。
+
+### 10.4 Step 13.4：查询与评分展示
+
+Activity 评价列表继续复用通用 `/api/reviews`，支持最新、点赞数和评分排序并统一追加 `id DESC`；作者按页批量查询，匿名 `liked=false`，登录用户读取现有 `review:like:{reviewId}`。列表要求 Activity 当前公开有效，单条评价详情只要求 Review 有效。
+
+普通 Activity 列表、详情、Nearby 和 Activity 收藏列表统一展示 `avgScore`、`scoreCount`。评分只是展示字段，不参与普通列表排序，不进入 Nearby 候选选择或分页，也不改变收藏状态的查询次数。共享 `ActivityListItemVO` 的普通列表与收藏列表组装路径均显式填充聚合值，没有新增 MySQL N+1。
+
+### 10.5 Step 13.5：并发与跨阶段边界加固
+
+并发测试覆盖同一用户首次评价、两个用户同时评价、修改与删除竞争、删除与恢复竞争、最后一条删除、MOVIE/ACTIVITY 相同数字 ID 隔离、Activity 下线与创建竞争、下线后修改删除、评价点赞取消、收藏与评价隔离，以及各 Activity 查询面的评分一致性。
+
+快照验证证明 Activity Review 不改变 Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、`available_seats`、Venue GEO、`seat:lock:*` 和 `seat:lock:token:*`。MOVIE Review、阶段 11 Nearby、阶段 12 收藏均保持原语义。
+
+### 10.6 Step 13.6：完整主链路与阶段冻结
+
+新增 `ActivityReviewHttpIntegrationTest` 只提供最终证据，不增加生产能力。它在随机端口 Spring Boot、真实 MySQL 和真实 Redis 上执行完整链路：Activity 普通列表/Nearby/详情初始为 `0.00/0`；用户 A 创建 4.5、用户 B 创建 3.5 后为 `4.00/2`；评价列表与详情可读；A 修改为 5.0 后为 `4.25/2`；点赞与取消点赞一致；B 删除后为 `5.00/1`；B 恢复后再次进入聚合；最后验证 Activity 下线边界、数据事实和 Redis 清理。
+
+同一轮冻结重新执行阶段 10 既有 `nearbyToCompleteActivityTicketingLoopShouldPreserveMysqlAndRedisBoundaries`，完整覆盖 `Activity → Showtime → Seat Map → Lock → Order → Pay → Issue → Verify`，结果不受 Activity Review 影响。13.6 HTTP 测试前后对票务四表、余座、Venue GEO、座位锁和 token 锁进行快照比较，所有非评价事实一致。
+
+最终证据为：阶段 13 定向测试 19 项通过；阶段 11～12 交叉测试 20 项通过；阶段 1～13 全量 486 项测试通过，0 failure、0 error、0 skipped；`mvn clean package` 为 `BUILD SUCCESS`。测试用户、Activity、Venue、Hall、Review、Review Like、座位锁和 token 锁均无残留，隔离 Redis 测试库最终 `DBSIZE=0`。
+
+阶段 13 至此正式冻结。后续如进入新阶段，不得回改已冻结的通用 `/api/reviews` 入口、Activity 下线语义、原子评分聚合、阶段 10 票务状态机、阶段 11 Nearby 算法或阶段 12 收藏关系模型，除非先建立新的独立设计 Step 与回归门槛。
+
 ## 11. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -2099,4 +2133,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.26，阶段 10 固定座位 Activity 票务、阶段 11 Activity Nearby 与阶段 12 Activity 收藏保持冻结，阶段 13 Step 13.1 已冻结 Activity Review 的接口、生命周期、聚合、Redis 和后续实现边界，但尚未修改生产 Java、SQL、数据库结构或公开接口实现。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.27，阶段 10 固定座位 Activity 票务、阶段 11 Activity Nearby、阶段 12 Activity 收藏与阶段 13 Activity Review 均已完成并冻结。
