@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.27（阶段 13 Activity Review 完整冻结版）
+- 版本：v0.28（阶段 14 Step 14.1 Review AI Summary 通用契约冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -641,7 +641,9 @@ Step 9.2 已完成增量迁移、VenueStaff 与票明细持久化映射，并把
 GET /api/ai/summaries/{targetType}/{targetId} # 读取已有 AI 评价总结
 ```
 
-响应数据预留 `summary`、`pros`、`cons`、`suitableFor`、`warningPoints`、`sourceReviewCount` 和生成版本等字段。该接口只读取已生成结果，不在用户请求链路中同步调用模型。评价发生有效变化后，由异步任务重新生成并写入 MySQL，同时更新或失效 Redis 缓存。
+阶段 14 将该能力命名为 `Review AI Summary`，第一阶段严格支持 `MOVIE`、`ACTIVITY` 两种评价目标；`VENUE`、`POST`、个性化推荐、内容审核和购票决策均不属于本能力。接口允许匿名读取，不提供公开或管理端的手工生成接口，也不允许客户端提交 Prompt、模型、供应商地址、密钥或任务状态。
+
+响应统一使用 `ReviewAiSummaryVO`，包含 `targetType`、`targetId`、`status`、`summary`、`pros`、`cons`、`suitableFor`、`warningPoints`、`sourceReviewCount`、`inputReviewCount`、`version`、`promptVersion`、`generatedAt` 和 `stale`。该接口只读取 MySQL 中的任务与总结事实并使用 Redis 缓存成功结果，绝不在用户 HTTP 请求链路中同步调用模型。评价发生有效变化后，必须在 Review 事务成功提交后异步触发重新生成；AI 通知、任务、模型或缓存失败不得回滚已经提交的评价。
 
 ### 3.12 行为采集与推荐
 
@@ -1119,6 +1121,117 @@ Step 13.1 至此冻结。后续必须依次完成独立的持久化、写路径�
 Step 13.6 的真实 MySQL、Redis、随机端口 HTTP 链路验证了：初始 `0.00/0`，用户 A 创建 4.5、用户 B 创建 3.5 后为 `4.00/2`，A 修改为 5.0 后为 `4.25/2`，点赞与取消点赞一致，B 删除后为 `5.00/1`，B 恢复后聚合恢复，并覆盖 Activity 下线后的列表、详情、评价详情、修改、删除和禁止恢复语义。测试前后 Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、`available_seats`、Venue GEO、`seat:lock:*` 和 `seat:lock:token:*` 快照一致。
 
 阶段 10 的 `Activity → Showtime → Seat Map → Lock → Order → Pay → Issue → Verify` 真实 HTTP 闭环已重新通过。阶段 13 定向测试 19 项、阶段 11～12 交叉测试 20 项均通过；全量 486 项测试通过，0 failure、0 error、0 skipped，`mvn clean package` 为 `BUILD SUCCESS`。测试数据、Review Like 和锁座 Key 已清理，阶段 13 至此冻结。
+
+### 4.6 阶段 14 Step 14.1 Review AI Summary 通用契约
+
+Step 14.1 只冻结 `MOVIE`、`ACTIVITY` 两类 Review 的 AI 总结公开契约、异步任务职责、缓存规则、安全边界和后续实施顺序。本 Step 不修改生产 Java、`sql/movielife.sql`、数据库结构、DTO、VO、Mapper、Redis Key、依赖、运行时配置或现有公开接口行为，不调用模型，也不实现 Step 14.2 及以后能力。阶段 1～13 的 Review、评分聚合、收藏、Nearby 和票务语义继续冻结。
+
+#### 4.6.1 能力与目标边界
+
+能力名称统一为 `Review AI Summary`。它只把目标下当前有效的 Review 转换为一份结构化消费参考，不生成电影剧情简介，不修改目标资料，不审核或改写评价，也不影响推荐、价格、库存、订单或票券状态。`tb_movie.summary` 永远表示运营维护的电影剧情简介；AI 评价总结只能持久化到 `tb_ai_review_summary` 及后续明确设计的 AI 任务结构，禁止写入 `tb_movie.summary`、`tb_activity.description` 或 Review 正文。
+
+第一阶段 `targetType` 要求严格大写并仅允许：
+
+- `MOVIE`：要求 `tb_movie` 物理存在。为保持现有 Movie Review 列表语义，不新增 `COMING/SHOWING/OFFLINE` 状态门槛；不存在返回 `404 MOVIE_NOT_FOUND`。
+- `ACTIVITY`：目标级总结与 Activity Review 列表保持一致，要求 `tb_activity` 物理存在且 `status=1`；不存在、草稿或下线统一返回 `404 ACTIVITY_NOT_FOUND`。Activity 下线不删除历史 AI 版本，但公开接口不再返回其总结。
+
+`VENUE`、`POST` 及其他值统一返回 `400 INVALID_TARGET_TYPE`。Movie 与 Activity 即使数字 ID 相同，也必须以 `targetType + targetId` 完整隔离任务、版本、输入指纹、MySQL 记录和 Redis 缓存。
+
+#### 4.6.2 AI 总结查询
+
+1. URL：`/api/ai/summaries/{targetType}/{targetId}`。
+2. Method：`GET`。
+3. 是否登录：否；结果是目标级公共内容，不读取当前用户，也不返回用户私有状态。携带有效登录态时只允许发生既有通用 Token TTL 刷新。
+4. Query / Path / Body 参数：Path 中 `targetType` 必须为严格大写 `MOVIE` 或 `ACTIVITY`，`targetId` 必须为正整数；无 Query 和 Body 参数。客户端不得提交 Prompt、模型名、供应商地址、密钥、输入评价、版本或任务操作。
+5. Request DTO：无。
+6. Response VO：统一返回 `ReviewAiSummaryVO`：
+
+```json
+{
+  "targetType": "MOVIE",
+  "targetId": 1001,
+  "status": "READY",
+  "summary": "整体口碑较好，叙事和表演获得较多认可。",
+  "pros": ["表演自然", "叙事完整"],
+  "cons": ["部分段落节奏偏慢"],
+  "suitableFor": ["偏好剧情片的观众"],
+  "warningPoints": ["追求强节奏的观众需谨慎"],
+  "sourceReviewCount": 28,
+  "inputReviewCount": 28,
+  "version": 3,
+  "promptVersion": "review-summary-v1",
+  "generatedAt": "2026-09-17T10:30:00",
+  "stale": false
+}
+```
+
+7. 业务错误码：`INVALID_TARGET_TYPE`、`INVALID_ID`、`MOVIE_NOT_FOUND`、`ACTIVITY_NOT_FOUND`、`INTERNAL_ERROR`。
+8. 数据库 / Redis / 模型行为：先按目标类型执行上述目标有效性校验，再读取 MySQL 中的当前任务和最新可公开总结；允许从 Redis 读取同一份公共结果。Redis 不可用或缓存内容非法时必须回源 MySQL，不得因此同步调用模型。MySQL 和 Redis 均不应在普通 GET 中创建 AI 任务；缓存回填是唯一允许的附带写入，且失败不改变 HTTP 业务结果。
+
+#### 4.6.3 公开状态与字段空值
+
+`ReviewAiSummaryVO.status` 只允许以下值：
+
+- `NOT_ENOUGH_REVIEWS`：当前有效评价少于 3 条，不调用模型；总结文本、数组、版本、Prompt 版本和生成时间为 `null`，计数字段返回当前事实，`stale=false`。
+- `GENERATING`：已经达到 3 条，但尚无成功总结，任务处于等待、处理或可重试状态；总结结果字段为 `null`，`stale=false`。
+- `READY`：最新成功总结与当前已处理任务版本一致；返回完整结果，`stale=false`。
+- `REFRESHING`：已有成功总结，但之后又发生有效评价变化或任务正在重试；继续返回最近一次成功结果，`stale=true`。
+- `UNAVAILABLE`：达到生成条件但没有成功历史结果，且本轮任务已经进入不可继续自动重试的失败状态；总结结果字段为 `null`，不向客户端暴露供应商响应、Prompt、堆栈或内部错误文本。
+
+`pros`、`cons`、`suitableFor` 和 `warningPoints` 在有成功总结时返回数组，不返回 JSON 字符串；每组最多 5 项，单项最多 100 个字符。`summary` 最多 300 个字符。服务端必须把模型响应视为不可信输入并完成 JSON 结构、类型、数量、长度和空白校验；校验失败不能发布为成功版本。
+
+#### 4.6.4 评价输入与触发规则
+
+输入事实只来自 `tb_review` 中目标匹配且 `status=1` 的有效记录。触发范围严格限定为 `MOVIE` 或 `ACTIVITY` Review 的成功创建、软删除恢复、修改和首次软删除；必须在原 Review MySQL 事务提交后发出异步通知。事务回滚、重复删除、评价查询、点赞、取消点赞、评论数变化、收藏变化、Activity Nearby、订单和票务状态变化均不得触发总结生成。
+
+模型输入只包含评价 ID、评分和去除首尾空白后的正文；不得发送用户 ID、昵称、头像、手机号、图片、点赞用户关系、评论、收藏、订单、支付、出票、核销或座位信息。有效评价总数记为 `sourceReviewCount`；实际最多选取 100 条，按 `update_time DESC, id DESC` 稳定排序，实际输入数记为 `inputReviewCount`。单条正文最多取前 1000 个字符，所有输入还必须受可配置的总字符或 token 预算约束。
+
+输入指纹必须至少覆盖 `targetType + targetId + promptVersion + 规范化后有序输入中的 reviewId/score/content`，使用稳定摘要算法生成。相同目标、Prompt 版本和输入指纹不得重复发布成功结果。评价正文属于不可信用户数据，Prompt 必须把它封装为待分析数据；正文中的命令、角色声明、链接或提示词不得改变系统指令、输出格式或权限边界。
+
+#### 4.6.5 异步任务与一致性
+
+Review AI Summary 复用项目总体框架中的 Redis Stream 作为异步通知通道；Stream 只负责至少一次投递，不是总结或任务的最终事实。后续实现使用独立的 AI Summary Stream、Consumer Group 和服务端消费者，不复用 Review Like ZSet、Feed、GEO、锁座或订单 Key。任务状态、当前可公开版本、重试次数和租约等可靠事实必须持久化到 MySQL；具体表字段、索引和迁移属于 Step 14.2，本 Step 不修改 SQL。
+
+内部任务状态冻结为：
+
+```text
+PENDING → PROCESSING → SUCCEEDED
+                    ↘ RETRY_WAIT → PROCESSING
+                    ↘ DEAD
+PENDING/PROCESSING → INSUFFICIENT_REVIEWS
+```
+
+评价发生新变化时必须推进目标的待处理版本；处于 `SUCCEEDED`、`RETRY_WAIT`、`DEAD` 或 `INSUFFICIENT_REVIEWS` 的旧任务均可因新变化重新进入 `PENDING`。多实例消费者必须通过 MySQL 条件更新和有期限租约保证同一目标同一待处理版本只有一个有效执行者。消费者在调用模型前读取当前 MySQL 评价快照；模型调用期间若又发生评价变化，本次结果可以保留为历史版本，但不得把更新后的任务错误标记为最新完成，必须继续处理后续版本。
+
+AI 通知在 Review 事务提交后执行。Stream、任务标记或模型调用失败只记录可恢复状态和脱敏日志，不得回滚已经提交的 Review、评分聚合或缓存清理。后续实现必须提供有界重试、Pending 恢复以及基于 MySQL Review 事实的周期性对账修复，避免提交后通知偶发失败造成永久漏生成。消费者只有在 MySQL 已成功持久化可公开结果后才能确认 Stream 消息；重复投递依靠目标版本和输入指纹幂等收敛。
+
+#### 4.6.6 MySQL 与 Redis 缓存职责
+
+`tb_ai_review_summary` 继续保存 AI 评价总结，与 `tb_movie.summary` 的电影剧情简介完全无关。成功总结按 `targetType + targetId` 独立递增版本并保留历史；后续 Step 14.2 才允许设计输入指纹、Prompt 版本、输入数量、任务状态及当前版本指针等持久化字段或任务表，并提供兼容 MySQL 8.0.17 的可重复迁移。
+
+MySQL 是任务状态、版本、输入计数和总结内容的最终事实。Redis 只缓存已经由 MySQL 确认的公共查询结果，缓存 Key 规划为：
+
+```text
+ai:review:summary:{targetType}:{targetId}
+```
+
+Key 中 `targetType` 使用严格大写。成功或旧版本降级结果采用 30 分钟基础 TTL 加 0～5 分钟随机抖动；`NOT_ENOUGH_REVIEWS`、`GENERATING` 和 `UNAVAILABLE` 最多短暂缓存 2 分钟。评价变化提交后应使对应目标缓存失效或进入可识别的刷新状态；新结果必须先提交 MySQL，再更新或删除缓存。缓存写入、删除失败不得改变 MySQL 任务结论，Redis 数据丢失不得丢失总结或触发同步模型调用。
+
+Review Like 继续只使用 `review:like:{reviewId}` ZSet；Review AI Summary 不读取点赞关系，不因点赞变化重新生成，也不得修改 `movie:detail:*`、Venue GEO、Feed、登录、收藏、`seat:lock:*`、`seat:lock:token:*` 或任何订单相关 Key。
+
+#### 4.6.7 权限、安全与冻结边界
+
+公开能力只有匿名只读 GET。阶段 14 不新增手工生成、重试、取消、Prompt 调试或模型配置 HTTP 接口，也不把内部 Worker 包装成 `/api/admin`。模型供应商地址、模型名、超时、密钥和预算只能由服务端受控配置提供；密钥不得进入仓库、数据库结果、Redis 消息、响应或普通日志。日志不得记录完整 Prompt、完整评价正文、模型密钥或供应商原始响应，只记录 requestId、目标、内部任务 ID、结果分类、耗时和必要的脱敏诊断信息。
+
+AI 输出只提供消费参考，不参与 Review 是否允许写入、目标评分聚合、Activity 上下架、Movie 状态、Nearby 排序、收藏、Showtime、ShowtimeSeat、`available_seats`、锁座、订单、支付、出票、退款或核销判断。模型或 AI 基础设施不可用时，以上核心业务必须保持原行为。
+
+后续实施顺序冻结为：Step 14.2 通用持久化与任务基础；Step 14.3 通用评价快照、Prompt 与模型适配；Step 14.4 先完成 Movie Review AI Summary 闭环；Step 14.5 再以同一通用能力接入 Activity；Step 14.6 完成跨目标并发、真实模型主链路、全量回归和阶段冻结。任何 Step 只能实现自身范围，不得提前接入下一目标，也不得加入 Venue/Post 总结、个性化推荐、RAG、向量数据库、AI 审核、管理端、非固定座位票务、第三方支付、MQ 或其他 AI 能力。
+
+#### 4.6.8 Step 14.1 验证与冻结结果
+
+Step 14.1 最终只修改 `docs/API接口设计.md` 与 `docs/MovieLife_项目技术设计.md`，没有修改生产 Java、测试代码、SQL、迁移、依赖、配置或 Redis Key，也没有调用模型。阶段 13 Activity Review 定向回归 34 项通过；阶段 1～13 全量 486 项测试通过，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。
+
+真实验证使用隔离 MySQL 8.0.17、Redis 7 和 Spring Boot 随机 HTTP 端口；权威 SQL 初始化、Activity Review 完整 HTTP 链路及既有全部集成测试通过。测试后隔离 Redis `DBSIZE=0`，本轮 MySQL、Redis 容器及临时数据已删除。Step 14.1 至此冻结，下一步只能单独进入 Step 14.2 通用持久化与任务基础。
 
 ## 5. 待细化事项
 

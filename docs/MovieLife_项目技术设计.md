@@ -9,7 +9,7 @@ MovieLife 是一个以电影为核心、扩展本地文娱活动发现的社区�
 - 内容：电影、活动、场馆、场次。
 - 社区：用户资料、关注、动态、评价、点赞、评论和收藏。
 - 交易：场次座位、锁座、订单、支付、退款和票券。
-- 智能化：基于真实行为的推荐，以及可解释的 AI 推荐理由。
+- 智能化：Movie/Activity 评价的结构化 AI 总结，以及基于真实行为的推荐和可解释理由。
 
 项目不追求一次性复刻大型平台的全部能力，优先保证电影购票和本地文娱发现的业务自洽。
 
@@ -29,7 +29,7 @@ MovieLife 是一个以电影为核心、扩展本地文娱活动发现的社区�
 - Redis：登录态、热点数据、锁座短期状态和限流。
 - Redis ZSet：评价点赞关系，Key 为 `review:like:{reviewId}`，member 为 `userId`，score 为点赞时间戳；点赞总数持久化在 `tb_review.like_count`。
 - Lua：多座位批量校验与原子锁定。
-- Redis Stream：异步处理行为采集、订单超时释放、出票和推荐特征更新。
+- Redis Stream：异步处理行为采集、AI 评价总结通知、订单超时释放、出票和推荐特征更新。
 
 Redis 用于提升并发性能，最终订单、座位售出结果和评价内容仍以 MySQL 持久化结果为准。
 
@@ -156,7 +156,7 @@ Seat Map
 
 ### 3.9 推荐与 AI
 
-推荐链路暂定为：行为采集 → 用户/内容标签打分 → 候选召回 → 规则排序 → AI 生成推荐理由，推荐理由随推荐结果一起返回。评价总结由评论变化触发异步生成，持久化并缓存后由只读接口提供，禁止在详情页请求中同步调用模型。AI 不直接决定座位库存、价格、支付结果或订单状态。
+推荐链路暂定为：行为采集 → 用户/内容标签打分 → 候选召回 → 规则排序 → AI 生成推荐理由，推荐理由随推荐结果一起返回。阶段 14 只推进独立的 `Review AI Summary`，由 Movie/Activity 的有效评价变化在事务提交后触发异步生成，结果持久化并缓存后由单独的只读接口提供；不在电影、活动详情或 AI Summary 查询请求中同步调用模型。AI 不直接决定评价写入、目标评分、座位库存、价格、支付结果或订单状态。
 
 ## 4. 阶段 7：锁座设计
 
@@ -2098,7 +2098,66 @@ Activity 评价列表继续复用通用 `/api/reviews`，支持最新、点赞�
 
 阶段 13 至此正式冻结。后续如进入新阶段，不得回改已冻结的通用 `/api/reviews` 入口、Activity 下线语义、原子评分聚合、阶段 10 票务状态机、阶段 11 Nearby 算法或阶段 12 收藏关系模型，除非先建立新的独立设计 Step 与回归门槛。
 
-## 11. 服务端模块建议
+## 11. 阶段 14 Review AI Summary
+
+### 11.1 Step 14.1：Movie/Activity 通用契约设计与冻结
+
+阶段 14 只实现一个 AI 能力：把 Movie 或 Activity 当前有效的 Review 汇总为结构化的公共消费参考。第一阶段允许严格大写的 `MOVIE`、`ACTIVITY`，不支持 Venue、Post、个性化推荐、推荐理由、内容审核、智能客服、RAG 或购票决策。底层从一开始使用 `targetType + targetId` 多态设计，但业务接入按 Movie 先行、冻结后再接入 Activity 的顺序推进，不在同一个小 Step 同时落地两个目标。
+
+Step 14.1 只更新设计文档，冻结 API、VO、目标有效性、输入、任务、缓存、权限、安全和后续实施顺序；不修改生产 Java、SQL、表结构、DTO、VO、Mapper、Redis Key、依赖或运行时配置，不调用模型，也不提前实现 Step 14.2。阶段 1～13 已冻结业务语义保持不变。
+
+#### 11.1.1 目标与公开读取
+
+公开入口统一为匿名只读 `GET /api/ai/summaries/{targetType}/{targetId}`。客户端不能通过该接口提交 Prompt、模型、供应商地址、密钥、评价输入、目标状态、版本或任务动作，阶段 14 也不新增公开或 `/api/admin` 手工生成接口。服务端先校验正整数 ID 和严格大写目标类型：
+
+- `MOVIE` 只要求 Movie 物理存在，延续现有 Movie Review 列表不额外限制电影状态的语义；不存在返回 `MOVIE_NOT_FOUND`。
+- `ACTIVITY` 要求 Activity 当前 `status=1`，与 Activity Review 列表的目标级公开规则一致；不存在、草稿或下线返回 `ACTIVITY_NOT_FOUND`。下线不删除历史总结，但不能通过目标级 AI 接口读取。
+
+统一 `ReviewAiSummaryVO` 包含目标、公开状态、`summary`、优点、缺点、适合人群、避雷点、有效评价总数、实际输入数、总结版本、Prompt 版本、生成时间和 `stale`。公开状态固定为 `NOT_ENOUGH_REVIEWS`、`GENERATING`、`READY`、`REFRESHING`、`UNAVAILABLE`；状态与字段空值规则以 `API接口设计.md` 4.6 为准。查询只读取 MySQL 事实并允许使用 Redis 公共缓存，禁止在请求线程同步调用模型或创建任务。
+
+#### 11.1.2 输入、输出和 Prompt 安全
+
+输入只来自 `tb_review` 中 `target_type/target_id` 匹配且 `status=1` 的评价。少于 3 条不调用模型；最多按 `update_time DESC, id DESC` 选择 100 条。发送给模型的单条数据只有 Review ID、评分和规范化正文，正文最多取前 1000 个字符，整体再受可配置字符或 token 预算限制。用户、昵称、头像、手机号、图片、点赞、评论、收藏、订单、支付、出票、核销和座位信息均不得进入模型输入。
+
+输入指纹覆盖目标、Prompt 版本和有序输入的 Review ID、评分、正文；相同指纹不得重复发布成功结果。评价正文是完全不可信的数据，不得把其中的命令、角色声明、链接或提示词当成系统指令。模型只允许输出固定 JSON，服务端对 `summary` 和四组数组执行类型、数量、长度及空白校验；不合法响应不能进入成功版本。模型供应商密钥只能来自服务端受控配置，不进入仓库、消息、数据库结果、Redis 缓存、HTTP 响应或普通日志。
+
+#### 11.1.3 触发与任务一致性
+
+只有 Movie/Activity Review 的成功创建、软删除恢复、修改和首次软删除会在原 MySQL 事务提交后触发 AI 通知；事务回滚、重复删除、查询、点赞、取消点赞、评论、收藏、Nearby 与票务变化不触发。通知或模型失败不得回滚 Review、评分聚合或既有缓存清理。
+
+异步通知复用总体框架中的 Redis Stream，采用独立 Stream、Consumer Group 和消费者；Stream 只提供至少一次投递，不是任务或总结的最终事实。MySQL 保存任务状态、待处理版本、当前成功版本、重试和租约等可靠事实。内部任务生命周期为 `PENDING → PROCESSING → SUCCEEDED`，失败时进入 `RETRY_WAIT` 并可重新处理，超过有界重试进入 `DEAD`，有效评价不足进入 `INSUFFICIENT_REVIEWS`；新评价变化可让旧终态重新进入 `PENDING`。
+
+多实例消费者通过 MySQL 条件更新和有期限租约竞争同一目标版本。消费者以调用模型前读取的 MySQL Review 快照为输入；调用期间出现新变化时，旧输入结果最多作为历史版本保留，不能把较新的任务误标为完成。消费者必须在总结成功写入 MySQL 后才确认 Stream 消息，重复投递通过目标版本、Prompt 版本和输入指纹幂等收敛。提交后通知偶发失败不能永久漏生成，后续实现必须提供 Pending 恢复、有界重试和基于 MySQL Review 事实的周期性对账修复。
+
+#### 11.1.4 MySQL、Redis 与领域隔离
+
+`tb_ai_review_summary` 专门保存 AI 评价总结。`tb_movie.summary` 始终是人工或运营维护的电影剧情简介，不能存放 AI 评价总结；`tb_activity.description` 和 Review 正文同样不能被 AI 回写。Movie 与 Activity 使用相同通用引擎，但以完整的 `targetType + targetId` 隔离任务、版本、指纹、历史和缓存。
+
+MySQL 是 AI 任务和总结的最终事实；Redis Stream 只传输通知，Redis String 只缓存 MySQL 已确认的公共查询结果。缓存规划为 `ai:review:summary:{targetType}:{targetId}`，成功或旧版本降级结果使用 30 分钟基础 TTL 加 0～5 分钟抖动，非终态最多缓存 2 分钟。Redis 读取失败、缓存 JSON 损坏或 Key 丢失时回源 MySQL；缓存更新或删除失败不能改变任务结论，也不能触发同步模型调用。
+
+Review Like 继续使用独立的 `review:like:{reviewId}` ZSet。AI 总结不读取点赞关系，不因点赞变化生成，不修改 Movie Detail、Activity 查询、收藏、Venue GEO、Feed、Showtime、ShowtimeSeat、TicketOrder、TicketOrderItem、`available_seats`、`seat:lock:*` 或 `seat:lock:token:*`。AI 输出只提供参考，不参与任何目标状态、排序、评价资格、库存或交易判断。
+
+#### 11.1.5 权限、可观测性与后续 Step
+
+公开权限只有匿名读取；异步触发、任务领取、模型调用、重试和缓存刷新都是服务端内部能力。普通用户、场馆工作人员和客户端均不能指定或控制任务。日志只允许记录 requestId、目标、内部任务 ID、结果分类、耗时和脱敏诊断，不记录完整 Prompt、完整评价正文、密钥或供应商原始响应。模型故障必须与核心业务隔离，Movie/Activity Review 及阶段 1～13 的其他能力照常工作。
+
+后续顺序冻结为：
+
+1. Step 14.2：通用总结与任务持久化基础，只处理 MySQL 结构、迁移、Entity、Mapper 和任务条件更新。
+2. Step 14.3：通用评价快照、输入指纹、Prompt、模型 Adapter 和严格响应校验，不开放目标业务闭环。
+3. Step 14.4：只接入 Movie Review，完成触发、异步生成、只读 API、缓存和真实模型闭环后冻结。
+4. Step 14.5：复用同一通用能力接入 Activity，并验证阶段 10～13 下线、Nearby、收藏、评价和票务边界。
+5. Step 14.6：跨目标隔离、多消费者并发、失败恢复、完整真实联调、全量回归与阶段冻结，不新增生产能力。
+
+任何 Step 都必须单独完成设计、实现、自动化测试、真实 MySQL/Redis/HTTP 联调、`mvn clean package`、Git commit 和冻结。不得提前实现下一 Step，也不得在阶段 14 加入 Venue/Post 总结、个性化推荐、AI 审核、管理端、向量数据库、MQ、非固定座位票务或其他 AI 能力。
+
+#### 11.1.6 Step 14.1 验证与冻结
+
+本 Step 只修改两份 Markdown 权威设计文档，没有修改生产 Java、测试、SQL、迁移、依赖、配置或 Redis Key，没有调用模型，也没有提前创建 AI DTO、VO、Mapper、任务表、Stream 或缓存。阶段 13 Activity Review 定向回归 34 项通过；阶段 1～13 全量 486 项测试通过，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。
+
+真实验证运行在隔离 MySQL 8.0.17、Redis 7 和 Spring Boot 随机 HTTP 端口上，覆盖权威 SQL 初始化及现有 Activity Review HTTP 主链路。测试完成后隔离 Redis `DBSIZE=0`，MySQL、Redis 容器和临时数据已删除。Step 14.1 至此正式冻结；后续不得回改本 Step 的目标范围、匿名只读权限、目标有效性、输入隐私、异步职责、MySQL 最终事实或缓存边界，除非先建立新的独立设计 Step 与回归门槛。
+
+## 12. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
 
@@ -2118,7 +2177,7 @@ ai         评价总结的异步生成、持久化和读取
 common     统一响应、异常、鉴权、限流、幂等
 ```
 
-## 12. 关键非功能要求
+## 13. 关键非功能要求
 
 - 所有写接口校验当前用户和资源归属。
 - 订单、支付、锁座操作必须支持幂等。
@@ -2133,4 +2192,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.27，阶段 10 固定座位 Activity 票务、阶段 11 Activity Nearby、阶段 12 Activity 收藏与阶段 13 Activity Review 均已完成并冻结。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.28，阶段 1～13 已完成并冻结，阶段 14 当前只冻结 Step 14.1 Review AI Summary 通用契约，尚未实现持久化、模型调用、异步任务或查询接口。
