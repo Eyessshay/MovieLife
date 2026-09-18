@@ -25,6 +25,9 @@ public final class RedisConstants {
     public static final String VENUE_GEO_KEY = "venue:geo:";
 
     public static final String REVIEW_LIKE_KEY = "review:like:";
+    public static final String AI_REVIEW_SUMMARY_KEY = "ai:review:summary:";
+    public static final Duration AI_REVIEW_SUMMARY_TTL = Duration.ofMinutes(30);
+    public static final long AI_REVIEW_SUMMARY_TTL_RANDOM_MINUTES = 5L;
     public static final String POST_LIKE_KEY = "post:like:";
     public static final String FEED_KEY = "feed:";
 

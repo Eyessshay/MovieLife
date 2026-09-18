@@ -2157,6 +2157,43 @@ Review Like 继续使用独立的 `review:like:{reviewId}` ZSet。AI 总结不�
 
 真实验证运行在隔离 MySQL 8.0.17、Redis 7 和 Spring Boot 随机 HTTP 端口上，覆盖权威 SQL 初始化及现有 Activity Review HTTP 主链路。测试完成后隔离 Redis `DBSIZE=0`，MySQL、Redis 容器和临时数据已删除。Step 14.1 至此正式冻结；后续不得回改本 Step 的目标范围、匿名只读权限、目标有效性、输入隐私、异步职责、MySQL 最终事实或缓存边界，除非先建立新的独立设计 Step 与回归门槛。
 
+### 11.2 Step 14.2 通用持久化与任务基础
+
+#### 11.2.1 数据结构与版本语义
+
+本 Step 将 `tb_ai_review_summary` 收敛为成功结果的不可变版本表，并新增每目标一行的 `tb_ai_summary_task`。Summary 使用 `prompt_version + source_fingerprint` 标识真实输入，`source_version` 记录生成所依据的任务版本，`source_review_count/input_review_count` 区分有效评价总数与实际送入模型数量。`source_fingerprint` 使用 `CHAR(64) CHARACTER SET ascii COLLATE ascii_bin` 保存小写 SHA-256 十六进制值，唯一约束为 `target_type + target_id + prompt_version + source_fingerprint`。
+
+Task 中 `dirty_version` 每次标脏原子加一，`processed_version` 只推进到已经完成判断的版本。Worker 领取时把当时的 `dirty_version` 写入 `processing_version`，并写入 `lease_owner/lease_until`。这样模型处理期间即使 `dirty_version` 再次增加，旧 Worker 也只能完成它领取的 `processing_version`，不能吞掉更新版本。
+
+`last_summary_version` 是受任务行锁保护的版本分配器，`current_summary_id` 指向当前 MySQL 已确认的不可变结果。Summary 本身不保存处理中、重试或失败状态；这些可变事实只属于 Task。Movie 与 Activity 数字 ID 相同也分别拥有任务行、Summary 版本、输入幂等约束和缓存 Key。
+
+#### 11.2.2 原子状态转换与事务
+
+持久层提供 `markDirty`、`claim`、`renewLease`、`markRetry`、`markDead`、`markInsufficient` 和 `publish`。所有状态转换均以单条条件 UPDATE 或行锁事务完成并严格检查 `affectedRows`：
+
+- `markDirty` 在任务不存在时创建 `PENDING`；任务正在 `PROCESSING` 时只增加 `dirty_version`，保留当前租约；其他状态重新进入 `PENDING`。
+- `claim` 只领取存在未处理版本的 `PENDING`、重试时间已到的 `RETRY_WAIT` 或租约已过期的 `PROCESSING`，竞争失败返回未领取，不覆盖有效租约。
+- `renewLease` 必须匹配当前持有者且原租约尚未过期；过期租约不能通过续租复活。
+- `markRetry/markDead` 只保存限定格式的脱敏错误码，不保存第三方原始响应；若处理期间已有更新的 `dirty_version`，则清除旧尝试并立即回到 `PENDING`，不能用旧输入的失败延迟或终止新输入。
+- `markInsufficient/publish` 只推进到当前 `processing_version`；若 `dirty_version` 更大，释放租约后回到 `PENDING`。
+- `publish` 在同一事务内锁定任务行、校验有效租约、复用相同输入的历史 Summary 或分配递增版本、插入不可变结果并更新当前指针。插入或指针更新失败全部回滚。
+
+#### 11.2.3 Redis 不可变结果缓存
+
+内部缓存仓库使用 `ai:review:summary:{targetType}:{targetId}`，Value 必须包含 `summaryId`、目标、版本、Prompt 版本、生成时间和完整展示字段。缓存只接受已经持久化且具有 ID/版本的 Summary，每次写入整体替换并设置 30～35 分钟 TTL，不允许逐字段修改。读取时校验 Key 中目标和 Value 中目标一致；JSON 损坏、缺少身份字段或串目标按 miss 处理并尽力删除。
+
+缓存读写异常只记录不含正文与密钥的诊断日志，不能回滚、覆盖或重新解释 MySQL 事实。本 Step 只实现缓存仓库，不实现公开查询的 MySQL 回源编排、非终态缓存或 Review 提交后的缓存失效。
+
+#### 11.2.4 本 Step 明确不做
+
+本 Step 不新增 Controller、公开 DTO/VO、管理权限、定时 Worker、Redis Stream 生产者或消费者，不读取 `tb_review`，不计算指纹，不实现 Prompt、模型供应商或响应解析，也不校验 Movie/Activity 当前有效性。现有 Review 创建、恢复、修改和删除不会创建 AI 任务；AI 查询 API 仍未开放。阶段 1～13 的评价、点赞、收藏、GEO、票务和锁座实现均保持不变。
+
+#### 11.2.5 验证与冻结
+
+验证环境为隔离 MySQL 8.0.17、Redis 7 和随机 HTTP 端口。权威 SQL 初始化及 Step 14.2 迁移连续执行两次成功；14.2 定向测试 14 项、阶段 13 Activity Review 回归 34 项和全量 500 项测试全部通过，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。清理后 AI Task/Summary 为 0 行、Redis `DBSIZE=0`，隔离容器已删除。
+
+Step 14.2 冻结后，不得把任务基础类直接暴露为 HTTP 接口，不得在 Review 写链路中提前调用，不得用 Redis 代替 MySQL 任务事实，也不得把模型调用、指纹计算、Stream Worker 或 Movie/Activity 目标闭环回填到本 Step。
+
 ## 12. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -2192,4 +2229,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.28，阶段 1～13 已完成并冻结，阶段 14 当前只冻结 Step 14.1 Review AI Summary 通用契约，尚未实现持久化、模型调用、异步任务或查询接口。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.29，阶段 1～13 已完成并冻结，阶段 14 已实现并冻结 Step 14.2 通用持久化与任务基础。模型调用、异步 Worker、Review 触发和查询接口仍未实现。

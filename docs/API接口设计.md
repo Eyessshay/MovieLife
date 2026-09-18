@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.28（阶段 14 Step 14.1 Review AI Summary 通用契约冻结版）
+- 版本：v0.29（阶段 14 Step 14.2 通用持久化与任务基础冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -1232,6 +1232,32 @@ AI 输出只提供消费参考，不参与 Review 是否允许写入、目标评
 Step 14.1 最终只修改 `docs/API接口设计.md` 与 `docs/MovieLife_项目技术设计.md`，没有修改生产 Java、测试代码、SQL、迁移、依赖、配置或 Redis Key，也没有调用模型。阶段 13 Activity Review 定向回归 34 项通过；阶段 1～13 全量 486 项测试通过，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。
 
 真实验证使用隔离 MySQL 8.0.17、Redis 7 和 Spring Boot 随机 HTTP 端口；权威 SQL 初始化、Activity Review 完整 HTTP 链路及既有全部集成测试通过。测试后隔离 Redis `DBSIZE=0`，本轮 MySQL、Redis 容器及临时数据已删除。Step 14.1 至此冻结，下一步只能单独进入 Step 14.2 通用持久化与任务基础。
+
+#### 4.6.9 Step 14.2 通用持久化与任务基础
+
+Step 14.2 只实现目标无关的可靠性底座，不开放本节规划的 GET 接口，不监听 Review 变化，不创建 Redis Stream 消息，不读取 Movie/Activity 有效性，不组装评价快照、计算输入指纹或调用模型。因而本 Step 完成后，现有 Movie/Activity Review 请求仍不会产生 AI 任务或总结。
+
+`tb_ai_review_summary` 只保存成功结果的不可变版本，新增 `prompt_version`、`source_fingerprint CHAR(64) ASCII BINARY`、`source_version` 和 `input_review_count`。`target_type + target_id + version` 保证目标内版本唯一；`target_type + target_id + prompt_version + source_fingerprint` 保证同一规范输入不会重复发布。输入指纹固定为小写 SHA-256 十六进制文本，但指纹的规范化计算属于 Step 14.3，本 Step 只校验和持久化已经计算好的值。
+
+`tb_ai_summary_task` 对每个 `target_type + target_id` 只保留一行任务事实：
+
+- `dirty_version` 表示累计收到的有效变化版本，`processed_version` 表示已经完成判断的版本。
+- `processing_version` 把当前 Worker 租约绑定到它领取时的 `dirty_version`；生成期间再次变脏时，本次完成只能推进到旧版本，任务继续保持 `PENDING`。
+- `last_summary_version` 负责分配目标内成功总结版本，`current_summary_id` 是当前可用不可变总结指针；发布事务会校验指针指向的 Summary 与任务目标一致。
+- `status` 只允许 `PENDING`、`PROCESSING`、`SUCCEEDED`、`RETRY_WAIT`、`DEAD`、`INSUFFICIENT_REVIEWS`。
+- `attempt_count`、`next_retry_time`、`lease_owner`、`lease_until` 和脱敏后的 `last_error_code` 支撑有界重试与 Worker 宕机接管；供应商原文、Prompt、密钥和评价正文不得写入错误字段。旧版本处理期间若已有更新的 `dirty_version`，旧版本随后重试或终止时必须立即回到 `PENDING` 并清除旧尝试，不能延迟或杀死新输入。
+
+任务写入全部使用 MySQL 原子条件语句并严格检查 `affectedRows`。领取仅允许未完成的 `PENDING`、到期的 `RETRY_WAIT` 或租约过期的 `PROCESSING`；续租、重试、终止、评价不足和发布都必须匹配目标、`processing_version`、租约持有者及未过期时间。发布在同一事务内锁定任务行、按输入幂等查找或插入 Summary、更新当前指针并释放租约；任一步失败整体回滚。
+
+Redis 本 Step 只提供内部不可变结果缓存仓库，Key 仍为 `ai:review:summary:{targetType}:{targetId}`。Value 是带 `summaryId`、目标和版本的完整快照，TTL 为 30 分钟加 0～5 分钟抖动；只能整体替换，不能逐字段修改。读取到损坏或串目标数据按未命中处理并删除；Redis 读写失败不改变 MySQL 任务或总结事实。非终态短缓存、MySQL 回源编排及 HTTP 输出留到目标闭环 Step 实现。
+
+Step 14.2 的内部类不构成客户端契约，普通用户、场馆工作人员和管理端均无调用入口。后续 Step 14.3 只能继续实现通用评价快照、稳定指纹算法、Prompt、模型 Adapter 和响应校验，不得借此接入 Movie/Activity Review 触发或公开查询。
+
+#### 4.6.10 Step 14.2 验证与冻结结果
+
+Step 14.2 定向测试 14 项通过，覆盖真实 MySQL 任务状态、目标隔离、并发标脏、租约竞争与过期接管、重试到期、处理中再次变脏、旧版本失败不压住新输入、评价不足、指纹幂等、当前 Summary 指针，以及真实 Redis 不可变快照和缓存故障降级。阶段 13 Activity Review 定向回归 34 项通过；全量 500 项测试通过，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。
+
+真实验证使用隔离 MySQL 8.0.17、Redis 7 和 Spring Boot 随机 HTTP 端口。权威 SQL 初始化成功，`V14_2__ai_summary_persistence.sql` 连续执行两次成功；既有 Activity Review HTTP 链路保持原行为。测试数据清理后 AI Task/Summary 均为 0 行，隔离 Redis 最终 `DBSIZE=0`，临时容器均已删除。Step 14.2 至此冻结，下一步只能单独进入 Step 14.3 通用评价快照、输入指纹、Prompt 与模型适配。
 
 ## 5. 待细化事项
 
