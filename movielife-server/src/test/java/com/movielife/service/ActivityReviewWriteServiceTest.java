@@ -33,6 +33,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -50,6 +51,8 @@ class ActivityReviewWriteServiceTest {
     private StringRedisTemplate redisTemplate;
     @Mock
     private ZSetOperations<String, String> zSetOperations;
+    @Mock
+    private MovieReviewAiTrigger movieReviewAiTrigger;
 
     private ReviewServiceImpl reviewService;
 
@@ -57,7 +60,7 @@ class ActivityReviewWriteServiceTest {
     void setUp() {
         reviewService = new ReviewServiceImpl(
                 reviewMapper, movieMapper, activityMapper, userMapper,
-                redisTemplate, new ObjectMapper()
+                redisTemplate, new ObjectMapper(), movieReviewAiTrigger
         );
         UserHolder.saveUser(userContext(1L));
     }
@@ -86,6 +89,7 @@ class ActivityReviewWriteServiceTest {
         verify(movieMapper, never()).addReviewScore(anyLong(), any(BigDecimal.class));
         verify(redisTemplate, never()).delete("review:like:11");
         verify(redisTemplate, never()).delete("movie:detail:1");
+        verifyNoInteractions(movieReviewAiTrigger);
     }
 
     @Test

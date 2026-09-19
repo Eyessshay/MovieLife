@@ -2228,6 +2228,32 @@ Prompt 版本固定为 `review-summary-v1`。System message 保存能力、事�
 
 验证环境为隔离 MySQL 8.0.17、Redis 7、随机 Spring Boot HTTP 端口和随机本地模型 Stub 端口。14.3 定向测试 17 项、阶段 13 Activity Review 回归 34 项及全量 517 项测试全部通过，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。快照事务回滚后测试数据为 0，AI Task/Summary 为 0 行，Redis `DBSIZE=0`，隔离容器已删除。
 
+### 11.4 Step 14.4 Movie Review AI Summary 闭环
+
+#### 11.4.1 提交后触发与领域隔离
+
+`ReviewServiceImpl` 只在既有 Review 写事务成功提交后的回调中通知 `MovieReviewAiTrigger`。触发事件严格为 Movie Review 的创建、恢复、修改和首次删除；回滚与重复删除不触发。Trigger 先调用通用持久层 `markDirty(MOVIE, movieId)`，成功后删除 Movie AI Summary 缓存并发布独立 Stream 通知。标脏失败时没有可恢复的 MySQL 任务事实，因此停止本次通知并记录脱敏错误；缓存或 Stream 异常只记录，不能反向影响已提交的 Review。默认配置 `enabled=false`，未启用部署保持阶段 1～13 行为。
+
+Activity 分支没有调用 Trigger，Activity Review 的写入、下线语义和评分聚合完全不变；Review Like、Movie Detail 缓存、收藏、GEO、票务和锁座仍与 AI Summary 相互独立。
+
+#### 11.4.2 Stream、Worker、租约与重试
+
+专用 Stream 为 `ai:review:summary:stream`，Consumer Group 为 `ai:review:summary:group`，消息只携带目标类型和 ID，不包含评价正文、Prompt、用户信息、密钥或模型响应。消费者只接受 `MOVIE`，异常或其他目标的毒消息不会进入生成链路。
+
+`MovieReviewAiSummaryWorker` 使用唯一 `leaseOwner` 和默认 2 分钟租约调用通用 `claim`；重复通知竞争失败即可安全收敛。领取后调用 Step 14.3 的单一 `ReviewSummaryGenerationService.generate(MOVIE, movieId, processingVersion)`。评价不足走 `markInsufficient`；生成成功走通用 `publish` 原子发布，MySQL 事务成功返回后才整体写入 Redis；预期的模型失败按通用重试策略进入 `RETRY_WAIT` 或 `DEAD`。定时扫描只重新投递已到期的 Movie `RETRY_WAIT`，不扫描 Activity。跨消费者 Pending 接管、通知丢失对账及更完整的租约故障恢复按原规划留给 Step 14.6。
+
+#### 11.4.3 匿名查询和公开状态
+
+`AiReviewSummaryController` 开放匿名 `GET /api/ai/summaries/{targetType}/{targetId}`，Step 14.4 的查询服务严格只接受 `MOVIE`。Movie 只要求物理存在，不追加状态门槛。查询先统计当前有效 Review，再读取 MySQL 任务和当前 Summary 指针；缓存命中还必须与 MySQL `current_summary_id` 一致，未命中则回源 MySQL 并尽力回填。GET 不创建任务、不调用模型，也不信任 Redis 作为最终事实。
+
+少于 3 条映射 `NOT_ENOUGH_REVIEWS`；无成功结果的 `PENDING/PROCESSING/RETRY_WAIT` 映射 `GENERATING`；当前成功版本已追平任务映射 `READY`；已有成功版本但任务再次变脏或处理中映射 `REFRESHING` 并返回旧结果、`stale=true`；无成功历史的 `DEAD` 映射 `UNAVAILABLE`。内部任务状态、错误码和供应商诊断均不公开。
+
+#### 11.4.4 验证与冻结
+
+验证环境为隔离 MySQL 8.0.17、Redis 7 和随机 Spring Boot HTTP 端口；受控 Client Stub 验证 Movie 从三次已提交 Review、Stream 消费、MySQL 发布、Redis 缓存到匿名 HTTP `READY` 的完整业务编排，Step 14.3 已冻结的本地真实模型 HTTP Adapter 证据继续有效。Step 14.4 定向测试 24 项、阶段 13 Activity Review 交叉回归 34 项和全量 541 项测试全部通过，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。
+
+清理后测试 Movie/User/Review、AI Task/Summary 均无残留，AI Stream 和结果缓存已删除，Redis `DBSIZE=0`，隔离容器已删除。Step 14.4 冻结后，不得把 Movie 专用逻辑复制成第二套 Activity 生成管线；Step 14.5 只能通过目标策略和通用组件接入 Activity，不得顺带实现 Step 14.6 的跨目标并发与完整故障恢复。
+
 ## 12. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -2263,4 +2289,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.30，阶段 1～13 已完成并冻结，阶段 14 已实现并冻结 Step 14.3 通用模型适配和评价快照。任务 Worker、Review 触发、Summary 发布和查询接口仍未实现。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.31，阶段 1～13 已完成并冻结，阶段 14 已实现并冻结 Step 14.4 Movie Review AI Summary 闭环。Activity 接入、跨目标并发和完整故障恢复仍未实现。

@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.30（阶段 14 Step 14.3 通用模型适配和评价快照冻结版）
+- 版本：v0.31（阶段 14 Step 14.4 Movie Review AI Summary 闭环冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -1278,6 +1278,22 @@ Movie 与 Activity 共用一条生成链路，差异只由 `ReviewSummaryTargetP
 Step 14.3 定向测试 17 项通过，覆盖 Movie/Activity 目标策略、真实 MySQL 一致快照与排序、Unicode 规范化和截断、PII 脱敏、稳定指纹、Prompt 注入隔离、严格 JSON、真实本地 HTTP Adapter、状态/超时分类、响应大小上限、重试决策、评价不足短路及待发布结果组装。阶段 13 Activity Review 交叉回归 34 项通过；全量 517 项测试通过，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。
 
 真实验证使用隔离 MySQL 8.0.17、Redis 7、随机 Spring Boot HTTP 端口和随机本地模型 Stub 端口。快照事务回滚后测试 Movie/User/Review 数据为 0，AI Task/Summary 均为 0 行，Redis 最终 `DBSIZE=0`；隔离容器和临时运行进程已删除。Step 14.3 至此冻结，下一步只能单独进入 Step 14.4 Movie Review AI Summary 闭环。
+
+#### 4.6.13 Step 14.4 Movie Review AI Summary 闭环
+
+Step 14.4 只接入 `MOVIE`。Movie Review 成功创建、软删除恢复、修改或首次软删除后，沿用既有 Review 事务提交回调，先标记通用 MySQL 任务为脏，再清理 `ai:review:summary:MOVIE:{movieId}` 公共缓存并向独立 `ai:review:summary:stream` 写入只含 `targetType=MOVIE`、`targetId` 的通知。事务回滚、重复删除、查询、点赞、收藏或票务变化均不触发；AI 任务、Stream 或缓存异常不得回滚已经提交的 Review 与评分聚合。能力由服务端配置开关控制，默认关闭，不改变未启用环境的既有 Review 行为。
+
+Movie Worker 使用 Consumer Group `ai:review:summary:group` 接收至少一次通知，并以 MySQL 条件 UPDATE 竞争任务版本和有期限租约。领取成功后只调用 Step 14.3 的通用 `ReviewSummaryGenerationService`，不复制 Movie 专用 Prompt、快照或模型生成方法。有效评价少于 3 条时写入 `INSUFFICIENT_REVIEWS` 并清除旧缓存；成功结果通过 `publish()` 在同一 MySQL 事务中幂等写入不可变 Summary、推进版本并更新当前指针，事务返回后才更新公共 Redis 缓存。可重试错误进入 `RETRY_WAIT`，到期扫描器重新投递；达到上限或不可重试错误进入 `DEAD`。只有状态转换已由 MySQL 接受的消息才确认，重复消息通过任务版本和输入指纹收敛。
+
+匿名只读入口现已开放 `GET /api/ai/summaries/MOVIE/{movieId}`。它先验证正整数 ID 和 Movie 物理存在，再读取有效 Review 数、MySQL 任务和当前 Summary；Redis 仅用于读取同一不可变成功结果，未命中或损坏时回源 MySQL 并尽力回填，绝不在 GET 中创建任务或同步调用模型。公开状态严格映射为 `NOT_ENOUGH_REVIEWS`、`GENERATING`、`READY`、`REFRESHING`、`UNAVAILABLE`；`REFRESHING` 继续返回最近成功版本并设置 `stale=true`，内部错误码、租约、重试次数和供应商信息不进入响应。
+
+本 Step 没有监听 `ACTIVITY` Review，也不接受 `ACTIVITY` 查询；Activity 目标策略仍仅作为 Step 14.3 通用生成基础存在，必须到 Step 14.5 才能复用同一触发、Worker 和查询能力接入。跨消费者 Pending 接管、周期性对账、跨目标并发和真实供应商主链路仍属于 Step 14.6；本 Step 不新增管理端生成接口、Venue/Post、个性化推荐或任何票务改动。
+
+#### 4.6.14 Step 14.4 验证与冻结结果
+
+Step 14.4 定向测试 24 项通过，覆盖创建、恢复、修改、首次删除、重复删除与事务回滚触发边界、Activity 不误触发、缓存失败不阻塞通知、Movie 公开五状态、评价不足、成功发布、可重试与终止失败、到期重投、匿名 Controller，以及真实 MySQL、Redis Stream、租约、Summary 指针、结果缓存和随机端口 HTTP 闭环。阶段 13 Activity Review 交叉回归 34 项通过；全量 541 项测试通过，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。
+
+真实验证使用隔离 MySQL 8.0.17、Redis 7 和随机 Spring Boot HTTP 端口，模型边界使用受控 `AiReviewSummaryClient` Stub，模型 Adapter 的真实本地 HTTP 协议证据继续继承 Step 14.3。测试数据、AI Task/Summary、Stream 与公共缓存已清理，Redis 最终 `DBSIZE=0`，隔离容器已删除。Step 14.4 至此冻结，下一步只能单独进入 Step 14.5 Activity Review AI Summary 接入。
 
 ## 5. 待细化事项
 

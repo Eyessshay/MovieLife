@@ -58,6 +58,8 @@ class ActivityReviewQueryServiceTest {
     private StringRedisTemplate stringRedisTemplate;
     @Mock
     private ZSetOperations<String, String> zSetOperations;
+    @Mock
+    private MovieReviewAiTrigger movieReviewAiTrigger;
 
     private ReviewServiceImpl reviewService;
 
@@ -65,7 +67,7 @@ class ActivityReviewQueryServiceTest {
     void setUp() {
         reviewService = new ReviewServiceImpl(
                 reviewMapper, movieMapper, activityMapper, userMapper,
-                stringRedisTemplate, new ObjectMapper()
+                stringRedisTemplate, new ObjectMapper(), movieReviewAiTrigger
         );
     }
 

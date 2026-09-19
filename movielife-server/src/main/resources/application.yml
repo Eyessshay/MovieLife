@@ -35,6 +35,7 @@ movielife:
     enabled: ${STARTUP_CHECK_ENABLED:true}
   ai:
     review-summary:
+      enabled: ${AI_REVIEW_SUMMARY_ENABLED:false}
       endpoint: ${AI_REVIEW_SUMMARY_ENDPOINT:}
       api-key: ${AI_REVIEW_SUMMARY_API_KEY:}
       model: ${AI_REVIEW_SUMMARY_MODEL:}
@@ -46,3 +47,10 @@ movielife:
       max-review-characters: ${AI_REVIEW_SUMMARY_MAX_REVIEW_CHARACTERS:1000}
       max-input-characters: ${AI_REVIEW_SUMMARY_MAX_INPUT_CHARACTERS:20000}
       max-attempts: ${AI_REVIEW_SUMMARY_MAX_ATTEMPTS:3}
+      lease-duration: ${AI_REVIEW_SUMMARY_LEASE_DURATION:2m}
+      stream-batch-size: ${AI_REVIEW_SUMMARY_STREAM_BATCH_SIZE:10}
+      retry-batch-size: ${AI_REVIEW_SUMMARY_RETRY_BATCH_SIZE:100}
+      worker-fixed-delay-ms: ${AI_REVIEW_SUMMARY_WORKER_FIXED_DELAY_MS:1000}
+      worker-initial-delay-ms: ${AI_REVIEW_SUMMARY_WORKER_INITIAL_DELAY_MS:5000}
+      retry-fixed-delay-ms: ${AI_REVIEW_SUMMARY_RETRY_FIXED_DELAY_MS:5000}
+      retry-initial-delay-ms: ${AI_REVIEW_SUMMARY_RETRY_INITIAL_DELAY_MS:5000}

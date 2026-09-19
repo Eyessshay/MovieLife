@@ -26,6 +26,8 @@ public final class RedisConstants {
 
     public static final String REVIEW_LIKE_KEY = "review:like:";
     public static final String AI_REVIEW_SUMMARY_KEY = "ai:review:summary:";
+    public static final String AI_REVIEW_SUMMARY_STREAM_KEY = "ai:review:summary:stream";
+    public static final String AI_REVIEW_SUMMARY_STREAM_GROUP = "ai:review:summary:group";
     public static final Duration AI_REVIEW_SUMMARY_TTL = Duration.ofMinutes(30);
     public static final long AI_REVIEW_SUMMARY_TTL_RANDOM_MINUTES = 5L;
     public static final String POST_LIKE_KEY = "post:like:";

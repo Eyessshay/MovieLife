@@ -11,6 +11,7 @@ import java.time.Duration;
 @ConfigurationProperties(prefix = "movielife.ai.review-summary")
 public class AiReviewSummaryProperties {
 
+    private boolean enabled = false;
     private String endpoint = "";
     private String apiKey = "";
     private String model = "";
@@ -22,4 +23,7 @@ public class AiReviewSummaryProperties {
     private int maxReviewCharacters = 1000;
     private int maxInputCharacters = 20000;
     private int maxAttempts = 3;
+    private Duration leaseDuration = Duration.ofMinutes(2);
+    private int streamBatchSize = 10;
+    private int retryBatchSize = 100;
 }

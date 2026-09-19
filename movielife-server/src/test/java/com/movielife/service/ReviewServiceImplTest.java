@@ -36,6 +36,7 @@ import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -53,13 +54,16 @@ class ReviewServiceImplTest {
     private StringRedisTemplate redisTemplate;
     @Mock
     private ZSetOperations<String, String> zSetOperations;
+    @Mock
+    private MovieReviewAiTrigger movieReviewAiTrigger;
 
     private ReviewServiceImpl reviewService;
 
     @BeforeEach
     void setUp() {
         reviewService = new ReviewServiceImpl(
-                reviewMapper, movieMapper, activityMapper, userMapper, redisTemplate, new ObjectMapper()
+                reviewMapper, movieMapper, activityMapper, userMapper, redisTemplate,
+                new ObjectMapper(), movieReviewAiTrigger
         );
         UserHolder.saveUser(userContext(1L));
     }
@@ -88,6 +92,7 @@ class ReviewServiceImplTest {
 
         verify(movieMapper).addReviewScore(1L, new BigDecimal("4.0"));
         verify(redisTemplate).delete("movie:detail:1");
+        verify(movieReviewAiTrigger).afterMovieReviewCommitted(1L);
     }
 
     @Test
@@ -99,6 +104,21 @@ class ReviewServiceImplTest {
         assertBusinessError(() -> reviewService.createReview(createRequest("4.0")),
                 ErrorCode.DUPLICATE_REVIEW);
         verify(movieMapper, never()).addReviewScore(anyLong(), any(BigDecimal.class));
+    }
+
+    @Test
+    void restoreShouldTriggerMovieAiSummaryAfterSuccessfulWrite() {
+        Review deleted = review(2L, 1L, "2.0", 0);
+        when(movieMapper.selectById(1L)).thenReturn(movie());
+        when(reviewMapper.selectByUserAndTargetForUpdate(1L, "MOVIE", 1L)).thenReturn(deleted);
+        when(reviewMapper.restoreReview(eq(2L), eq(new BigDecimal("4.0")), any(), any(), any()))
+                .thenReturn(1);
+        when(movieMapper.addReviewScore(1L, new BigDecimal("4.0"))).thenReturn(1);
+        when(userMapper.selectById(1L)).thenReturn(new User());
+
+        reviewService.createReview(createRequest("4.0"));
+
+        verify(movieReviewAiTrigger).afterMovieReviewCommitted(1L);
     }
 
     @Test
@@ -124,6 +144,26 @@ class ReviewServiceImplTest {
     }
 
     @Test
+    void successfulUpdateShouldTriggerMovieAiSummary() {
+        Review existing = review(2L, 1L, "4.0", 1);
+        when(reviewMapper.selectByIdForUpdate(2L)).thenReturn(existing);
+        when(reviewMapper.updateReview(eq(2L), eq(new BigDecimal("5.0")), any(), any(), any()))
+                .thenReturn(1);
+        when(movieMapper.replaceReviewScore(
+                1L, new BigDecimal("4.0"), new BigDecimal("5.0"))).thenReturn(1);
+        when(userMapper.selectById(1L)).thenReturn(new User());
+        when(redisTemplate.opsForZSet()).thenReturn(zSetOperations);
+
+        UpdateReviewDTO request = new UpdateReviewDTO();
+        request.setScore(new BigDecimal("5.0"));
+        request.setContent("修改内容");
+        request.setImages(Collections.emptyList());
+        reviewService.updateReview(2L, request);
+
+        verify(movieReviewAiTrigger).afterMovieReviewCommitted(1L);
+    }
+
+    @Test
     void repeatedDeleteOfSoftDeletedReviewShouldNotChangeAggregateAgain() {
         when(reviewMapper.selectByIdForUpdate(2L)).thenReturn(review(2L, 1L, "4.0", 0));
 
@@ -131,6 +171,7 @@ class ReviewServiceImplTest {
 
         verify(reviewMapper, never()).softDelete(anyLong(), any());
         verify(movieMapper, never()).removeReviewScore(anyLong(), any());
+        verifyNoInteractions(movieReviewAiTrigger);
     }
 
     @Test
@@ -164,6 +205,7 @@ class ReviewServiceImplTest {
         reviewService.deleteReview(2L);
 
         verify(redisTemplate, times(3)).delete("review:like:2");
+        verify(movieReviewAiTrigger).afterMovieReviewCommitted(1L);
     }
 
     private void assertBusinessError(Runnable action, ErrorCode expected) {
