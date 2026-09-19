@@ -14,11 +14,11 @@ import java.util.List;
 @Mapper
 public interface AiSummaryTaskMapper extends BaseMapper<AiSummaryTask> {
 
-    @Select("SELECT target_id FROM tb_ai_summary_task "
-            + "WHERE target_type = 'MOVIE' AND status = 'RETRY_WAIT' "
+    @Select("SELECT target_type, target_id FROM tb_ai_summary_task "
+            + "WHERE target_type IN ('MOVIE', 'ACTIVITY') AND status = 'RETRY_WAIT' "
             + "AND next_retry_time <= #{now} ORDER BY next_retry_time ASC, id ASC LIMIT #{limit}")
-    List<Long> selectRetryReadyMovieIds(@Param("now") LocalDateTime now,
-                                        @Param("limit") int limit);
+    List<AiSummaryTask> selectRetryReadyTargets(@Param("now") LocalDateTime now,
+                                                @Param("limit") int limit);
 
     @Insert("INSERT INTO tb_ai_summary_task "
             + "(target_type, target_id, dirty_version, processed_version, status, create_time, update_time) "

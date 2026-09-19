@@ -1,9 +1,7 @@
 package com.movielife.controller;
 
 import com.movielife.enums.AiSummaryPublicStatus;
-import com.movielife.exception.BusinessException;
-import com.movielife.exception.ErrorCode;
-import com.movielife.service.MovieReviewAiSummaryQueryService;
+import com.movielife.service.ReviewAiSummaryQueryService;
 import com.movielife.vo.ReviewAiSummaryVO;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -26,7 +24,7 @@ class AiReviewSummaryControllerTest {
     private MockMvc mockMvc;
 
     @MockBean
-    private MovieReviewAiSummaryQueryService queryService;
+    private ReviewAiSummaryQueryService queryService;
     @MockBean
     private StringRedisTemplate stringRedisTemplate;
 
@@ -53,13 +51,20 @@ class AiReviewSummaryControllerTest {
     }
 
     @Test
-    void activityShouldRemainUnavailableInStepFourteenFour() throws Exception {
-        when(queryService.query("ACTIVITY", 1L))
-                .thenThrow(new BusinessException(ErrorCode.INVALID_TARGET_TYPE));
+    void anonymousActivitySummaryShouldUseTheSameContract() throws Exception {
+        ReviewAiSummaryVO result = new ReviewAiSummaryVO();
+        result.setTargetType("ACTIVITY");
+        result.setTargetId(1L);
+        result.setStatus(AiSummaryPublicStatus.READY.name());
+        result.setSummary("现场氛围很好");
+        result.setPros(Collections.singletonList("互动自然"));
+        result.setStale(false);
+        when(queryService.query("ACTIVITY", 1L)).thenReturn(result);
 
         mockMvc.perform(get("/api/ai/summaries/ACTIVITY/1"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.code").value("INVALID_TARGET_TYPE"));
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.targetType").value("ACTIVITY"))
+                .andExpect(jsonPath("$.data.status").value("READY"));
     }
 
     @Test

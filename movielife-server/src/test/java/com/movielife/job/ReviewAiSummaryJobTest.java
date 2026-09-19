@@ -1,10 +1,11 @@
 package com.movielife.job;
 
 import com.movielife.config.AiReviewSummaryProperties;
+import com.movielife.entity.AiSummaryTask;
 import com.movielife.enums.AiSummaryTargetType;
 import com.movielife.mapper.AiSummaryTaskMapper;
 import com.movielife.service.AiSummaryStreamPublisher;
-import com.movielife.service.MovieReviewAiSummaryWorker;
+import com.movielife.service.ReviewAiSummaryWorker;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -22,24 +23,24 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
-class MovieReviewAiSummaryJobTest {
+class ReviewAiSummaryJobTest {
 
     @Mock
     private StringRedisTemplate redisTemplate;
     @Mock
     private AiSummaryStreamPublisher streamPublisher;
     @Mock
-    private MovieReviewAiSummaryWorker worker;
+    private ReviewAiSummaryWorker worker;
     @Mock
     private AiSummaryTaskMapper taskMapper;
 
     private AiReviewSummaryProperties properties;
-    private MovieReviewAiSummaryJob job;
+    private ReviewAiSummaryJob job;
 
     @BeforeEach
     void setUp() {
         properties = new AiReviewSummaryProperties();
-        job = new MovieReviewAiSummaryJob(
+        job = new ReviewAiSummaryJob(
                 properties, redisTemplate, streamPublisher, worker, taskMapper);
     }
 
@@ -51,14 +52,21 @@ class MovieReviewAiSummaryJobTest {
     }
 
     @Test
-    void dueMovieRetriesShouldBeRepublishedToDedicatedStream() {
+    void dueMovieAndActivityRetriesShouldBeRepublishedToDedicatedStream() {
         properties.setEnabled(true);
-        when(taskMapper.selectRetryReadyMovieIds(any(LocalDateTime.class), eq(100)))
-                .thenReturn(Arrays.asList(11L, 12L));
+        when(taskMapper.selectRetryReadyTargets(any(LocalDateTime.class), eq(100)))
+                .thenReturn(Arrays.asList(target("MOVIE", 11L), target("ACTIVITY", 12L)));
 
         job.notifyReadyRetries();
 
         verify(streamPublisher).publish(AiSummaryTargetType.MOVIE, 11L);
-        verify(streamPublisher).publish(AiSummaryTargetType.MOVIE, 12L);
+        verify(streamPublisher).publish(AiSummaryTargetType.ACTIVITY, 12L);
+    }
+
+    private AiSummaryTask target(String type, Long id) {
+        AiSummaryTask task = new AiSummaryTask();
+        task.setTargetType(type);
+        task.setTargetId(id);
+        return task;
     }
 }

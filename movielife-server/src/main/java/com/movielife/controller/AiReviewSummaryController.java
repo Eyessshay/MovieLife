@@ -1,7 +1,7 @@
 package com.movielife.controller;
 
 import com.movielife.common.Result;
-import com.movielife.service.MovieReviewAiSummaryQueryService;
+import com.movielife.service.ReviewAiSummaryQueryService;
 import com.movielife.vo.ReviewAiSummaryVO;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -14,7 +14,7 @@ import org.springframework.web.bind.annotation.RestController;
 @RequiredArgsConstructor
 public class AiReviewSummaryController {
 
-    private final MovieReviewAiSummaryQueryService queryService;
+    private final ReviewAiSummaryQueryService queryService;
 
     @GetMapping("/{targetType}/{targetId}")
     public Result<ReviewAiSummaryVO> query(@PathVariable String targetType,

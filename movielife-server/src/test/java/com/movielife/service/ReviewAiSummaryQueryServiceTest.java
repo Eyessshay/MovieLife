@@ -4,10 +4,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.movielife.ai.AiReviewSummaryCacheValue;
 import com.movielife.config.AiReviewSummaryProperties;
 import com.movielife.entity.AiSummaryTask;
+import com.movielife.entity.Activity;
 import com.movielife.entity.Movie;
 import com.movielife.enums.AiSummaryTargetType;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
+import com.movielife.mapper.ActivityMapper;
 import com.movielife.mapper.MovieMapper;
 import com.movielife.mapper.ReviewMapper;
 import com.movielife.utils.JsonListUtils;
@@ -24,12 +26,15 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verifyNoInteractions;
 
 @ExtendWith(MockitoExtension.class)
-class MovieReviewAiSummaryQueryServiceTest {
+class ReviewAiSummaryQueryServiceTest {
 
     @Mock
     private MovieMapper movieMapper;
+    @Mock
+    private ActivityMapper activityMapper;
     @Mock
     private ReviewMapper reviewMapper;
     @Mock
@@ -37,18 +42,21 @@ class MovieReviewAiSummaryQueryServiceTest {
     @Mock
     private AiReviewSummaryCacheRepository cacheRepository;
 
-    private MovieReviewAiSummaryQueryService service;
+    private ReviewAiSummaryQueryService service;
 
     @BeforeEach
     void setUp() {
-        service = new MovieReviewAiSummaryQueryService(
-                movieMapper, reviewMapper, persistenceService, cacheRepository,
-                new AiReviewSummaryProperties(), new JsonListUtils(new ObjectMapper()));
+        ReviewSummaryTargetPolicyRegistry registry = new ReviewSummaryTargetPolicyRegistry(
+                java.util.Arrays.asList(new MovieSummaryTargetPolicy(movieMapper),
+                        new ActivitySummaryTargetPolicy(activityMapper)));
+        service = new ReviewAiSummaryQueryService(
+                reviewMapper, persistenceService, cacheRepository,
+                new AiReviewSummaryProperties(), new JsonListUtils(new ObjectMapper()), registry);
     }
 
     @Test
-    void shouldRejectActivityAndMissingMovie() {
-        assertBusinessError(() -> service.query("ACTIVITY", 1L), ErrorCode.INVALID_TARGET_TYPE);
+    void shouldRejectUnsupportedTypeAndMissingMovie() {
+        assertBusinessError(() -> service.query("VENUE", 1L), ErrorCode.INVALID_TARGET_TYPE);
         when(movieMapper.selectById(1L)).thenReturn(null);
         assertBusinessError(() -> service.query("MOVIE", 1L), ErrorCode.MOVIE_NOT_FOUND);
     }
@@ -63,6 +71,31 @@ class MovieReviewAiSummaryQueryServiceTest {
         assertThat(result.getStatus()).isEqualTo("NOT_ENOUGH_REVIEWS");
         assertThat(result.getSourceReviewCount()).isEqualTo(2);
         assertThat(result.getSummary()).isNull();
+    }
+
+    @Test
+    void activeActivityShouldUseSameNotEnoughContract() {
+        Activity activity = new Activity();
+        activity.setStatus(1);
+        when(activityMapper.selectById(2L)).thenReturn(activity);
+        when(reviewMapper.countActiveByTarget("ACTIVITY", 2L)).thenReturn(2);
+
+        ReviewAiSummaryVO result = service.query("ACTIVITY", 2L);
+
+        assertThat(result.getTargetType()).isEqualTo("ACTIVITY");
+        assertThat(result.getStatus()).isEqualTo("NOT_ENOUGH_REVIEWS");
+        assertThat(result.getSourceReviewCount()).isEqualTo(2);
+    }
+
+    @Test
+    void offlineActivityShouldHideHistoricalSummaryBeforeReadingTaskOrCache() {
+        Activity activity = new Activity();
+        activity.setStatus(2);
+        when(activityMapper.selectById(2L)).thenReturn(activity);
+
+        assertBusinessError(() -> service.query("ACTIVITY", 2L), ErrorCode.ACTIVITY_NOT_FOUND);
+
+        verifyNoInteractions(persistenceService, cacheRepository);
     }
 
     @Test

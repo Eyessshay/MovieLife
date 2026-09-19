@@ -6,6 +6,7 @@ import com.movielife.dto.UserDTO;
 import com.movielife.entity.Activity;
 import com.movielife.entity.Review;
 import com.movielife.entity.User;
+import com.movielife.enums.AiSummaryTargetType;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.mapper.ActivityMapper;
@@ -34,6 +35,7 @@ import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
 @SpringBootTest(
@@ -64,6 +66,8 @@ class ActivityReviewWriteTransactionIntegrationTest {
     private UserMapper userMapper;
     @MockBean
     private StringRedisTemplate stringRedisTemplate;
+    @MockBean
+    private ReviewAiSummaryTrigger reviewAiSummaryTrigger;
 
     private long userId;
     private long activityId;
@@ -115,6 +119,8 @@ class ActivityReviewWriteTransactionIntegrationTest {
         assertThat(findReview()).isNull();
         assertAggregate("0.00", 0, 1);
         verify(stringRedisTemplate, never()).delete(anyString());
+        verify(reviewAiSummaryTrigger, never()).afterReviewCommitted(
+                AiSummaryTargetType.ACTIVITY, activityId);
     }
 
     @Test
@@ -160,6 +166,8 @@ class ActivityReviewWriteTransactionIntegrationTest {
         reviewService.deleteReview(created.getId());
         assertAggregate("0.00", 0, 2);
         verify(stringRedisTemplate, atLeastOnce()).delete("review:like:" + created.getId());
+        verify(reviewAiSummaryTrigger, times(5)).afterReviewCommitted(
+                AiSummaryTargetType.ACTIVITY, activityId);
     }
 
     @Test
@@ -169,6 +177,8 @@ class ActivityReviewWriteTransactionIntegrationTest {
         assertThat(findReview()).isNull();
         assertAggregate("0.00", 0, 1);
         verify(stringRedisTemplate, never()).delete(anyString());
+        verify(reviewAiSummaryTrigger, never()).afterReviewCommitted(
+                AiSummaryTargetType.ACTIVITY, activityId);
     }
 
     private Review findReview() {

@@ -2254,6 +2254,26 @@ Activity 分支没有调用 Trigger，Activity Review 的写入、下线语义�
 
 清理后测试 Movie/User/Review、AI Task/Summary 均无残留，AI Stream 和结果缓存已删除，Redis `DBSIZE=0`，隔离容器已删除。Step 14.4 冻结后，不得把 Movie 专用逻辑复制成第二套 Activity 生成管线；Step 14.5 只能通过目标策略和通用组件接入 Activity，不得顺带实现 Step 14.6 的跨目标并发与完整故障恢复。
 
+### 11.5 Step 14.5 Activity Review AI Summary 接入
+
+#### 11.5.1 通用编排与 Activity 触发
+
+14.4 的 Movie 命名编排组件收敛为 `ReviewAiSummaryTrigger`、`ReviewAiSummaryWorker`、`ReviewAiSummaryQueryService` 和 `ReviewAiSummaryJob`，统一接受 `AiSummaryTargetType`。目标差异仍只由 `ReviewSummaryTargetPolicyRegistry` 分发到既有 Movie/Activity 策略，生成核心没有新增 `generateActivitySummary()` 或第二套 Prompt、快照、重试和发布实现。
+
+Review 写事务本身保持阶段 13 语义；只有事务成功提交后，Movie 或 Activity 的成功创建、恢复、修改和首次删除才进入通用 Trigger。Activity Trigger 在标脏前校验当前目标仍为 `status=1`，下线后原作者对历史 Review 的合法修改或删除不会创建新任务版本。查询、重复删除、Review Like、收藏、Nearby 与票务变化均没有触发入口。
+
+#### 11.5.2 下线并发边界与历史保留
+
+Activity 的公开查询在读取任务、缓存和 Summary 前先执行目标策略，草稿、下线或不存在统一返回 `ACTIVITY_NOT_FOUND`。下线操作不清理 AI Task、不可变历史 Summary、当前指针或结果缓存，因此重新上线后仍可从 MySQL 最终事实恢复读取；下线期间不会对外泄露缓存中的旧总结。
+
+Worker 在通用快照生成后、调用 `publish()` 前再次校验目标。Activity 若在模型处理期间下线，本轮不会更新当前 Summary 指针或 Redis 缓存，而是通过带租约和 `processing_version` 条件的 `markDead` 结束本次处理；已发布历史版本保持不变。MySQL 仍是任务和 Summary 的最终事实，Redis Stream 仍只负责至少一次通知，结果缓存仍只保存 MySQL 已确认的不可变结果。
+
+#### 11.5.3 领域隔离与冻结验证
+
+Activity AI Summary 只读取 `tb_activity` 和通用 `tb_review` 快照，不读取 `TicketOrder`、`TicketOrderItem`、支付、出票、核销、ShowtimeSeat、锁座、收藏、Venue GEO 或 Review Like ZSet。它不改变 Activity 普通列表、详情、Nearby、收藏列表的排序、分页、`collected`、评分聚合或批量查询次数，也不改变 Activity Review 的创建、下线后修改/删除、列表和详情有效性规则。
+
+验证使用隔离 MySQL 8.0.17、Redis 7 和随机 Spring Boot HTTP 端口。14.5 定向测试 42 项、阶段 10～13 Activity 专项交叉回归 107 项及全量 546 项测试全部通过，0 failure、0 error、0 skipped；受控模型 Client 验证 Activity 的 Review 提交、Stream、MySQL 租约与发布、Redis 缓存、匿名 HTTP READY、点赞不触发、下线隐藏和历史保留闭环，Step 14.3 的真实模型 HTTP Adapter 证据继续有效。完成不跳过测试的 `mvn clean package`、隔离数据清理与提交后，Step 14.5 冻结；Step 14.6 才能处理跨目标并发、通知丢失对账和阶段最终冻结。
+
 ## 12. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -2289,4 +2309,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.31，阶段 1～13 已完成并冻结，阶段 14 已实现并冻结 Step 14.4 Movie Review AI Summary 闭环。Activity 接入、跨目标并发和完整故障恢复仍未实现。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.32，阶段 1～13 已完成并冻结，阶段 14 已实现并冻结至 Step 14.5 Activity Review AI Summary 接入。跨目标并发、通知丢失对账和阶段最终冻结仍留待 Step 14.6。

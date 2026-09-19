@@ -13,6 +13,7 @@ import com.movielife.entity.Activity;
 import com.movielife.entity.Movie;
 import com.movielife.entity.Review;
 import com.movielife.entity.User;
+import com.movielife.enums.AiSummaryTargetType;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.mapper.ActivityMapper;
@@ -20,7 +21,7 @@ import com.movielife.mapper.MovieMapper;
 import com.movielife.mapper.ReviewMapper;
 import com.movielife.mapper.UserMapper;
 import com.movielife.service.ReviewService;
-import com.movielife.service.MovieReviewAiTrigger;
+import com.movielife.service.ReviewAiSummaryTrigger;
 import com.movielife.utils.UserHolder;
 import com.movielife.vo.PageVO;
 import com.movielife.vo.ReviewLikeVO;
@@ -75,7 +76,7 @@ public class ReviewServiceImpl implements ReviewService {
     private final UserMapper userMapper;
     private final StringRedisTemplate stringRedisTemplate;
     private final ObjectMapper objectMapper;
-    private final MovieReviewAiTrigger movieReviewAiTrigger;
+    private final ReviewAiSummaryTrigger reviewAiSummaryTrigger;
 
     @Override
     @Transactional(rollbackFor = Exception.class, isolation = Isolation.READ_COMMITTED)
@@ -515,7 +516,10 @@ public class ReviewServiceImpl implements ReviewService {
             if (MOVIE.equals(targetType)) {
                 deleteWithRetry(RedisConstants.MOVIE_DETAIL_KEY + targetId,
                         "movie detail", targetType, targetId, reviewId);
-                movieReviewAiTrigger.afterMovieReviewCommitted(targetId);
+            }
+            if (MOVIE.equals(targetType) || ACTIVITY.equals(targetType)) {
+                reviewAiSummaryTrigger.afterReviewCommitted(
+                        AiSummaryTargetType.valueOf(targetType), targetId);
             }
             if (removeLikes) {
                 deleteWithRetry(RedisConstants.REVIEW_LIKE_KEY + reviewId,

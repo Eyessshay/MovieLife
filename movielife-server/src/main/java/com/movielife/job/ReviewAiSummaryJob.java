@@ -2,10 +2,11 @@ package com.movielife.job;
 
 import com.movielife.config.AiReviewSummaryProperties;
 import com.movielife.constants.RedisConstants;
+import com.movielife.entity.AiSummaryTask;
 import com.movielife.enums.AiSummaryTargetType;
 import com.movielife.mapper.AiSummaryTaskMapper;
 import com.movielife.service.AiSummaryStreamPublisher;
-import com.movielife.service.MovieReviewAiSummaryWorker;
+import com.movielife.service.ReviewAiSummaryWorker;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.connection.stream.Consumer;
@@ -26,14 +27,14 @@ import java.util.UUID;
 @Slf4j
 @Component
 @RequiredArgsConstructor
-public class MovieReviewAiSummaryJob {
+public class ReviewAiSummaryJob {
 
     private final String consumerName = buildConsumerName();
 
     private final AiReviewSummaryProperties properties;
     private final StringRedisTemplate redisTemplate;
     private final AiSummaryStreamPublisher streamPublisher;
-    private final MovieReviewAiSummaryWorker worker;
+    private final ReviewAiSummaryWorker worker;
     private final AiSummaryTaskMapper taskMapper;
 
     @Scheduled(
@@ -57,7 +58,7 @@ public class MovieReviewAiSummaryJob {
                 consume(record);
             }
         } catch (RuntimeException exception) {
-            log.error("Failed to consume movie AI summary stream", exception);
+            log.error("Failed to consume review AI summary stream", exception);
         }
     }
 
@@ -68,44 +69,54 @@ public class MovieReviewAiSummaryJob {
         if (!properties.isEnabled()) {
             return;
         }
-        List<Long> movieIds;
+        List<AiSummaryTask> targets;
         try {
-            movieIds = taskMapper.selectRetryReadyMovieIds(
+            targets = taskMapper.selectRetryReadyTargets(
                     LocalDateTime.now(), properties.getRetryBatchSize());
         } catch (RuntimeException exception) {
-            log.error("Failed to scan retry-ready movie AI summary tasks", exception);
+            log.error("Failed to scan retry-ready review AI summary tasks", exception);
             return;
         }
-        for (Long movieId : movieIds) {
+        for (AiSummaryTask target : targets) {
             try {
-                streamPublisher.publish(AiSummaryTargetType.MOVIE, movieId);
+                streamPublisher.publish(AiSummaryTargetType.valueOf(target.getTargetType()),
+                        target.getTargetId());
             } catch (RuntimeException exception) {
-                log.error("Failed to notify retry-ready movie AI summary, movieId={}",
-                        movieId, exception);
+                log.error("Failed to notify retry-ready review AI summary, targetType={}, targetId={}",
+                        target.getTargetType(), target.getTargetId(), exception);
             }
         }
     }
 
     private void consume(MapRecord<String, Object, Object> record) {
-        Long movieId = movieId(record.getValue());
-        if (movieId == null) {
+        AiSummaryTask target = target(record.getValue());
+        if (target == null) {
             acknowledge(record);
             return;
         }
-        if (worker.process(movieId)) {
+        if (worker.process(AiSummaryTargetType.valueOf(target.getTargetType()), target.getTargetId())) {
             acknowledge(record);
         }
     }
 
-    private Long movieId(Map<Object, Object> value) {
+    private AiSummaryTask target(Map<Object, Object> value) {
         Object type = value.get("targetType");
         Object id = value.get("targetId");
-        if (!AiSummaryTargetType.MOVIE.name().equals(String.valueOf(type))) {
+        AiSummaryTargetType targetType;
+        try {
+            targetType = AiSummaryTargetType.valueOf(String.valueOf(type));
+        } catch (IllegalArgumentException exception) {
             return null;
         }
         try {
             long parsed = Long.parseLong(String.valueOf(id));
-            return parsed > 0 ? parsed : null;
+            if (parsed <= 0) {
+                return null;
+            }
+            AiSummaryTask target = new AiSummaryTask();
+            target.setTargetType(targetType.name());
+            target.setTargetId(parsed);
+            return target;
         } catch (NumberFormatException exception) {
             return null;
         }
@@ -120,6 +131,6 @@ public class MovieReviewAiSummaryJob {
 
     private static String buildConsumerName() {
         String runtime = ManagementFactory.getRuntimeMXBean().getName().replaceAll("[^A-Za-z0-9_.-]", "_");
-        return "movie-ai-" + runtime + "-" + UUID.randomUUID();
+        return "review-ai-" + runtime + "-" + UUID.randomUUID();
     }
 }

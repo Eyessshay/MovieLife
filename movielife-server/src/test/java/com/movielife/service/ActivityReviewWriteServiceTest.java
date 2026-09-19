@@ -6,6 +6,7 @@ import com.movielife.dto.UpdateReviewDTO;
 import com.movielife.entity.Activity;
 import com.movielife.entity.Review;
 import com.movielife.entity.User;
+import com.movielife.enums.AiSummaryTargetType;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.mapper.ActivityMapper;
@@ -52,7 +53,7 @@ class ActivityReviewWriteServiceTest {
     @Mock
     private ZSetOperations<String, String> zSetOperations;
     @Mock
-    private MovieReviewAiTrigger movieReviewAiTrigger;
+    private ReviewAiSummaryTrigger reviewAiSummaryTrigger;
 
     private ReviewServiceImpl reviewService;
 
@@ -60,7 +61,7 @@ class ActivityReviewWriteServiceTest {
     void setUp() {
         reviewService = new ReviewServiceImpl(
                 reviewMapper, movieMapper, activityMapper, userMapper,
-                redisTemplate, new ObjectMapper(), movieReviewAiTrigger
+                redisTemplate, new ObjectMapper(), reviewAiSummaryTrigger
         );
         UserHolder.saveUser(userContext(1L));
     }
@@ -89,7 +90,7 @@ class ActivityReviewWriteServiceTest {
         verify(movieMapper, never()).addReviewScore(anyLong(), any(BigDecimal.class));
         verify(redisTemplate, never()).delete("review:like:11");
         verify(redisTemplate, never()).delete("movie:detail:1");
-        verifyNoInteractions(movieReviewAiTrigger);
+        verify(reviewAiSummaryTrigger).afterReviewCommitted(AiSummaryTargetType.ACTIVITY, 1L);
     }
 
     @Test
@@ -102,6 +103,7 @@ class ActivityReviewWriteServiceTest {
                 ErrorCode.DUPLICATE_REVIEW);
 
         verify(activityMapper, never()).addReviewScore(anyLong(), any(BigDecimal.class));
+        verifyNoInteractions(reviewAiSummaryTrigger);
     }
 
     @Test
@@ -119,6 +121,7 @@ class ActivityReviewWriteServiceTest {
         verify(reviewMapper).restoreReview(anyLong(), any(), any(), any(), any());
         verify(activityMapper).addReviewScore(1L, score("4.5"));
         verify(redisTemplate).delete("review:like:11");
+        verify(reviewAiSummaryTrigger).afterReviewCommitted(AiSummaryTargetType.ACTIVITY, 1L);
     }
 
     @Test
@@ -137,6 +140,7 @@ class ActivityReviewWriteServiceTest {
         verify(activityMapper).replaceReviewScore(1L, score("3.5"), score("5.0"));
         verify(activityMapper, never()).addReviewScore(anyLong(), any(BigDecimal.class));
         verify(activityMapper, never()).removeReviewScore(anyLong(), any(BigDecimal.class));
+        verify(reviewAiSummaryTrigger).afterReviewCommitted(AiSummaryTargetType.ACTIVITY, 1L);
     }
 
     @Test
@@ -151,6 +155,7 @@ class ActivityReviewWriteServiceTest {
         reviewService.updateReview(11L, updateRequest("4.0"));
 
         verify(activityMapper, never()).replaceReviewScore(anyLong(), any(), any());
+        verify(reviewAiSummaryTrigger).afterReviewCommitted(AiSummaryTargetType.ACTIVITY, 1L);
     }
 
     @Test
@@ -168,6 +173,7 @@ class ActivityReviewWriteServiceTest {
         verify(reviewMapper).softDelete(anyLong(), any());
         verify(activityMapper).removeReviewScore(1L, score("4.0"));
         verify(redisTemplate).delete("review:like:11");
+        verify(reviewAiSummaryTrigger).afterReviewCommitted(AiSummaryTargetType.ACTIVITY, 1L);
     }
 
     @Test

@@ -3,6 +3,7 @@ package com.movielife.service;
 import com.movielife.dto.CreateReviewDTO;
 import com.movielife.dto.UserDTO;
 import com.movielife.entity.User;
+import com.movielife.enums.AiSummaryTargetType;
 import com.movielife.exception.BusinessException;
 import com.movielife.mapper.UserMapper;
 import com.movielife.utils.UserHolder;
@@ -46,7 +47,7 @@ class MovieReviewAiTriggerTransactionIntegrationTest {
     @MockBean
     private StringRedisTemplate redisTemplate;
     @MockBean
-    private MovieReviewAiTrigger trigger;
+    private ReviewAiSummaryTrigger trigger;
 
     private long userId;
     private long movieId;
@@ -82,7 +83,7 @@ class MovieReviewAiTriggerTransactionIntegrationTest {
 
         reviewService.createReview(request());
 
-        verify(trigger).afterMovieReviewCommitted(movieId);
+        verify(trigger).afterReviewCommitted(AiSummaryTargetType.MOVIE, movieId);
     }
 
     @Test
@@ -92,7 +93,7 @@ class MovieReviewAiTriggerTransactionIntegrationTest {
         assertThatThrownBy(() -> reviewService.createReview(request()))
                 .isInstanceOf(BusinessException.class);
 
-        verify(trigger, never()).afterMovieReviewCommitted(movieId);
+        verify(trigger, never()).afterReviewCommitted(AiSummaryTargetType.MOVIE, movieId);
     }
 
     private CreateReviewDTO request() {

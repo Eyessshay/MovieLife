@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.31（阶段 14 Step 14.4 Movie Review AI Summary 闭环冻结版）
+- 版本：v0.32（阶段 14 Step 14.5 Activity Review AI Summary 接入冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -1294,6 +1294,20 @@ Movie Worker 使用 Consumer Group `ai:review:summary:group` 接收至少一次�
 Step 14.4 定向测试 24 项通过，覆盖创建、恢复、修改、首次删除、重复删除与事务回滚触发边界、Activity 不误触发、缓存失败不阻塞通知、Movie 公开五状态、评价不足、成功发布、可重试与终止失败、到期重投、匿名 Controller，以及真实 MySQL、Redis Stream、租约、Summary 指针、结果缓存和随机端口 HTTP 闭环。阶段 13 Activity Review 交叉回归 34 项通过；全量 541 项测试通过，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。
 
 真实验证使用隔离 MySQL 8.0.17、Redis 7 和随机 Spring Boot HTTP 端口，模型边界使用受控 `AiReviewSummaryClient` Stub，模型 Adapter 的真实本地 HTTP 协议证据继续继承 Step 14.3。测试数据、AI Task/Summary、Stream 与公共缓存已清理，Redis 最终 `DBSIZE=0`，隔离容器已删除。Step 14.4 至此冻结，下一步只能单独进入 Step 14.5 Activity Review AI Summary 接入。
+
+#### 4.6.15 Step 14.5 Activity Review AI Summary 接入
+
+Step 14.5 不复制 Movie 专用链路，而是把 14.4 的 Trigger、Worker、查询服务和 Stream 消费者收敛为按 `targetType` 工作的通用组件。Activity Review 成功创建、软删除恢复、修改或首次软删除后，仍在原 Review 事务成功提交后调用通用 Trigger，以 `ACTIVITY + activityId` 原子标脏、删除对应公共缓存并发布独立 AI Summary Stream 通知。Movie 行为保持不变；任务、Summary 版本、输入指纹和缓存继续按完整目标隔离。
+
+Activity 触发、快照、Worker 发布前复核和公开 GET 均复用 `ActivitySummaryTargetPolicy`：只有物理存在且 `status=1` 的 Activity 才能生成或公开查询。Activity 下线不删除 `tb_ai_review_summary` 历史版本、当前 Summary 指针或已有结果缓存，但公开查询统一返回 `404 ACTIVITY_NOT_FOUND`；下线后原作者仍可按阶段 13 规则修改或删除已有 Review，这类写入不会继续标脏或生成新总结。生成期间下线时，Worker 不发布本轮结果，并以脱敏失败码结束已领取版本，历史结果保持不变。
+
+通用链路不读取 `TicketOrder`、`TicketOrderItem`、支付、出票、核销、座位或锁座事实。Activity 票务、收藏、Nearby 和 Review Like 的任何变化均没有 AI Trigger 入口；点赞/取消点赞不推进 `dirty_version`。阶段 10～13 的 Activity 上下架、普通列表、详情、Nearby、收藏、Review 写入权限与评分聚合语义均保持不变。公开接口仍为匿名只读 `GET /api/ai/summaries/{targetType}/{targetId}`，现在严格允许 `MOVIE` 和 `ACTIVITY`，不新增生成、重试、管理或 Activity 嵌套评价接口。
+
+#### 4.6.16 Step 14.5 验证与冻结结果
+
+Step 14.5 定向测试 42 项通过，覆盖 Activity 提交后触发、事务回滚、Stream 消费、租约领取、评价不足、成功发布、缓存、匿名 HTTP 五状态、下线前后边界、下线期间发布保护、历史 Summary 保留，以及 Movie 既有闭环兼容。阶段 10～13 Activity 专项交叉回归 107 项通过，覆盖普通查询、详情、Nearby、收藏、评价写入/查询、并发与聚合；全量 546 项测试通过，0 failure、0 error、0 skipped。
+
+真实联调使用隔离 MySQL 8.0.17、Redis 7 和随机 Spring Boot HTTP 端口，模型边界使用受控 `AiReviewSummaryClient` Stub，真实模型 HTTP Adapter 证据继续继承已冻结的 Step 14.3。完成不跳过测试的 `mvn clean package`、测试数据和 Redis 清理并提交后，本 Step 正式冻结；下一步只能单独进入 Step 14.6，不得在 14.5 回填跨目标并发压测、通知丢失对账、Venue/Post 总结或其他 AI 能力。
 
 ## 5. 待细化事项
 

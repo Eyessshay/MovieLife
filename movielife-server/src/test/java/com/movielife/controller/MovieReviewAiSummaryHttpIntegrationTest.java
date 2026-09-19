@@ -8,7 +8,7 @@ import com.movielife.dto.CreateReviewDTO;
 import com.movielife.dto.UserDTO;
 import com.movielife.entity.AiSummaryTask;
 import com.movielife.enums.AiSummaryTargetType;
-import com.movielife.job.MovieReviewAiSummaryJob;
+import com.movielife.job.ReviewAiSummaryJob;
 import com.movielife.service.AiReviewSummaryClient;
 import com.movielife.service.AiSummaryPersistenceService;
 import com.movielife.service.ReviewService;
@@ -50,7 +50,7 @@ class MovieReviewAiSummaryHttpIntegrationTest {
     @Autowired
     private ReviewService reviewService;
     @Autowired
-    private MovieReviewAiSummaryJob job;
+    private ReviewAiSummaryJob job;
     @Autowired
     private AiSummaryPersistenceService persistenceService;
     @Autowired

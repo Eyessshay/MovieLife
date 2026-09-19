@@ -6,6 +6,7 @@ import com.movielife.dto.UpdateReviewDTO;
 import com.movielife.entity.Movie;
 import com.movielife.entity.Review;
 import com.movielife.entity.User;
+import com.movielife.enums.AiSummaryTargetType;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
 import com.movielife.mapper.ActivityMapper;
@@ -55,7 +56,7 @@ class ReviewServiceImplTest {
     @Mock
     private ZSetOperations<String, String> zSetOperations;
     @Mock
-    private MovieReviewAiTrigger movieReviewAiTrigger;
+    private ReviewAiSummaryTrigger reviewAiSummaryTrigger;
 
     private ReviewServiceImpl reviewService;
 
@@ -63,7 +64,7 @@ class ReviewServiceImplTest {
     void setUp() {
         reviewService = new ReviewServiceImpl(
                 reviewMapper, movieMapper, activityMapper, userMapper, redisTemplate,
-                new ObjectMapper(), movieReviewAiTrigger
+                new ObjectMapper(), reviewAiSummaryTrigger
         );
         UserHolder.saveUser(userContext(1L));
     }
@@ -92,7 +93,7 @@ class ReviewServiceImplTest {
 
         verify(movieMapper).addReviewScore(1L, new BigDecimal("4.0"));
         verify(redisTemplate).delete("movie:detail:1");
-        verify(movieReviewAiTrigger).afterMovieReviewCommitted(1L);
+        verify(reviewAiSummaryTrigger).afterReviewCommitted(AiSummaryTargetType.MOVIE, 1L);
     }
 
     @Test
@@ -118,7 +119,7 @@ class ReviewServiceImplTest {
 
         reviewService.createReview(createRequest("4.0"));
 
-        verify(movieReviewAiTrigger).afterMovieReviewCommitted(1L);
+        verify(reviewAiSummaryTrigger).afterReviewCommitted(AiSummaryTargetType.MOVIE, 1L);
     }
 
     @Test
@@ -160,7 +161,7 @@ class ReviewServiceImplTest {
         request.setImages(Collections.emptyList());
         reviewService.updateReview(2L, request);
 
-        verify(movieReviewAiTrigger).afterMovieReviewCommitted(1L);
+        verify(reviewAiSummaryTrigger).afterReviewCommitted(AiSummaryTargetType.MOVIE, 1L);
     }
 
     @Test
@@ -171,7 +172,7 @@ class ReviewServiceImplTest {
 
         verify(reviewMapper, never()).softDelete(anyLong(), any());
         verify(movieMapper, never()).removeReviewScore(anyLong(), any());
-        verifyNoInteractions(movieReviewAiTrigger);
+        verifyNoInteractions(reviewAiSummaryTrigger);
     }
 
     @Test
@@ -205,7 +206,7 @@ class ReviewServiceImplTest {
         reviewService.deleteReview(2L);
 
         verify(redisTemplate, times(3)).delete("review:like:2");
-        verify(movieReviewAiTrigger).afterMovieReviewCommitted(1L);
+        verify(reviewAiSummaryTrigger).afterReviewCommitted(AiSummaryTargetType.MOVIE, 1L);
     }
 
     private void assertBusinessError(Runnable action, ErrorCode expected) {
