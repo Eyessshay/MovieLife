@@ -23,8 +23,26 @@ mybatis-plus:
   global-config:
     banner: false
 
+logging:
+  level:
+    org.springframework.web.client.RestTemplate: INFO
+    org.springframework.http.converter: INFO
+
 movielife:
   auth:
     log-code-enabled: ${AUTH_LOG_CODE_ENABLED:false}
   startup-check:
     enabled: ${STARTUP_CHECK_ENABLED:true}
+  ai:
+    review-summary:
+      endpoint: ${AI_REVIEW_SUMMARY_ENDPOINT:}
+      api-key: ${AI_REVIEW_SUMMARY_API_KEY:}
+      model: ${AI_REVIEW_SUMMARY_MODEL:}
+      connect-timeout: ${AI_REVIEW_SUMMARY_CONNECT_TIMEOUT:3s}
+      read-timeout: ${AI_REVIEW_SUMMARY_READ_TIMEOUT:45s}
+      max-response-bytes: ${AI_REVIEW_SUMMARY_MAX_RESPONSE_BYTES:16384}
+      min-reviews: ${AI_REVIEW_SUMMARY_MIN_REVIEWS:3}
+      max-reviews: ${AI_REVIEW_SUMMARY_MAX_REVIEWS:100}
+      max-review-characters: ${AI_REVIEW_SUMMARY_MAX_REVIEW_CHARACTERS:1000}
+      max-input-characters: ${AI_REVIEW_SUMMARY_MAX_INPUT_CHARACTERS:20000}
+      max-attempts: ${AI_REVIEW_SUMMARY_MAX_ATTEMPTS:3}

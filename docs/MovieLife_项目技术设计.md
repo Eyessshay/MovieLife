@@ -2194,6 +2194,40 @@ Task 中 `dirty_version` 每次标脏原子加一，`processed_version` 只推�
 
 Step 14.2 冻结后，不得把任务基础类直接暴露为 HTTP 接口，不得在 Review 写链路中提前调用，不得用 Redis 代替 MySQL 任务事实，也不得把模型调用、指纹计算、Stream Worker 或 Movie/Activity 目标闭环回填到本 Step。
 
+### 11.3 Step 14.3 通用模型适配和评价快照
+
+#### 11.3.1 单一生成管线与目标策略
+
+内部生成入口统一为 `ReviewSummaryGenerationService.generate(targetType, targetId, sourceVersion)`。它依次读取评价快照、判断最低评价数、构建固定版本 Prompt、计算输入指纹、调用模型、校验结构化响应并组装尚未持久化的 `AiSummaryPublication`。核心服务不按目标复制生成方法，也不依赖 `AiSummaryPersistenceService`、任务 Mapper、Redis 或 Controller。
+
+目标差异只由 `ReviewSummaryTargetPolicy` 承担。Movie 策略验证物理存在，不追加 status 条件；Activity 策略要求物理存在且 `status=1`。注册表在应用启动时检查 `MOVIE`、`ACTIVITY` 策略完整且不重复，新增目标必须显式增加策略，不能在通用管线中堆叠条件分支。
+
+#### 11.3.2 一致评价快照与输入安全
+
+`ReviewSummarySourceService` 使用只读事务先做目标校验，再统计 `status=1` 的 Review 总数，并按 `update_time DESC, id DESC` 读取最多 100 条。输入 DTO 只携带 `reviewId`、规范化十进制 score 和正文，不读取用户、图片、点赞、订单或票券。MySQL 默认一致性读保证总数和输入来自同一事务快照；有效评价不足 3 条时在模型调用前直接返回 `INSUFFICIENT_REVIEWS`。
+
+正文处理顺序固定为换行统一、Unicode NFC、首尾清理、手机号/邮箱/大陆身份证固定占位符脱敏、Unicode code point 截断。单条上限 1000、全体正文上限 20000；按最新评价优先消耗预算。用于 Prompt 和指纹的都是同一个 `ReviewSummarySnapshot`，禁止分别处理导致缓存或幂等漂移。
+
+#### 11.3.3 稳定指纹与 Prompt
+
+指纹使用 SHA-256 小写十六进制。每个字段先编码为 UTF-8，再写入四字节长度前缀和字段值；字段顺序固定为目标类型、目标 ID、Prompt 版本、有效评价总数、输入评价数，以及每条有序评价的 ID、score、content。长度前缀消除了可变文本直接拼接的边界碰撞。
+
+Prompt 版本固定为 `review-summary-v1`。System message 保存能力、事实约束和精确 JSON Schema；User message 只保存结构化目标与评价 JSON。评价中的角色声明、提示词或链接始终处于 JSON 数据字段内，不能覆盖 System message。Prompt、评价正文和 API Key 不进入普通日志。
+
+#### 11.3.4 模型 Adapter、校验和失败分类
+
+`AiReviewSummaryClient` 隔离供应商协议；首个实现为 OpenAI-compatible HTTP Adapter。Endpoint、API Key、模型名、连接/读取超时和最大响应字节数都由 `movielife.ai.review-summary` 服务端配置提供。响应流最多读取 16 KiB，连接超时 3 秒、读取超时 45 秒；Adapter 自身不 sleep、不循环重试。
+
+严格校验器启用 JSON 重复字段和尾随 token 检测，只接受恰好五个字段。摘要最多 300 个 Unicode code point；四组数组各最多 5 项、单项最多 100，清理连续空白后拒绝空项和重复项。Markdown fence、未知字段、缺字段、错误类型及任何越界结果均归类为 `AI_INVALID_RESPONSE`，不能组装成功发布对象。
+
+失败分类稳定为可重试的 `AI_TIMEOUT`、`AI_CONNECTION_ERROR`、`AI_RATE_LIMITED`、`AI_PROVIDER_UNAVAILABLE`、`AI_INVALID_RESPONSE`，以及不可重试的 `AI_AUTH_FAILED`、`AI_REQUEST_REJECTED`、`AI_CONFIG_INVALID`。`AiSummaryRetryPolicy` 只计算后续任务时间：第 1 次失败等待 30 秒、第 2 次等待 2 分钟、后续等待 10 分钟，总尝试上限 3 次；429 的 `Retry-After` 在 10 分钟上限内可延长等待。
+
+#### 11.3.5 本 Step 明确不做与验证冻结
+
+本 Step 不修改 Review 写事务，不创建或推进任务，不读写 AI Summary 表，不发 Redis Stream，不写结果缓存，不开放 AI HTTP API，也不实现 Movie/Activity 业务闭环。`tb_movie.summary` 继续只表示剧情简介。Step 14.4 才能单独接入 Movie Review 的触发、Worker、发布与查询链路。
+
+验证环境为隔离 MySQL 8.0.17、Redis 7、随机 Spring Boot HTTP 端口和随机本地模型 Stub 端口。14.3 定向测试 17 项、阶段 13 Activity Review 回归 34 项及全量 517 项测试全部通过，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。快照事务回滚后测试数据为 0，AI Task/Summary 为 0 行，Redis `DBSIZE=0`，隔离容器已删除。
+
 ## 12. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -2229,4 +2263,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.29，阶段 1～13 已完成并冻结，阶段 14 已实现并冻结 Step 14.2 通用持久化与任务基础。模型调用、异步 Worker、Review 触发和查询接口仍未实现。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.30，阶段 1～13 已完成并冻结，阶段 14 已实现并冻结 Step 14.3 通用模型适配和评价快照。任务 Worker、Review 触发、Summary 发布和查询接口仍未实现。

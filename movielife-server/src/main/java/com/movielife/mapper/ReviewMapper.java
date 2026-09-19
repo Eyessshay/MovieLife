@@ -7,8 +7,22 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
+import java.util.List;
+
 @Mapper
 public interface ReviewMapper extends BaseMapper<Review> {
+
+    @Select("SELECT COUNT(*) FROM tb_review WHERE target_type = #{targetType} " +
+            "AND target_id = #{targetId} AND status = 1")
+    int countActiveByTarget(@Param("targetType") String targetType,
+                            @Param("targetId") Long targetId);
+
+    @Select("SELECT id, score, content FROM tb_review WHERE target_type = #{targetType} " +
+            "AND target_id = #{targetId} AND status = 1 " +
+            "ORDER BY update_time DESC, id DESC LIMIT #{limit}")
+    List<Review> selectActiveSummarySource(@Param("targetType") String targetType,
+                                           @Param("targetId") Long targetId,
+                                           @Param("limit") int limit);
 
     @Select("SELECT * FROM tb_review WHERE user_id = #{userId} " +
             "AND target_type = #{targetType} AND target_id = #{targetId} FOR UPDATE")

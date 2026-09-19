@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.29（阶段 14 Step 14.2 通用持久化与任务基础冻结版）
+- 版本：v0.30（阶段 14 Step 14.3 通用模型适配和评价快照冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -1258,6 +1258,26 @@ Step 14.2 的内部类不构成客户端契约，普通用户、场馆工作人�
 Step 14.2 定向测试 14 项通过，覆盖真实 MySQL 任务状态、目标隔离、并发标脏、租约竞争与过期接管、重试到期、处理中再次变脏、旧版本失败不压住新输入、评价不足、指纹幂等、当前 Summary 指针，以及真实 Redis 不可变快照和缓存故障降级。阶段 13 Activity Review 定向回归 34 项通过；全量 500 项测试通过，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。
 
 真实验证使用隔离 MySQL 8.0.17、Redis 7 和 Spring Boot 随机 HTTP 端口。权威 SQL 初始化成功，`V14_2__ai_summary_persistence.sql` 连续执行两次成功；既有 Activity Review HTTP 链路保持原行为。测试数据清理后 AI Task/Summary 均为 0 行，隔离 Redis 最终 `DBSIZE=0`，临时容器均已删除。Step 14.2 至此冻结，下一步只能单独进入 Step 14.3 通用评价快照、输入指纹、Prompt 与模型适配。
+
+#### 4.6.11 Step 14.3 通用模型适配和评价快照
+
+Step 14.3 只实现服务端内部的通用生成基础，不开放本节规划的公开查询接口，不监听 Review 写入，不标脏、领取或完成 `tb_ai_summary_task`，不发布 `tb_ai_review_summary`，也不创建 Redis Stream 消息或结果缓存。`ReviewSummaryGenerationService.generate(targetType, targetId, sourceVersion)` 只返回“评价不足”或一个尚未持久化的 `AiSummaryPublication`；后续业务闭环必须显式接管任务状态与发布事务。
+
+Movie 与 Activity 共用一条生成链路，差异只由 `ReviewSummaryTargetPolicy` 提供。`MovieSummaryTargetPolicy` 要求 `tb_movie` 物理存在，不附加状态限制；`ActivitySummaryTargetPolicy` 要求 `tb_activity` 物理存在且 `status=1`，否则沿用 `MOVIE_NOT_FOUND` 或 `ACTIVITY_NOT_FOUND`。核心代码禁止出现目标专用的 `generateMovieSummary()`、`generateActivitySummary()` 两套实现。
+
+`ReviewSummarySourceService` 在只读事务内先验证目标，再统计当前 `status=1` 的有效 Review 总数，并按 `update_time DESC, id DESC` 最多读取最新 100 条。模型输入只包含 Review ID、规范化评分和正文，不包含用户身份、图片、点赞或票务数据。正文先统一换行、执行 Unicode NFC 和首尾空白清理，再以固定占位符遮蔽手机号、邮箱和中国大陆身份证号；单条最多 1000 个 Unicode code point，总正文预算最多 20000 个 code point。送入 Prompt 与指纹的必须是完全相同的脱敏、截断结果。
+
+输入指纹固定为小写 64 位 SHA-256。摘要前的数据按 UTF-8 长度前缀编码，依次覆盖 `targetType`、`targetId`、`promptVersion`、有效评价总数、实际输入数以及有序的 `reviewId/score/content`，避免简单字符串拼接产生边界歧义。固定 Prompt 版本为 `review-summary-v1`；系统指令与用户评价 JSON 分开传递，明确评价正文只是不可信数据，不能改变角色、权限或输出格式。
+
+`AiReviewSummaryClient` 当前提供 OpenAI-compatible HTTP Adapter。Endpoint、API Key、模型名、3 秒连接超时、45 秒读取超时和 16 KiB 响应上限均来自服务端配置；客户端不能覆盖。请求正文和 Prompt 不写普通日志，响应按字节流有界读取。HTTP 401/403、429、5xx、网络连接、超时和响应无效分别归类为稳定错误码，数据库和公开响应均不得保存供应商原始错误正文。
+
+模型响应必须是单个 JSON 对象，且恰好包含 `summary`、`pros`、`cons`、`suitableFor`、`warningPoints` 五个字段；拒绝 Markdown fence、重复字段、未知字段、尾随 JSON、错误类型、空字符串、重复数组项和越界内容。`summary` 最多 300 个 Unicode code point，四组数组各最多 5 项、每项最多 100 个 Unicode code point。超时、连接失败、限流、供应商 5xx 和无效响应可进入任务级重试；配置、认证和请求拒绝不重试。第 1、2 次失败的基础等待分别为 30 秒、2 分钟，后续为 10 分钟，总尝试上限 3 次；Adapter 内部不阻塞重试。
+
+#### 4.6.12 Step 14.3 验证与冻结结果
+
+Step 14.3 定向测试 17 项通过，覆盖 Movie/Activity 目标策略、真实 MySQL 一致快照与排序、Unicode 规范化和截断、PII 脱敏、稳定指纹、Prompt 注入隔离、严格 JSON、真实本地 HTTP Adapter、状态/超时分类、响应大小上限、重试决策、评价不足短路及待发布结果组装。阶段 13 Activity Review 交叉回归 34 项通过；全量 517 项测试通过，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。
+
+真实验证使用隔离 MySQL 8.0.17、Redis 7、随机 Spring Boot HTTP 端口和随机本地模型 Stub 端口。快照事务回滚后测试 Movie/User/Review 数据为 0，AI Task/Summary 均为 0 行，Redis 最终 `DBSIZE=0`；隔离容器和临时运行进程已删除。Step 14.3 至此冻结，下一步只能单独进入 Step 14.4 Movie Review AI Summary 闭环。
 
 ## 5. 待细化事项
 
