@@ -2274,6 +2274,26 @@ Activity AI Summary 只读取 `tb_activity` 和通用 `tb_review` 快照，不�
 
 验证使用隔离 MySQL 8.0.17、Redis 7 和随机 Spring Boot HTTP 端口。14.5 定向测试 42 项、阶段 10～13 Activity 专项交叉回归 107 项及全量 546 项测试全部通过，0 failure、0 error、0 skipped；受控模型 Client 验证 Activity 的 Review 提交、Stream、MySQL 租约与发布、Redis 缓存、匿名 HTTP READY、点赞不触发、下线隐藏和历史保留闭环，Step 14.3 的真实模型 HTTP Adapter 证据继续有效。完成不跳过测试的 `mvn clean package`、隔离数据清理与提交后，Step 14.5 冻结；Step 14.6 才能处理跨目标并发、通知丢失对账和阶段最终冻结。
 
+### 11.6 Step 14.6 并发、恢复与阶段冻结
+
+#### 11.6.1 至少一次通知与唯一任务事实
+
+`ReviewAiSummaryJob` 为每个应用实例生成独立消费者名。新消息由 Consumer Group 正常消费；Pending 恢复任务先读取 PEL，筛选超过 `pendingClaimMinIdle` 的记录，再通过 `XCLAIM` 转移到当前消费者处理。只有目标非法、Worker 已完成，或 MySQL 条件领取确认该通知已经过时/重复时才 ACK；运行时异常不 ACK，使消息继续留在 PEL。Redis Stream 继续只承担至少一次通知，既不保存任务状态，也不决定当前公开版本。
+
+`AiSummaryTaskMapper.selectRecoverableTargets` 周期扫描仍有未处理版本的 `PENDING`、已到期 `RETRY_WAIT` 和租约已过期 `PROCESSING`，重新发布轻量通知。即使多个实例同时对账，`claim()` 仍通过完整目标、未处理版本、状态和租约条件 UPDATE 保证最多一个 Worker 获得当前处理权。Redis 临时不可用导致的通知失败不丢失 MySQL 任务事实，Redis 恢复后即可由对账补偿。
+
+#### 11.6.2 并发、版本和故障边界
+
+任务、Summary 唯一约束、缓存 Key 和 Stream 消息均包含 `targetType`，因此 `MOVIE:42` 与 `ACTIVITY:42` 是两个独立目标。重复消息、重复对账和多 Worker 竞争不会重复执行已完成版本。Worker 处理期间若 Review 再次变化，`dirty_version` 继续递增；旧版本成功、评价不足、重试或终止时均由条件 SQL 保留新版本为 `PENDING`，不能把较新的变化错误标记为已处理。
+
+模型限流、连接失败、超时及供应商不可用保持可重试，重试时间继续接受受限的 `Retry-After` 并应用既有退避；不可恢复响应或超过次数才结束为 `DEAD`。查询缓存缺失或 Redis 读取异常时，以 MySQL `current_summary_id` 和不可变 Summary 为准返回，并尽力重建缓存。以上机制不改变目标策略：Movie 按既有存在性规则，Activity 仍必须 `status=1` 才能生成或公开；Activity 下线保留历史但不公开。
+
+#### 11.6.3 验证、清理与冻结
+
+Stage 14 专项 64 项和全量 552 项自动化测试全部通过，0 failure、0 error、0 skipped；覆盖 8 Worker 并发唯一领取、跨目标同 ID、过期租约接管、处理中新版本、重复消息、Pending 转移、周期对账、到期重试、活跃租约保护、限流/服务不可用和 Redis 回源。隔离 MySQL 8.0.17、Redis 7、随机测试 HTTP 端口上的 `mvn clean package` 为 `BUILD SUCCESS`。
+
+真实模型验收另外启动独立 HTTP 端口，通过未入库、未输出的服务端环境变量调用 DeepSeek。Movie 与 Activity 使用相同数值 ID、各 3 条有效中文评价，`deepseek-flash` 分别生成版本 1；两个任务均为 `SUCCEEDED`，匿名 API 均为 `READY`，MySQL 当前指针、两个不可变结果缓存和 Stream Pending 状态一致。最终删除全部联调数据，Redis `DBSIZE=0`，停止应用并删除隔离容器。Stage 14 正式冻结，后续不得把恢复机制扩展为新的业务能力，也不得回改阶段 1～14 冻结边界。
+
 ## 12. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -2309,4 +2329,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.32，阶段 1～13 已完成并冻结，阶段 14 已实现并冻结至 Step 14.5 Activity Review AI Summary 接入。跨目标并发、通知丢失对账和阶段最终冻结仍留待 Step 14.6。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.33，阶段 1～14 均已完成并正式冻结。下一阶段尚未指定，只能选择一个明确且独立的方向，不得回改既有冻结业务语义或顺带扩展其他 AI 能力。

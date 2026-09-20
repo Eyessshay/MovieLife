@@ -9,17 +9,23 @@ import com.movielife.service.AiSummaryStreamPublisher;
 import com.movielife.service.ReviewAiSummaryWorker;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.connection.RedisStreamCommands;
 import org.springframework.data.redis.connection.stream.Consumer;
 import org.springframework.data.redis.connection.stream.MapRecord;
+import org.springframework.data.redis.connection.stream.PendingMessage;
+import org.springframework.data.redis.connection.stream.PendingMessages;
 import org.springframework.data.redis.connection.stream.ReadOffset;
+import org.springframework.data.redis.connection.stream.RecordId;
 import org.springframework.data.redis.connection.stream.StreamOffset;
 import org.springframework.data.redis.connection.stream.StreamReadOptions;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.domain.Range;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.lang.management.ManagementFactory;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -63,18 +69,65 @@ public class ReviewAiSummaryJob {
     }
 
     @Scheduled(
-            fixedDelayString = "${movielife.ai.review-summary.retry-fixed-delay-ms:5000}",
-            initialDelayString = "${movielife.ai.review-summary.retry-initial-delay-ms:5000}")
-    public void notifyReadyRetries() {
+            fixedDelayString = "${movielife.ai.review-summary.pending-recovery-fixed-delay-ms:5000}",
+            initialDelayString = "${movielife.ai.review-summary.pending-recovery-initial-delay-ms:10000}")
+    public void recoverPendingMessages() {
+        if (!properties.isEnabled()) {
+            return;
+        }
+        try {
+            streamPublisher.ensureGroup();
+            PendingMessages pending = redisTemplate.opsForStream().pending(
+                    RedisConstants.AI_REVIEW_SUMMARY_STREAM_KEY,
+                    RedisConstants.AI_REVIEW_SUMMARY_STREAM_GROUP,
+                    Range.unbounded(), properties.getRecoveryBatchSize());
+            if (pending == null || pending.isEmpty()) {
+                return;
+            }
+            List<RecordId> ids = new ArrayList<>();
+            for (PendingMessage message : pending) {
+                if (message.getElapsedTimeSinceLastDelivery()
+                        .compareTo(properties.getPendingClaimMinIdle()) >= 0) {
+                    ids.add(message.getId());
+                }
+            }
+            if (ids.isEmpty()) {
+                return;
+            }
+            // Redisson 3.23.5 reads idleTime as XCLAIM's required min-idle argument.
+            RedisStreamCommands.XClaimOptions claimOptions =
+                    RedisStreamCommands.XClaimOptions
+                            .minIdle(properties.getPendingClaimMinIdle())
+                            .ids(ids)
+                            .idle(properties.getPendingClaimMinIdle());
+            List<MapRecord<String, Object, Object>> records = redisTemplate.opsForStream().claim(
+                    RedisConstants.AI_REVIEW_SUMMARY_STREAM_KEY,
+                    RedisConstants.AI_REVIEW_SUMMARY_STREAM_GROUP,
+                    consumerName,
+                    claimOptions);
+            if (records != null) {
+                for (MapRecord<String, Object, Object> record : records) {
+                    consume(record);
+                }
+            }
+        } catch (RuntimeException exception) {
+            log.error("Failed to recover pending review AI summary messages", exception);
+        }
+    }
+
+    @Scheduled(
+            fixedDelayString = "${movielife.ai.review-summary.reconciliation-fixed-delay-ms:30000}",
+            initialDelayString = "${movielife.ai.review-summary.reconciliation-initial-delay-ms:15000}")
+    public void reconcileRecoverableTasks() {
         if (!properties.isEnabled()) {
             return;
         }
         List<AiSummaryTask> targets;
         try {
-            targets = taskMapper.selectRetryReadyTargets(
-                    LocalDateTime.now(), properties.getRetryBatchSize());
+            targets = taskMapper.selectRecoverableTargets(
+                    LocalDateTime.now(), properties.getRecoveryBatchSize());
         } catch (RuntimeException exception) {
-            log.error("Failed to scan retry-ready review AI summary tasks", exception);
+            log.error("Failed to reconcile recoverable review AI summary tasks", exception);
             return;
         }
         for (AiSummaryTask target : targets) {
@@ -82,7 +135,7 @@ public class ReviewAiSummaryJob {
                 streamPublisher.publish(AiSummaryTargetType.valueOf(target.getTargetType()),
                         target.getTargetId());
             } catch (RuntimeException exception) {
-                log.error("Failed to notify retry-ready review AI summary, targetType={}, targetId={}",
+                log.error("Failed to notify recoverable review AI summary, targetType={}, targetId={}",
                         target.getTargetType(), target.getTargetId(), exception);
             }
         }

@@ -24,6 +24,7 @@ public class AiReviewSummaryProperties {
     private int maxInputCharacters = 20000;
     private int maxAttempts = 3;
     private Duration leaseDuration = Duration.ofMinutes(2);
+    private Duration pendingClaimMinIdle = Duration.ofMinutes(2);
     private int streamBatchSize = 10;
-    private int retryBatchSize = 100;
+    private int recoveryBatchSize = 100;
 }

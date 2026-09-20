@@ -15,10 +15,13 @@ import java.util.List;
 public interface AiSummaryTaskMapper extends BaseMapper<AiSummaryTask> {
 
     @Select("SELECT target_type, target_id FROM tb_ai_summary_task "
-            + "WHERE target_type IN ('MOVIE', 'ACTIVITY') AND status = 'RETRY_WAIT' "
-            + "AND next_retry_time <= #{now} ORDER BY next_retry_time ASC, id ASC LIMIT #{limit}")
-    List<AiSummaryTask> selectRetryReadyTargets(@Param("now") LocalDateTime now,
-                                                @Param("limit") int limit);
+            + "WHERE target_type IN ('MOVIE', 'ACTIVITY') AND dirty_version > processed_version AND ("
+            + "status = 'PENDING' "
+            + "OR (status = 'RETRY_WAIT' AND next_retry_time <= #{now}) "
+            + "OR (status = 'PROCESSING' AND lease_until <= #{now})) "
+            + "ORDER BY update_time ASC, id ASC LIMIT #{limit}")
+    List<AiSummaryTask> selectRecoverableTargets(@Param("now") LocalDateTime now,
+                                                 @Param("limit") int limit);
 
     @Insert("INSERT INTO tb_ai_summary_task "
             + "(target_type, target_id, dirty_version, processed_version, status, create_time, update_time) "

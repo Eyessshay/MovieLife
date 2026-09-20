@@ -48,9 +48,12 @@ movielife:
       max-input-characters: ${AI_REVIEW_SUMMARY_MAX_INPUT_CHARACTERS:20000}
       max-attempts: ${AI_REVIEW_SUMMARY_MAX_ATTEMPTS:3}
       lease-duration: ${AI_REVIEW_SUMMARY_LEASE_DURATION:2m}
+      pending-claim-min-idle: ${AI_REVIEW_SUMMARY_PENDING_CLAIM_MIN_IDLE:2m}
       stream-batch-size: ${AI_REVIEW_SUMMARY_STREAM_BATCH_SIZE:10}
-      retry-batch-size: ${AI_REVIEW_SUMMARY_RETRY_BATCH_SIZE:100}
+      recovery-batch-size: ${AI_REVIEW_SUMMARY_RECOVERY_BATCH_SIZE:100}
       worker-fixed-delay-ms: ${AI_REVIEW_SUMMARY_WORKER_FIXED_DELAY_MS:1000}
       worker-initial-delay-ms: ${AI_REVIEW_SUMMARY_WORKER_INITIAL_DELAY_MS:5000}
-      retry-fixed-delay-ms: ${AI_REVIEW_SUMMARY_RETRY_FIXED_DELAY_MS:5000}
-      retry-initial-delay-ms: ${AI_REVIEW_SUMMARY_RETRY_INITIAL_DELAY_MS:5000}
+      pending-recovery-fixed-delay-ms: ${AI_REVIEW_SUMMARY_PENDING_RECOVERY_FIXED_DELAY_MS:5000}
+      pending-recovery-initial-delay-ms: ${AI_REVIEW_SUMMARY_PENDING_RECOVERY_INITIAL_DELAY_MS:10000}
+      reconciliation-fixed-delay-ms: ${AI_REVIEW_SUMMARY_RECONCILIATION_FIXED_DELAY_MS:30000}
+      reconciliation-initial-delay-ms: ${AI_REVIEW_SUMMARY_RECONCILIATION_INITIAL_DELAY_MS:15000}

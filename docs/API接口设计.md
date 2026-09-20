@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.32（阶段 14 Step 14.5 Activity Review AI Summary 接入冻结版）
+- 版本：v0.33（阶段 14 Review AI Summary 正式冻结版）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -1308,6 +1308,20 @@ Activity 触发、快照、Worker 发布前复核和公开 GET 均复用 `Activi
 Step 14.5 定向测试 42 项通过，覆盖 Activity 提交后触发、事务回滚、Stream 消费、租约领取、评价不足、成功发布、缓存、匿名 HTTP 五状态、下线前后边界、下线期间发布保护、历史 Summary 保留，以及 Movie 既有闭环兼容。阶段 10～13 Activity 专项交叉回归 107 项通过，覆盖普通查询、详情、Nearby、收藏、评价写入/查询、并发与聚合；全量 546 项测试通过，0 failure、0 error、0 skipped。
 
 真实联调使用隔离 MySQL 8.0.17、Redis 7 和随机 Spring Boot HTTP 端口，模型边界使用受控 `AiReviewSummaryClient` Stub，真实模型 HTTP Adapter 证据继续继承已冻结的 Step 14.3。完成不跳过测试的 `mvn clean package`、测试数据和 Redis 清理并提交后，本 Step 正式冻结；下一步只能单独进入 Step 14.6，不得在 14.5 回填跨目标并发压测、通知丢失对账、Venue/Post 总结或其他 AI 能力。
+
+#### 4.6.17 Step 14.6 并发、恢复与补偿
+
+Stage 14 的最终可靠性仍以 MySQL 任务行作为唯一任务事实。每个 Worker 使用进程信息和随机后缀生成独立消费者名，领取时由 `target_type + target_id`、状态、版本和租约条件 UPDATE 竞争；因此 Movie 与 Activity 即使数值 ID 相同也完全隔离，多 Worker、重复 Stream 消息或周期性重复补偿最多增加无害通知，不会重复发布同一任务版本。处理中评价再次变化只推进 `dirty_version`，旧 Worker 发布或失败时不会吞掉新版本，任务继续保持 `PENDING` 等待下一轮。
+
+Redis Stream 的新消息由 Consumer Group 消费；超过最小空闲时间的 Pending 消息使用 `XCLAIM` 转移给当前消费者，成功完成或确认无可领取任务后才 ACK，异常中断则保留 Pending。独立 MySQL 对账周期扫描 `PENDING`、已到期 `RETRY_WAIT` 和租约已过期的 `PROCESSING`，重新发送只含目标类型和 ID 的通知。Redis Stream 仍不是任务事实：消息丢失由 MySQL 对账恢复，消息重复由条件领取消解；Redis 故障期间任务事实不丢失，恢复后由对账继续推进。
+
+模型 `429` 限流、连接失败、超时和供应商 `5xx` 按通用重试策略进入 `RETRY_WAIT`，不可恢复输入或达到最大次数才进入 `DEAD`；错误码必须脱敏，API Key、完整 Prompt 和原始供应商响应不得写入日志、MySQL、Redis 或公开响应。公开查询读取 Redis 失败或缓存缺失时回源 MySQL 当前 Summary 指针，并尽力回填不可变结果缓存；缓存异常不改变公开状态和 MySQL 最终事实。上述恢复机制不新增 API，不改变 Movie/Activity 有效性、Review 写入、评分聚合、收藏、Nearby、Review Like 或任何票务语义。
+
+#### 4.6.18 Stage 14 最终验证与冻结
+
+Step 14.6 定向测试与 Stage 14 专项回归共 64 项通过，覆盖同 ID 跨目标隔离、8 Worker 并发唯一领取、租约过期接管、处理中版本推进、重复 Stream 消息、跨消费者 Pending 恢复、MySQL 对账、到期重试、活跃租约保护、模型限流/服务不可用以及 Redis 故障回源 MySQL。全量 552 项测试通过，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。
+
+真实模型联调使用隔离 MySQL 8.0.17、Redis 7、独立 HTTP 端口和服务端环境变量中的 DeepSeek 配置。相同数值 ID 的 Movie 与 Activity 分别以 3 条有效中文评价调用 `deepseek-flash`，均发布 Summary 版本 1，MySQL 任务进入 `SUCCEEDED`，匿名 GET 均返回 `READY`，两个公共 Redis 缓存存在且 Stream Pending 为 0。联调记录不保存或输出 API Key。测试 Movie、Activity、User、Review、AI Task/Summary、Stream 与缓存全部清理，Redis 最终 `DBSIZE=0`，隔离容器和应用进程均已停止。Stage 14 至此正式冻结；后续阶段尚未指定，不得回改阶段 1～14 已冻结业务语义，也不得顺带扩展 Venue/Post、推荐、审核或其他 AI 能力。
 
 ## 5. 待细化事项
 

@@ -45,19 +45,20 @@ class ReviewAiSummaryJobTest {
     }
 
     @Test
-    void disabledFeatureShouldNotScanRetryTasks() {
-        job.notifyReadyRetries();
+    void disabledFeatureShouldNotRunRecoveryJobs() {
+        job.recoverPendingMessages();
+        job.reconcileRecoverableTasks();
 
-        verifyNoInteractions(taskMapper, streamPublisher);
+        verifyNoInteractions(redisTemplate, taskMapper, streamPublisher);
     }
 
     @Test
-    void dueMovieAndActivityRetriesShouldBeRepublishedToDedicatedStream() {
+    void recoverableMovieAndActivityTasksShouldBeRepublishedToDedicatedStream() {
         properties.setEnabled(true);
-        when(taskMapper.selectRetryReadyTargets(any(LocalDateTime.class), eq(100)))
+        when(taskMapper.selectRecoverableTargets(any(LocalDateTime.class), eq(100)))
                 .thenReturn(Arrays.asList(target("MOVIE", 11L), target("ACTIVITY", 12L)));
 
-        job.notifyReadyRetries();
+        job.reconcileRecoverableTasks();
 
         verify(streamPublisher).publish(AiSummaryTargetType.MOVIE, 11L);
         verify(streamPublisher).publish(AiSummaryTargetType.ACTIVITY, 12L);

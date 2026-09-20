@@ -45,7 +45,8 @@ import static org.mockito.Mockito.when;
                 "movielife.startup-check.enabled=false",
                 "movielife.ai.review-summary.enabled=true",
                 "movielife.ai.review-summary.worker-initial-delay-ms=3600000",
-                "movielife.ai.review-summary.retry-initial-delay-ms=3600000"
+                "movielife.ai.review-summary.pending-recovery-initial-delay-ms=3600000",
+                "movielife.ai.review-summary.reconciliation-initial-delay-ms=3600000"
         })
 class ActivityReviewAiSummaryHttpIntegrationTest {
 

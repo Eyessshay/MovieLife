@@ -3,6 +3,7 @@ package com.movielife.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.movielife.ai.AiReviewSummaryCacheValue;
 import com.movielife.config.AiReviewSummaryProperties;
+import com.movielife.entity.AiReviewSummary;
 import com.movielife.entity.AiSummaryTask;
 import com.movielife.entity.Activity;
 import com.movielife.entity.Movie;
@@ -26,6 +27,7 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 
 @ExtendWith(MockitoExtension.class)
@@ -133,6 +135,23 @@ class ReviewAiSummaryQueryServiceTest {
     }
 
     @Test
+    void redisMissShouldFallBackToMysqlAndRefillCache() {
+        prepareMovie(5);
+        AiSummaryTask task = task("SUCCEEDED", 9L, 3L, 3L);
+        when(persistenceService.findTask(AiSummaryTargetType.MOVIE, 1L)).thenReturn(task);
+        when(cacheRepository.find(AiSummaryTargetType.MOVIE, 1L)).thenReturn(Optional.empty());
+        AiReviewSummary summary = summary(9L);
+        when(persistenceService.findCurrentSummary(AiSummaryTargetType.MOVIE, 1L))
+                .thenReturn(summary);
+
+        ReviewAiSummaryVO result = service.query("MOVIE", 1L);
+
+        assertThat(result.getStatus()).isEqualTo("READY");
+        assertThat(result.getSummary()).isEqualTo("MySQL 最终事实");
+        verify(cacheRepository).put(summary);
+    }
+
+    @Test
     void missingTaskWithEnoughReviewsShouldBeInternalErrorNotSynchronousGeneration() {
         prepareMovie(3);
         when(persistenceService.findTask(AiSummaryTargetType.MOVIE, 1L)).thenReturn(null);
@@ -170,6 +189,24 @@ class ReviewAiSummaryQueryServiceTest {
         value.setPromptVersion("review-summary-v1");
         value.setGeneratedAt(LocalDateTime.of(2026, 9, 19, 12, 0));
         return value;
+    }
+
+    private AiReviewSummary summary(Long id) {
+        AiReviewSummary summary = new AiReviewSummary();
+        summary.setId(id);
+        summary.setTargetType("MOVIE");
+        summary.setTargetId(1L);
+        summary.setSummary("MySQL 最终事实");
+        summary.setPros("[]");
+        summary.setCons("[]");
+        summary.setSuitableFor("[]");
+        summary.setWarningPoints("[]");
+        summary.setSourceReviewCount(5);
+        summary.setInputReviewCount(5);
+        summary.setVersion(1);
+        summary.setPromptVersion("review-summary-v1");
+        summary.setCreateTime(LocalDateTime.of(2026, 9, 19, 12, 0));
+        return summary;
     }
 
     private void assertBusinessError(Runnable action, ErrorCode code) {

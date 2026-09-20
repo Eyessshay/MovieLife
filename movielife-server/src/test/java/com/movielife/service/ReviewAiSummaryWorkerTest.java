@@ -107,6 +107,34 @@ class ReviewAiSummaryWorkerTest {
     }
 
     @Test
+    void rateLimitAndProviderUnavailableShouldRemainRetryable() {
+        AiSummaryTask movieTask = task(1, 1L);
+        AiSummaryTask activityTask = task(1, 1L);
+        when(persistenceService.claim(eq(AiSummaryTargetType.MOVIE), eq(3L), any(), any(), any()))
+                .thenReturn(Optional.of(movieTask));
+        when(persistenceService.claim(eq(AiSummaryTargetType.ACTIVITY), eq(4L), any(), any(), any()))
+                .thenReturn(Optional.of(activityTask));
+        when(generationService.generate(AiSummaryTargetType.MOVIE, 3L, 1L))
+                .thenThrow(new AiSummaryClientException(
+                        AiSummaryFailureCode.AI_RATE_LIMITED, 300, null));
+        when(generationService.generate(AiSummaryTargetType.ACTIVITY, 4L, 1L))
+                .thenThrow(new AiSummaryClientException(
+                        AiSummaryFailureCode.AI_PROVIDER_UNAVAILABLE));
+        when(persistenceService.markRetry(eq(AiSummaryTargetType.MOVIE), eq(3L), eq(1L),
+                any(), eq("AI_RATE_LIMITED"), any(), any())).thenReturn(true);
+        when(persistenceService.markRetry(eq(AiSummaryTargetType.ACTIVITY), eq(4L), eq(1L),
+                any(), eq("AI_PROVIDER_UNAVAILABLE"), any(), any())).thenReturn(true);
+
+        assertThat(worker.process(AiSummaryTargetType.MOVIE, 3L)).isTrue();
+        assertThat(worker.process(AiSummaryTargetType.ACTIVITY, 4L)).isTrue();
+
+        verify(persistenceService).markRetry(eq(AiSummaryTargetType.MOVIE), eq(3L), eq(1L),
+                any(), eq("AI_RATE_LIMITED"), any(), any());
+        verify(persistenceService).markRetry(eq(AiSummaryTargetType.ACTIVITY), eq(4L), eq(1L),
+                any(), eq("AI_PROVIDER_UNAVAILABLE"), any(), any());
+    }
+
+    @Test
     void finalAttemptAndAuthenticationFailureShouldBecomeDead() {
         AiSummaryTask finalAttempt = task(3, 4L);
         when(persistenceService.claim(eq(AiSummaryTargetType.MOVIE), eq(1L), any(), any(), any()))
