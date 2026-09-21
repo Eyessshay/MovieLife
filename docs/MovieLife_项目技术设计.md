@@ -2306,6 +2306,16 @@ Step 15.1 只开放场馆运营人员对本场馆固定座位 Activity 场次的
 
 Step 15.1 的 17 项专项测试与全量 569 项测试均为 0 failure、0 error、0 skipped。真实联调使用按当前 `movielife.sql` 初始化的隔离 MySQL 8.0.17、隔离 Redis 7 和随机 Spring Boot HTTP 端口，证明管理查询前后目标 MySQL 行数和 Redis Key 集合不变；清理后无 Step 15.1 数据残留，Redis `DBSIZE=0`。不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。本 Step 完成并冻结，Stage 15 尚未整体完成。
 
+### 12.2 Step 15.2 创建固定座位 Activity 场次
+
+Step 15.2 只增加 `POST /api/admin/venues/{venueId}/activity-showtimes`。授权事实仍唯一来自有效 `tb_venue_staff`；Venue 必须启用，Activity 必须在售，Hall 必须归属路径 Venue。请求时间归一到秒且必须满足未来开始和正向时间区间，价格归一为两位小数并严格适配 `DECIMAL(10,2)`。服务端固定生成 `ACTIVITY + status=1`，有效物理座位为空时拒绝创建。
+
+事务先锁定 `tb_hall` 目标行，再用当前读检查所有状态的重叠场次；命中相同 `requestId` 时按完整规范化参数收敛为幂等结果，避免 InnoDB 可重复读快照使并发排期绕过互斥。重叠谓词为 `start_time < newEnd AND end_time > newStart`。有效 Seat 只查询一次，Showtime 插入严格检查 1 行，ShowtimeSeat 使用单条批量 INSERT 且严格检查数量与 Seat 数相同；两次写入在同一事务，失败整体回滚。创建后 `total_seats`、`available_seats` 和可售 ShowtimeSeat 数量一致，所有座位使用同一个 `basePrice`。
+
+幂等最终事实为 `tb_showtime.create_request_id`，唯一约束是 `(venue_id, create_request_id)`。同一场馆内重复键只有在 Activity、Hall、归一后的起止时间和价格全部一致时返回原场次，否则返回 `SHOWTIME_CREATE_REQUEST_MISMATCH`；并发唯一键冲突在原事务回滚后回读 MySQL 收敛。该链路不增加 Redis 状态，不创建临时锁，不修改既有场次或阶段 1～14 的票务、评价、GEO 和 AI Summary 语义。
+
+Step 15.2 新增 17 项专项测试，全量 586 项测试均为 0 failure、0 error、0 skipped。隔离 MySQL 8.0.17、Redis 7 和随机 HTTP 端口完成真实创建、幂等、库存一致、停售冲突、事务回滚、并发 Hall 锁与 Redis 不新增业务 Key 验证；迁移连续执行两次成功。清理后无 Step 15.2 MySQL 数据残留且 Redis `DBSIZE=0`，不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。本 Step 完成并冻结，Stage 15 尚未整体完成。
+
 ## 13. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：

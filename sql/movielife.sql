@@ -138,6 +138,8 @@ CREATE TABLE IF NOT EXISTS tb_showtime (
   biz_id BIGINT NOT NULL,
   venue_id BIGINT NOT NULL,
   hall_id BIGINT NOT NULL,
+  create_request_id VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NULL
+    COMMENT 'venue-scoped idempotency key for admin creation',
   start_time DATETIME NOT NULL,
   end_time DATETIME NOT NULL,
   language_version VARCHAR(32) NULL,
@@ -148,6 +150,7 @@ CREATE TABLE IF NOT EXISTS tb_showtime (
   create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
+  UNIQUE KEY uk_showtime_venue_create_request (venue_id, create_request_id),
   KEY idx_showtime_biz (biz_type, biz_id, start_time, status),
   KEY idx_showtime_venue_time (venue_id, start_time),
   KEY idx_showtime_hall_time (hall_id, start_time),

@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.34（Step 15.1 固定座位 Activity 场次管理查询基线）
+- 版本：v0.35（Step 15.2 创建固定座位 Activity 场次）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -580,6 +580,7 @@ POST /api/refund/notify                # 退款渠道异步通知
 POST /api/admin/tickets/verify          # 单张票验票核销（已实现，Step 9.4）
 GET  /api/admin/venues/{venueId}/activity-showtimes
 GET  /api/admin/venues/{venueId}/activity-showtimes/{showtimeId}
+POST /api/admin/venues/{venueId}/activity-showtimes
 ```
 
 接口必须登录，并要求当前用户在 `tb_venue_staff` 中与目标 Showtime 所属 Venue 存在 `status=1` 的有效工作人员关系。普通购票用户即使持有本人票码也不能调用。目标 Venue 必须由服务端通过 `ticketCode → TicketOrderItem.order_id → TicketOrder.showtime_id → Showtime.venue_id` 推导；请求体不得提交 `userId`、`venueId`、`orderId`、票状态或核销时间。
@@ -648,6 +649,20 @@ Step 9.2 已完成增量迁移、VenueStaff 与票明细持久化映射，并把
 分页先查询 `tb_showtime`，再分别批量查询本页涉及的 `tb_activity` 和 `tb_hall`，禁止按场次循环查询。Activity 或 Hall 缺失、Hall 不属于 Showtime.Venue、库存字段为空、库存为负数或 `available_seats > total_seats` 均视为数据不一致并返回 `INTERNAL_ERROR`。Activity 当前状态不影响管理端查看历史场次。Step 15.1 全程只读 MySQL，不读取或写入 Redis，不修改 `tb_showtime`、`tb_showtime_seat`、订单、票券、评价、AI Summary 或 GEO 状态，也不实现创建、修改、停售、恢复销售和非固定座位票务。
 
 Step 15.1 新增 17 项专项测试，覆盖 Controller 登录与参数契约、Service 权限和批量组装、真实 HTTP 下普通用户/跨场馆员工/停用员工拒绝、Movie 与其他场馆场次隐藏、待售/停售/历史场次可见、状态/日期过滤、稳定分页、关联失败关闭以及 MySQL/Redis 只读边界。全量 569 项测试通过，0 failure、0 error、0 skipped；在隔离 MySQL 8.0.17、Redis 7 和随机 HTTP 端口完成联调，不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。测试数据清理后 Redis `DBSIZE=0`，Step 15.1 至此冻结；后续不得在本 Step 回填创建、停售、恢复销售或其他写能力。
+
+#### 3.10.2 Step 15.2 创建固定座位 Activity 场次
+
+`POST /api/admin/venues/{venueId}/activity-showtimes` 要求 Bearer 登录，且当前用户必须在 `tb_venue_staff` 中对路径 Venue 存在 `status=1` 的有效员工关系；普通登录、其他场馆员工和停用员工返回 HTTP 403 `VENUE_MANAGE_FORBIDDEN`。请求 JSON 为 `requestId/activityId/hallId/startTime/endTime/basePrice`：`requestId` 只允许 1～64 位 ASCII 字母、数字、下划线或连字符；两个 ID 必须为正整数；时间使用 ISO 本地日期时间，服务端按秒归一，`startTime` 必须晚于当前时间且 `endTime > startTime`；`basePrice` 必须在 `0.01～99999999.99` 且最多两位小数。格式、时间或价格不合法统一返回 `INVALID_PARAM`。
+
+服务端固定写入 `biz_type=ACTIVITY`、`status=1`，不接收客户端提交的业务类型、状态、库存或座位价格。Venue 必须启用，否则返回 `VENUE_NOT_FOUND`；Activity 必须 `status=1`，否则返回 `ACTIVITY_NOT_FOUND`；Hall 必须属于路径 Venue，否则返回 `HALL_NOT_FOUND`。Hall 的 `base_status=1` 物理座位一次性查询；数量为零返回 `SHOWTIME_SEAT_REQUIRED`。首版所有 `tb_showtime_seat.price` 均等于归一后的 `basePrice`，不支持票档、分区价或动态定价。
+
+同一 Hall 排期由事务内 `SELECT ... FOR UPDATE` 锁定 Hall 行后串行处理；重叠检测使用当前读，若命中的重叠场次具有相同 `requestId`，先按完整规范化参数执行幂等匹配。冲突条件严格为 `existing.start_time < newEnd AND existing.end_time > newStart`，不按场次状态过滤，因此 `status=0` 停售场次仍占用排期；冲突返回 `SHOWTIME_SCHEDULE_CONFLICT`。相邻边界（旧场次结束时间等于新场次开始时间）不冲突。
+
+`tb_showtime(venue_id, create_request_id)` 建立唯一约束，幂等范围限定为路径 Venue。同一 `requestId` 的 `activityId/hallId/startTime/endTime/basePrice` 归一后完全一致时返回原 `AdminActivityShowtimeVO`，不重复创建；任一字段不同返回 `SHOWTIME_CREATE_REQUEST_MISMATCH`。首次创建时 `tb_showtime` 插入影响行数必须为 1，随后一次批量插入全部 `tb_showtime_seat`，影响行数必须等于有效物理座位数；`total_seats=available_seats=有效座位数`。两步处于同一 MySQL 事务，任一步失败整体回滚。
+
+该接口不读取或写入 Redis 业务状态，不创建座位临时锁，不修改 Activity 主数据、既有场次、GEO、订单、支付、退款、出票、核销、评价或 Review AI Summary。响应复用 Step 15.1 的 `AdminActivityShowtimeVO`。本 Step 不实现停售、恢复、改期、改厅、强制退票、订单迁移、座位模板同步或非固定座位活动票务。
+
+Step 15.2 新增 17 项专项测试；全量 586 项测试全部通过，0 failure、0 error、0 skipped。隔离 MySQL 8.0.17、Redis 7 和随机 HTTP 端口验证了真实创建、统一座位价格、库存一致、幂等与参数不匹配、停售场次冲突、Hall 并发串行化、批量写入失败整体回滚及 Redis Key 不新增；增量迁移连续执行两次成功。不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`，清理后无 Step 15.2 MySQL 数据残留且 Redis `DBSIZE=0`。Step 15.2 至此冻结。
 
 ### 3.11 AI 评价总结
 

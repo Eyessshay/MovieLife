@@ -3,6 +3,7 @@ package com.movielife.controller;
 import com.movielife.constants.RedisConstants;
 import com.movielife.exception.BusinessException;
 import com.movielife.exception.ErrorCode;
+import com.movielife.dto.CreateActivityShowtimeDTO;
 import com.movielife.service.ActivityShowtimeAdminService;
 import com.movielife.vo.AdminActivityShowtimeVO;
 import com.movielife.vo.PageVO;
@@ -27,6 +28,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -84,6 +86,38 @@ class ActivityShowtimeAdminControllerTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.data.showtimeId").value(1001))
                 .andExpect(jsonPath("$.data.activityId").value(301));
+    }
+
+    @Test
+    void shouldCreateActivityShowtime() throws Exception {
+        when(activityShowtimeAdminService.createShowtime(eq(7L), eq(501L), any()))
+                .thenReturn(showtime());
+
+        mockMvc.perform(post("/api/admin/venues/501/activity-showtimes")
+                        .header("Authorization", AUTHORIZATION)
+                        .contentType("application/json")
+                        .content("{\"requestId\":\"req-1502-1\",\"activityId\":301,"
+                                + "\"hallId\":601,\"startTime\":\"2035-09-20T19:30:00\","
+                                + "\"endTime\":\"2035-09-20T21:30:00\",\"basePrice\":180.00}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value("OK"))
+                .andExpect(jsonPath("$.data.showtimeId").value(1001))
+                .andExpect(jsonPath("$.data.totalSeats").value(100));
+    }
+
+    @Test
+    void shouldRejectInvalidCreateBodyBeforeCallingService() throws Exception {
+        mockMvc.perform(post("/api/admin/venues/501/activity-showtimes")
+                        .header("Authorization", AUTHORIZATION)
+                        .contentType("application/json")
+                        .content("{\"requestId\":\"bad request\",\"activityId\":0,"
+                                + "\"hallId\":601,\"startTime\":\"2035-09-20T19:30:00\","
+                                + "\"endTime\":\"2035-09-20T21:30:00\",\"basePrice\":180.001}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("INVALID_PARAM"));
+
+        verify(activityShowtimeAdminService, never())
+                .createShowtime(any(), any(), any(CreateActivityShowtimeDTO.class));
     }
 
     @Test

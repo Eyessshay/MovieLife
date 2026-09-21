@@ -4,12 +4,23 @@ import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.movielife.entity.ShowtimeSeat;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Insert;
 import org.apache.ibatis.annotations.Update;
 
 import java.util.List;
 
 @Mapper
 public interface ShowtimeSeatMapper extends BaseMapper<ShowtimeSeat> {
+
+    @Insert("<script>" +
+            "INSERT INTO tb_showtime_seat " +
+            "(showtime_id, seat_id, status, price, lock_order_id, version) VALUES " +
+            "<foreach collection='items' item='item' separator=','>" +
+            "(#{item.showtimeId}, #{item.seatId}, #{item.status}, #{item.price}, " +
+            "#{item.lockOrderId}, #{item.version})" +
+            "</foreach>" +
+            "</script>")
+    int insertBatch(@Param("items") List<ShowtimeSeat> items);
 
     @Update("<script>" +
             "UPDATE tb_showtime_seat " +

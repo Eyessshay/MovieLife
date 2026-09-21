@@ -7,10 +7,24 @@ import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 @Mapper
 public interface ShowtimeMapper extends BaseMapper<Showtime> {
+
+    @Select("SELECT * FROM tb_showtime " +
+            "WHERE venue_id = #{venueId} AND create_request_id = #{requestId}")
+    Showtime selectByVenueAndCreateRequestId(@Param("venueId") Long venueId,
+                                             @Param("requestId") String requestId);
+
+    @Select("SELECT * FROM tb_showtime " +
+            "WHERE hall_id = #{hallId} " +
+            "AND start_time < #{endTime} AND end_time > #{startTime} " +
+            "ORDER BY id ASC LIMIT 1 FOR UPDATE")
+    Showtime selectOverlappingShowtimeForUpdate(@Param("hallId") Long hallId,
+                                                @Param("startTime") LocalDateTime startTime,
+                                                @Param("endTime") LocalDateTime endTime);
 
     @Select("<script>" +
             "SELECT DISTINCT venue_id FROM tb_showtime " +

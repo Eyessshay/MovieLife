@@ -3,6 +3,7 @@ package com.movielife.service.impl;
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.movielife.dto.AdminActivityShowtimeQueryDTO;
+import com.movielife.dto.CreateActivityShowtimeDTO;
 import com.movielife.entity.Activity;
 import com.movielife.entity.Hall;
 import com.movielife.entity.Showtime;
@@ -18,6 +19,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.springframework.dao.DuplicateKeyException;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.math.BigDecimal;
@@ -31,6 +33,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -41,13 +44,15 @@ class ActivityShowtimeAdminServiceImplTest {
     @Mock private ShowtimeMapper showtimeMapper;
     @Mock private ActivityMapper activityMapper;
     @Mock private HallMapper hallMapper;
+    @Mock private ActivityShowtimeCreationTransactionService creationTransactionService;
 
     private ActivityShowtimeAdminServiceImpl service;
 
     @BeforeEach
     void setUp() {
         service = new ActivityShowtimeAdminServiceImpl(
-                venueStaffMapper, showtimeMapper, activityMapper, hallMapper);
+                venueStaffMapper, showtimeMapper, activityMapper, hallMapper,
+                creationTransactionService);
     }
 
     @Test
@@ -183,6 +188,72 @@ class ActivityShowtimeAdminServiceImplTest {
         assertError(() -> service.queryShowtime(7L, 501L, 1001L), ErrorCode.INTERNAL_ERROR);
     }
 
+    @Test
+    void shouldReturnMatchingExistingCreationEvenAfterItsStartTime() {
+        CreateActivityShowtimeDTO request = createRequest("req-existing",
+                LocalDateTime.of(2020, 9, 20, 19, 30));
+        Showtime existing = showtime(1001L, 301L, 601L, 1, 100, 100);
+        existing.setCreateRequestId("req-existing");
+        existing.setStartTime(request.getStartTime());
+        existing.setEndTime(request.getEndTime());
+        when(venueStaffMapper.selectActiveId(7L, 501L)).thenReturn(71L);
+        when(showtimeMapper.selectByVenueAndCreateRequestId(501L, "req-existing"))
+                .thenReturn(existing);
+        when(showtimeMapper.selectOne(any(Wrapper.class))).thenReturn(existing);
+        when(activityMapper.selectBatchIds(anyCollection()))
+                .thenReturn(Collections.singletonList(activity(301L, "活动一")));
+        when(hallMapper.selectBatchIds(anyCollection()))
+                .thenReturn(Collections.singletonList(hall(601L, 501L, "一号厅")));
+
+        AdminActivityShowtimeVO result = service.createShowtime(7L, 501L, request);
+
+        assertThat(result.getShowtimeId()).isEqualTo(1001L);
+        verify(creationTransactionService, never()).create(any(), any(), any());
+    }
+
+    @Test
+    void shouldRejectPastNewCreationAndExistingRequestMismatch() {
+        CreateActivityShowtimeDTO past = createRequest("req-past",
+                LocalDateTime.of(2020, 9, 20, 19, 30));
+        when(venueStaffMapper.selectActiveId(7L, 501L)).thenReturn(71L);
+        assertError(() -> service.createShowtime(7L, 501L, past), ErrorCode.INVALID_PARAM);
+
+        CreateActivityShowtimeDTO mismatch = createRequest("req-used",
+                LocalDateTime.of(2035, 9, 20, 19, 30));
+        Showtime existing = showtime(1001L, 999L, 601L, 1, 100, 100);
+        existing.setCreateRequestId("req-used");
+        existing.setStartTime(mismatch.getStartTime());
+        existing.setEndTime(mismatch.getEndTime());
+        when(showtimeMapper.selectByVenueAndCreateRequestId(501L, "req-used"))
+                .thenReturn(existing);
+        assertError(() -> service.createShowtime(7L, 501L, mismatch),
+                ErrorCode.SHOWTIME_CREATE_REQUEST_MISMATCH);
+        verify(creationTransactionService, never()).create(any(), any(), any());
+    }
+
+    @Test
+    void shouldRecoverConcurrentDuplicateUsingPersistedRequest() {
+        CreateActivityShowtimeDTO request = createRequest("req-race",
+                LocalDateTime.of(2035, 9, 20, 19, 30));
+        Showtime concurrent = showtime(1001L, 301L, 601L, 1, 2, 2);
+        concurrent.setCreateRequestId("req-race");
+        concurrent.setStartTime(request.getStartTime());
+        concurrent.setEndTime(request.getEndTime());
+        when(venueStaffMapper.selectActiveId(7L, 501L)).thenReturn(71L);
+        when(showtimeMapper.selectByVenueAndCreateRequestId(501L, "req-race"))
+                .thenReturn(null, concurrent);
+        doThrow(new DuplicateKeyException("duplicate"))
+                .when(creationTransactionService).create(any(), any(), any());
+        when(showtimeMapper.selectOne(any(Wrapper.class))).thenReturn(concurrent);
+        when(activityMapper.selectBatchIds(anyCollection()))
+                .thenReturn(Collections.singletonList(activity(301L, "活动一")));
+        when(hallMapper.selectBatchIds(anyCollection()))
+                .thenReturn(Collections.singletonList(hall(601L, 501L, "一号厅")));
+
+        assertThat(service.createShowtime(7L, 501L, request).getShowtimeId())
+                .isEqualTo(1001L);
+    }
+
     private Showtime showtime(Long id, Long activityId, Long hallId,
                               int status, int totalSeats, int availableSeats) {
         Showtime showtime = new Showtime();
@@ -205,6 +276,17 @@ class ActivityShowtimeAdminServiceImplTest {
         activity.setId(id);
         activity.setTitle(title);
         return activity;
+    }
+
+    private CreateActivityShowtimeDTO createRequest(String requestId, LocalDateTime startTime) {
+        CreateActivityShowtimeDTO request = new CreateActivityShowtimeDTO();
+        request.setRequestId(requestId);
+        request.setActivityId(301L);
+        request.setHallId(601L);
+        request.setStartTime(startTime);
+        request.setEndTime(startTime.plusHours(2));
+        request.setBasePrice(new BigDecimal("180.00"));
+        return request;
     }
 
     private Hall hall(Long id, Long venueId, String name) {

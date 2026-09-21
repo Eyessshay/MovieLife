@@ -3,6 +3,7 @@ package com.movielife.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.movielife.dto.AdminActivityShowtimeQueryDTO;
+import com.movielife.dto.CreateActivityShowtimeDTO;
 import com.movielife.entity.Activity;
 import com.movielife.entity.Hall;
 import com.movielife.entity.Showtime;
@@ -16,6 +17,7 @@ import com.movielife.service.ActivityShowtimeAdminService;
 import com.movielife.vo.AdminActivityShowtimeVO;
 import com.movielife.vo.PageVO;
 import lombok.RequiredArgsConstructor;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
 import java.time.DateTimeException;
@@ -38,6 +40,7 @@ public class ActivityShowtimeAdminServiceImpl implements ActivityShowtimeAdminSe
     private final ShowtimeMapper showtimeMapper;
     private final ActivityMapper activityMapper;
     private final HallMapper hallMapper;
+    private final ActivityShowtimeCreationTransactionService creationTransactionService;
 
     @Override
     public PageVO<AdminActivityShowtimeVO> queryShowtimes(
@@ -86,6 +89,37 @@ public class ActivityShowtimeAdminServiceImpl implements ActivityShowtimeAdminSe
         return mapShowtimes(Collections.singletonList(showtime)).get(0);
     }
 
+    @Override
+    public AdminActivityShowtimeVO createShowtime(
+            Long userId, Long venueId, CreateActivityShowtimeDTO request) {
+        validateUserAndVenue(userId, venueId);
+        ActivityShowtimeCreationCommand command = ActivityShowtimeCreationCommand.from(request);
+        requireManagementPermission(userId, venueId);
+
+        Showtime existing = showtimeMapper.selectByVenueAndCreateRequestId(
+                venueId, command.getRequestId());
+        if (existing != null) {
+            return queryShowtime(userId, venueId,
+                    requireMatchingCreation(existing, venueId, command));
+        }
+        if (!command.getStartTime().isAfter(LocalDateTime.now())) {
+            throw new BusinessException(ErrorCode.INVALID_PARAM);
+        }
+
+        Long showtimeId;
+        try {
+            showtimeId = creationTransactionService.create(userId, venueId, command);
+        } catch (DuplicateKeyException exception) {
+            Showtime concurrent = showtimeMapper.selectByVenueAndCreateRequestId(
+                    venueId, command.getRequestId());
+            if (concurrent == null) {
+                throw exception;
+            }
+            showtimeId = requireMatchingCreation(concurrent, venueId, command);
+        }
+        return queryShowtime(userId, venueId, showtimeId);
+    }
+
     private void validateUserAndVenue(Long userId, Long venueId) {
         if (userId == null || userId <= 0) {
             throw new BusinessException(ErrorCode.UNAUTHORIZED);
@@ -120,6 +154,14 @@ public class ActivityShowtimeAdminServiceImpl implements ActivityShowtimeAdminSe
         if (venueStaffMapper.selectActiveId(userId, venueId) == null) {
             throw new BusinessException(ErrorCode.VENUE_MANAGE_FORBIDDEN);
         }
+    }
+
+    private Long requireMatchingCreation(Showtime existing, Long venueId,
+                                          ActivityShowtimeCreationCommand command) {
+        if (existing.getId() == null || !command.matches(existing, venueId)) {
+            throw new BusinessException(ErrorCode.SHOWTIME_CREATE_REQUEST_MISMATCH);
+        }
+        return existing.getId();
     }
 
     private LocalDateTime startOfDay(java.time.LocalDate date) {

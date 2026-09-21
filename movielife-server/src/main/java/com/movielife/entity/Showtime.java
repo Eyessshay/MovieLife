@@ -18,6 +18,7 @@ public class Showtime {
     private Long bizId;
     private Long venueId;
     private Long hallId;
+    private String createRequestId;
     private LocalDateTime startTime;
     private LocalDateTime endTime;
     private String languageVersion;
