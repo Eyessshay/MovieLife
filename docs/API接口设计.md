@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.33（阶段 14 Review AI Summary 正式冻结版）
+- 版本：v0.34（Step 15.1 固定座位 Activity 场次管理查询基线）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -578,6 +578,8 @@ POST /api/refund/notify                # 退款渠道异步通知
 
 ```bash
 POST /api/admin/tickets/verify          # 单张票验票核销（已实现，Step 9.4）
+GET  /api/admin/venues/{venueId}/activity-showtimes
+GET  /api/admin/venues/{venueId}/activity-showtimes/{showtimeId}
 ```
 
 接口必须登录，并要求当前用户在 `tb_venue_staff` 中与目标 Showtime 所属 Venue 存在 `status=1` 的有效工作人员关系。普通购票用户即使持有本人票码也不能调用。目标 Venue 必须由服务端通过 `ticketCode → TicketOrderItem.order_id → TicketOrder.showtime_id → Showtime.venue_id` 推导；请求体不得提交 `userId`、`venueId`、`orderId`、票状态或核销时间。
@@ -634,6 +636,18 @@ POST /api/admin/tickets/verify          # 单张票验票核销（已实现，St
 Step 9.1 仅冻结 SQL、API 和事务契约，不创建 Controller、Service、Mapper、DTO、VO 或测试代码，也不开放该接口。本 Step 不包含二维码签名、离线核销、批量核销、核销撤销、核销设备管理、Activity 票务、Redis 防重或额外的核销时间窗规则。
 
 Step 9.2 已完成增量迁移、VenueStaff 与票明细持久化映射，并把退款调整为“先锁订单、再锁全部明细”，在写入前拒绝包含 USED 明细的整单退款。Step 9.3 已完成核销事务服务、权限校验、首次核销证据写入、重复扫描语义及核销与退款并发收敛。Step 9.4 已开放 Controller、DTO 和 VO；票码只从 JSON 请求体读取。阶段 9 最终回归共 345 项自动化测试，覆盖真实 HTTP、MySQL 和 Redis 边界，Maven `clean package` 构建成功。
+
+#### 3.10.1 Step 15.1 固定座位 Activity 场次管理查询
+
+两个接口均要求 Bearer 登录，并要求当前用户在 `tb_venue_staff` 中对路径 `venueId` 存在 `status=1` 的有效关系。普通登录用户、其他场馆员工和停用员工统一返回 HTTP 403 `VENUE_MANAGE_FORBIDDEN`；管理权限只来自 MySQL，不从请求参数、登录角色声明或 Redis 推导。`venueId`、`showtimeId` 必须为正整数，否则返回 `INVALID_ID`。
+
+列表接口 Query 参数为 `page`（默认 1）、`pageSize`（默认 20，范围 1～100）、可选 `showtimeStatus`（只允许 0/1/2）、可选 `startDate` 和 `endDate`（ISO `yyyy-MM-dd`）。日期按 `tb_showtime.start_time` 过滤，边界为 `startDate 00:00:00`（含）到 `endDate + 1 day 00:00:00`（不含）；允许只传一侧，若 `startDate > endDate` 返回 `INVALID_PARAM`。非法场次状态返回 `INVALID_SHOWTIME_STATUS`。结果固定按 `start_time DESC, id DESC` 排序，并使用统一 `list/total/page/pageSize` 分页结构。
+
+列表项和详情共用 `AdminActivityShowtimeVO`，返回 `showtimeId/activityId/activityTitle/hallId/hallName/startTime/endTime/basePrice/status/totalSeats/availableSeats`。管理查询不套用公开接口“未来且在售”的限制，因此可以看到本场馆待售、停售、已结束或时间已过的 Activity 场次；但查询条件必须始终包含 `biz_type=ACTIVITY` 和路径 `venue_id`。详情在权限校验后以 `showtimeId + venueId + ACTIVITY` 联合定位，不属于本场馆、Movie 场次或不存在时统一返回 `SHOWTIME_NOT_FOUND`，不得返回其他场馆数据。
+
+分页先查询 `tb_showtime`，再分别批量查询本页涉及的 `tb_activity` 和 `tb_hall`，禁止按场次循环查询。Activity 或 Hall 缺失、Hall 不属于 Showtime.Venue、库存字段为空、库存为负数或 `available_seats > total_seats` 均视为数据不一致并返回 `INTERNAL_ERROR`。Activity 当前状态不影响管理端查看历史场次。Step 15.1 全程只读 MySQL，不读取或写入 Redis，不修改 `tb_showtime`、`tb_showtime_seat`、订单、票券、评价、AI Summary 或 GEO 状态，也不实现创建、修改、停售、恢复销售和非固定座位票务。
+
+Step 15.1 新增 17 项专项测试，覆盖 Controller 登录与参数契约、Service 权限和批量组装、真实 HTTP 下普通用户/跨场馆员工/停用员工拒绝、Movie 与其他场馆场次隐藏、待售/停售/历史场次可见、状态/日期过滤、稳定分页、关联失败关闭以及 MySQL/Redis 只读边界。全量 569 项测试通过，0 failure、0 error、0 skipped；在隔离 MySQL 8.0.17、Redis 7 和随机 HTTP 端口完成联调，不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。测试数据清理后 Redis `DBSIZE=0`，Step 15.1 至此冻结；后续不得在本 Step 回填创建、停售、恢复销售或其他写能力。
 
 ### 3.11 AI 评价总结
 

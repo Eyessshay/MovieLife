@@ -11,6 +11,12 @@ public interface VenueStaffMapper extends BaseMapper<VenueStaff> {
 
     @Select("SELECT id FROM tb_venue_staff " +
             "WHERE user_id = #{userId} AND venue_id = #{venueId} AND status = 1 " +
+            "LIMIT 1")
+    Long selectActiveId(@Param("userId") Long userId,
+                        @Param("venueId") Long venueId);
+
+    @Select("SELECT id FROM tb_venue_staff " +
+            "WHERE user_id = #{userId} AND venue_id = #{venueId} AND status = 1 " +
             "LIMIT 1 FOR SHARE")
     Long selectActiveIdForShare(@Param("userId") Long userId,
                                 @Param("venueId") Long venueId);

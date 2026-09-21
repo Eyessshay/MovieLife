@@ -2294,7 +2294,19 @@ Stage 14 专项 64 项和全量 552 项自动化测试全部通过，0 failure�
 
 真实模型验收另外启动独立 HTTP 端口，通过未入库、未输出的服务端环境变量调用 DeepSeek。Movie 与 Activity 使用相同数值 ID、各 3 条有效中文评价，`deepseek-flash` 分别生成版本 1；两个任务均为 `SUCCEEDED`，匿名 API 均为 `READY`，MySQL 当前指针、两个不可变结果缓存和 Stream Pending 状态一致。最终删除全部联调数据，Redis `DBSIZE=0`，停止应用并删除隔离容器。Stage 14 正式冻结，后续不得把恢复机制扩展为新的业务能力，也不得回改阶段 1～14 冻结边界。
 
-## 12. 服务端模块建议
+## 12. Stage 15 固定座位 Activity 场次管理
+
+### 12.1 Step 15.1 管理权限与只读查询基线
+
+Step 15.1 只开放场馆运营人员对本场馆固定座位 Activity 场次的管理查询，不包含任何写能力。入口为 `GET /api/admin/venues/{venueId}/activity-showtimes` 和 `GET /api/admin/venues/{venueId}/activity-showtimes/{showtimeId}`；登录只证明用户身份，管理授权的唯一事实是 MySQL `tb_venue_staff(user_id, venue_id, status=1)`。权限失败使用独立的 `VENUE_MANAGE_FORBIDDEN`，不复用只描述票券核销的 `TICKET_VERIFY_FORBIDDEN`。
+
+管理列表支持页码、每页数量、场次状态和开始日期范围过滤，不复用公开 Activity 场次查询的 `status=1 + start_time>NOW()` 可见性规则。SQL 资格始终固定为 `biz_type=ACTIVITY + venue_id=路径 venueId`，按 `start_time DESC, id DESC` 稳定分页；详情额外按 `showtimeId` 精确限定。分页结果中的 Activity 与 Hall 分别批量补齐，禁止 N+1，并校验 Hall 必须归属同一 Venue、库存数值满足 `0 <= available_seats <= total_seats`。关联数据缺失或库存不可能状态失败关闭为 `INTERNAL_ERROR`，不能伪造默认标题、影厅或库存。
+
+该查询链路只读 MySQL。Redis 登录态仍只负责把 Token 解析为当前用户，权限与业务结果不缓存，不新增管理端 Redis Key，也不读取或改变 Venue GEO、座位临时锁、Review Like、AI Summary Stream 或公共结果缓存。接口不修改 Activity、Showtime、ShowtimeSeat、订单、余票、票券或评价，因此不会触发 Review AI Summary。后续 Step 15.2 才能在重新冻结写入契约后实现固定座位 Activity 场次创建和座位初始化；Step 15.1 不预留隐藏写入口，也不实现停售、恢复、改期、改厅或非固定座位库存。
+
+Step 15.1 的 17 项专项测试与全量 569 项测试均为 0 failure、0 error、0 skipped。真实联调使用按当前 `movielife.sql` 初始化的隔离 MySQL 8.0.17、隔离 Redis 7 和随机 Spring Boot HTTP 端口，证明管理查询前后目标 MySQL 行数和 Redis Key 集合不变；清理后无 Step 15.1 数据残留，Redis `DBSIZE=0`。不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。本 Step 完成并冻结，Stage 15 尚未整体完成。
+
+## 13. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
 
@@ -2314,7 +2326,7 @@ ai         评价总结的异步生成、持久化和读取
 common     统一响应、异常、鉴权、限流、幂等
 ```
 
-## 13. 关键非功能要求
+## 14. 关键非功能要求
 
 - 所有写接口校验当前用户和资源归属。
 - 订单、支付、锁座操作必须支持幂等。

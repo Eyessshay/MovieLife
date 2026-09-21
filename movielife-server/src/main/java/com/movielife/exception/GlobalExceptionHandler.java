@@ -51,7 +51,9 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
     public ResponseEntity<Result<Void>> handleTypeMismatch(MethodArgumentTypeMismatchException exception) {
         ErrorCode errorCode;
-        if ("status".equals(exception.getName())) {
+        if ("showtimeStatus".equals(exception.getName())) {
+            errorCode = ErrorCode.INVALID_SHOWTIME_STATUS;
+        } else if ("status".equals(exception.getName())) {
             errorCode = ErrorCode.INVALID_MOVIE_STATUS;
         } else if (VenueType.class.equals(exception.getRequiredType())) {
             errorCode = ErrorCode.INVALID_VENUE_TYPE;
@@ -101,6 +103,9 @@ public class GlobalExceptionHandler {
         }
         if ("pageSize".equals(fieldError.getField())) {
             return ErrorCode.PAGE_SIZE_TOO_LARGE;
+        }
+        if ("showtimeStatus".equals(fieldError.getField())) {
+            return ErrorCode.INVALID_SHOWTIME_STATUS;
         }
         if ("status".equals(fieldError.getField())) {
             return ErrorCode.INVALID_MOVIE_STATUS;
