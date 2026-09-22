@@ -2,9 +2,11 @@ package com.movielife.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import com.movielife.entity.ShowtimeSeat;
+import com.movielife.dto.ShowtimeSeatInventoryStat;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Insert;
+import org.apache.ibatis.annotations.Select;
 import org.apache.ibatis.annotations.Update;
 
 import java.util.List;
@@ -21,6 +23,12 @@ public interface ShowtimeSeatMapper extends BaseMapper<ShowtimeSeat> {
             "</foreach>" +
             "</script>")
     int insertBatch(@Param("items") List<ShowtimeSeat> items);
+
+    @Select("SELECT COUNT(*) AS total_count, " +
+            "COALESCE(SUM(CASE WHEN status = 0 AND lock_order_id IS NULL " +
+            "THEN 1 ELSE 0 END), 0) AS available_count " +
+            "FROM tb_showtime_seat WHERE showtime_id = #{showtimeId}")
+    ShowtimeSeatInventoryStat selectInventoryStat(@Param("showtimeId") Long showtimeId);
 
     @Update("<script>" +
             "UPDATE tb_showtime_seat " +

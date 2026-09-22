@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.35（Step 15.2 创建固定座位 Activity 场次）
+- 版本：v0.36（Step 15.3 固定座位 Activity 场次停售与恢复销售）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -581,6 +581,8 @@ POST /api/admin/tickets/verify          # 单张票验票核销（已实现，St
 GET  /api/admin/venues/{venueId}/activity-showtimes
 GET  /api/admin/venues/{venueId}/activity-showtimes/{showtimeId}
 POST /api/admin/venues/{venueId}/activity-showtimes
+POST /api/admin/venues/{venueId}/activity-showtimes/{showtimeId}/stop-sale
+POST /api/admin/venues/{venueId}/activity-showtimes/{showtimeId}/resume-sale
 ```
 
 接口必须登录，并要求当前用户在 `tb_venue_staff` 中与目标 Showtime 所属 Venue 存在 `status=1` 的有效工作人员关系。普通购票用户即使持有本人票码也不能调用。目标 Venue 必须由服务端通过 `ticketCode → TicketOrderItem.order_id → TicketOrder.showtime_id → Showtime.venue_id` 推导；请求体不得提交 `userId`、`venueId`、`orderId`、票状态或核销时间。
@@ -663,6 +665,20 @@ Step 15.1 新增 17 项专项测试，覆盖 Controller 登录与参数契约、
 该接口不读取或写入 Redis 业务状态，不创建座位临时锁，不修改 Activity 主数据、既有场次、GEO、订单、支付、退款、出票、核销、评价或 Review AI Summary。响应复用 Step 15.1 的 `AdminActivityShowtimeVO`。本 Step 不实现停售、恢复、改期、改厅、强制退票、订单迁移、座位模板同步或非固定座位活动票务。
 
 Step 15.2 新增 17 项专项测试；全量 586 项测试全部通过，0 failure、0 error、0 skipped。隔离 MySQL 8.0.17、Redis 7 和随机 HTTP 端口验证了真实创建、统一座位价格、库存一致、幂等与参数不匹配、停售场次冲突、Hall 并发串行化、批量写入失败整体回滚及 Redis Key 不新增；增量迁移连续执行两次成功。不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`，清理后无 Step 15.2 MySQL 数据残留且 Redis `DBSIZE=0`。Step 15.2 至此冻结。
+
+#### 3.10.3 Step 15.3 停售与恢复销售
+
+`POST /api/admin/venues/{venueId}/activity-showtimes/{showtimeId}/stop-sale` 只执行 `1 ON_SALE → 0 STOPPED`，`POST /api/admin/venues/{venueId}/activity-showtimes/{showtimeId}/resume-sale` 只执行 `0 STOPPED → 1 ON_SALE`。两个接口都要求 Bearer 登录和路径 Venue 的有效 `tb_venue_staff` 权限；目标必须由 `showtimeId + venueId + biz_type=ACTIVITY` 联合定位，Movie、其他场馆或不存在的场次统一返回 `SHOWTIME_NOT_FOUND`。重复停售和重复恢复幂等成功，响应复用 `AdminActivityShowtimeVO`；`status=2` 不能通过这两个接口人工写入。
+
+状态变更事务先以 `SELECT ... FOR UPDATE` 锁定 Showtime。若 `start_time <= 当前时间` 或 `end_time <= 当前时间`，以及当前状态不是 0/1，返回 `SHOWTIME_SALE_STATUS_CONFLICT`。最终状态 UPDATE 同时限定目标 ID、路径 Venue、`ACTIVITY`、预期旧状态以及起止时间仍在未来，影响行数必须严格为 1；幂等分支不执行 UPDATE。
+
+恢复销售在持有 Showtime 行锁期间重新校验：Venue `status=1`、Activity `status=1`、Hall 仍属于路径 Venue、`tb_showtime_seat` 总数等于 `total_seats`，并且 `status=0 AND lock_order_id IS NULL` 的座位数等于 `available_seats`。任一库存事实不一致返回 `SHOWTIME_INVENTORY_INCONSISTENT`，Venue、Activity、Hall 失效分别返回既有 `VENUE_NOT_FOUND`、`ACTIVITY_NOT_FOUND`、`HALL_NOT_FOUND`。重复恢复也必须通过这些当前事实校验后才幂等返回。
+
+停售只阻止新锁座和新订单，不删除 ShowtimeSeat、不重置余票、不释放订单占座、不取消未支付订单、不退款，也不删除 Redis 锁。既有订单继续使用阶段 8～10 已冻结的支付、取消、超时、退款、出票和核销规则。订单创建事务的 `available_seats` 条件扣减增强为同时要求 `tb_showtime.status=1`：订单先锁定 Showtime 时可正常完成后再停售；停售先提交时扣减影响 0 行，订单、订单明细和座位占用在原事务中整体回滚。该增强不改变非并发正常订单的输入、输出、幂等和错误语义。
+
+Step 15.3 新增 19 项专项测试；固定座位 Activity 管理与订单交叉回归 81 项通过；全量 605 项测试均为 0 failure、0 error、0 skipped。隔离 MySQL 8.0.17、Redis 7 和随机 HTTP 端口验证了重复停售/恢复、场馆隔离、时间与状态边界、恢复依赖和库存复核、停售前锁票凭证拒绝建单且自然保留、停售后原未支付订单继续取消，以及创建订单与停售真实并发的两种一致终态。全量不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`；测试数据与 Redis 状态完成清理后，本 Step 正式冻结。
+
+本 Step 不增加 Redis 管理状态，不主动清理停售前的 `lockToken`；停售期间旧 Token 即使尚未自然过期也不能完成新订单。状态变化不触发 Review AI Summary，不修改 Activity 主数据，不实现 `status=2` 人工流转、强制退票、订单迁移、改期、改厅、座位模板同步或 GEO 同步。
 
 ### 3.11 AI 评价总结
 

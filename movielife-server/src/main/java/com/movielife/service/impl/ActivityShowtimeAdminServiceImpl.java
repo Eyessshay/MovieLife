@@ -41,6 +41,7 @@ public class ActivityShowtimeAdminServiceImpl implements ActivityShowtimeAdminSe
     private final ActivityMapper activityMapper;
     private final HallMapper hallMapper;
     private final ActivityShowtimeCreationTransactionService creationTransactionService;
+    private final ActivityShowtimeSaleStatusTransactionService saleStatusTransactionService;
 
     @Override
     public PageVO<AdminActivityShowtimeVO> queryShowtimes(
@@ -120,11 +121,34 @@ public class ActivityShowtimeAdminServiceImpl implements ActivityShowtimeAdminSe
         return queryShowtime(userId, venueId, showtimeId);
     }
 
+    @Override
+    public AdminActivityShowtimeVO stopSale(Long userId, Long venueId, Long showtimeId) {
+        validateSaleStatusArguments(userId, venueId, showtimeId);
+        Long changedShowtimeId = saleStatusTransactionService.stopSale(
+                userId, venueId, showtimeId);
+        return queryShowtime(userId, venueId, changedShowtimeId);
+    }
+
+    @Override
+    public AdminActivityShowtimeVO resumeSale(Long userId, Long venueId, Long showtimeId) {
+        validateSaleStatusArguments(userId, venueId, showtimeId);
+        Long changedShowtimeId = saleStatusTransactionService.resumeSale(
+                userId, venueId, showtimeId);
+        return queryShowtime(userId, venueId, changedShowtimeId);
+    }
+
     private void validateUserAndVenue(Long userId, Long venueId) {
         if (userId == null || userId <= 0) {
             throw new BusinessException(ErrorCode.UNAUTHORIZED);
         }
         if (venueId == null || venueId <= 0) {
+            throw new BusinessException(ErrorCode.INVALID_ID);
+        }
+    }
+
+    private void validateSaleStatusArguments(Long userId, Long venueId, Long showtimeId) {
+        validateUserAndVenue(userId, venueId);
+        if (showtimeId == null || showtimeId <= 0) {
             throw new BusinessException(ErrorCode.INVALID_ID);
         }
     }

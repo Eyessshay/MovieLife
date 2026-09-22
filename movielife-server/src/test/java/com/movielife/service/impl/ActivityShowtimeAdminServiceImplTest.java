@@ -45,6 +45,7 @@ class ActivityShowtimeAdminServiceImplTest {
     @Mock private ActivityMapper activityMapper;
     @Mock private HallMapper hallMapper;
     @Mock private ActivityShowtimeCreationTransactionService creationTransactionService;
+    @Mock private ActivityShowtimeSaleStatusTransactionService saleStatusTransactionService;
 
     private ActivityShowtimeAdminServiceImpl service;
 
@@ -52,7 +53,7 @@ class ActivityShowtimeAdminServiceImplTest {
     void setUp() {
         service = new ActivityShowtimeAdminServiceImpl(
                 venueStaffMapper, showtimeMapper, activityMapper, hallMapper,
-                creationTransactionService);
+                creationTransactionService, saleStatusTransactionService);
     }
 
     @Test
@@ -252,6 +253,31 @@ class ActivityShowtimeAdminServiceImplTest {
 
         assertThat(service.createShowtime(7L, 501L, request).getShowtimeId())
                 .isEqualTo(1001L);
+    }
+
+    @Test
+    void shouldDelegateStopAndResumeThenReturnManagementDetail() {
+        Showtime value = showtime(1001L, 301L, 601L, 0, 2, 2);
+        when(saleStatusTransactionService.stopSale(7L, 501L, 1001L)).thenReturn(1001L);
+        when(saleStatusTransactionService.resumeSale(7L, 501L, 1001L)).thenReturn(1001L);
+        when(venueStaffMapper.selectActiveId(7L, 501L)).thenReturn(71L);
+        when(showtimeMapper.selectOne(any(Wrapper.class))).thenReturn(value);
+        when(activityMapper.selectBatchIds(anyCollection()))
+                .thenReturn(Collections.singletonList(activity(301L, "活动一")));
+        when(hallMapper.selectBatchIds(anyCollection()))
+                .thenReturn(Collections.singletonList(hall(601L, 501L, "一号厅")));
+
+        assertThat(service.stopSale(7L, 501L, 1001L).getShowtimeId()).isEqualTo(1001L);
+        value.setStatus(1);
+        assertThat(service.resumeSale(7L, 501L, 1001L).getStatus()).isEqualTo(1);
+    }
+
+    @Test
+    void shouldRejectInvalidSaleStatusIdsBeforeTransaction() {
+        assertError(() -> service.stopSale(7L, 0L, 1001L), ErrorCode.INVALID_ID);
+        assertError(() -> service.resumeSale(7L, 501L, 0L), ErrorCode.INVALID_ID);
+        verify(saleStatusTransactionService, never()).stopSale(any(), any(), any());
+        verify(saleStatusTransactionService, never()).resumeSale(any(), any(), any());
     }
 
     private Showtime showtime(Long id, Long activityId, Long hallId,

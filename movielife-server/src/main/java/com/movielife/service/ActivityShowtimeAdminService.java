@@ -14,4 +14,8 @@ public interface ActivityShowtimeAdminService {
 
     AdminActivityShowtimeVO createShowtime(Long userId, Long venueId,
                                            CreateActivityShowtimeDTO request);
+
+    AdminActivityShowtimeVO stopSale(Long userId, Long venueId, Long showtimeId);
+
+    AdminActivityShowtimeVO resumeSale(Long userId, Long venueId, Long showtimeId);
 }

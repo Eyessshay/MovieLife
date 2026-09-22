@@ -121,6 +121,34 @@ class ActivityShowtimeAdminControllerTest {
     }
 
     @Test
+    void shouldStopAndResumeSale() throws Exception {
+        AdminActivityShowtimeVO stopped = showtime();
+        stopped.setStatus(0);
+        when(activityShowtimeAdminService.stopSale(7L, 501L, 1001L)).thenReturn(stopped);
+        when(activityShowtimeAdminService.resumeSale(7L, 501L, 1001L)).thenReturn(showtime());
+
+        mockMvc.perform(post("/api/admin/venues/501/activity-showtimes/1001/stop-sale")
+                        .header("Authorization", AUTHORIZATION))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.status").value(0));
+        mockMvc.perform(post("/api/admin/venues/501/activity-showtimes/1001/resume-sale")
+                        .header("Authorization", AUTHORIZATION))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.showtimeId").value(1001));
+    }
+
+    @Test
+    void shouldMapSaleStatusConflict() throws Exception {
+        doThrow(new BusinessException(ErrorCode.SHOWTIME_SALE_STATUS_CONFLICT))
+                .when(activityShowtimeAdminService).stopSale(7L, 501L, 1001L);
+
+        mockMvc.perform(post("/api/admin/venues/501/activity-showtimes/1001/stop-sale")
+                        .header("Authorization", AUTHORIZATION))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("SHOWTIME_SALE_STATUS_CONFLICT"));
+    }
+
+    @Test
     void shouldRequireAuthenticationBeforeCallingService() throws Exception {
         mockMvc.perform(get("/api/admin/venues/501/activity-showtimes"))
                 .andExpect(status().isUnauthorized())

@@ -2316,6 +2316,14 @@ Step 15.2 只增加 `POST /api/admin/venues/{venueId}/activity-showtimes`。授�
 
 Step 15.2 新增 17 项专项测试，全量 586 项测试均为 0 failure、0 error、0 skipped。隔离 MySQL 8.0.17、Redis 7 和随机 HTTP 端口完成真实创建、幂等、库存一致、停售冲突、事务回滚、并发 Hall 锁与 Redis 不新增业务 Key 验证；迁移连续执行两次成功。清理后无 Step 15.2 MySQL 数据残留且 Redis `DBSIZE=0`，不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。本 Step 完成并冻结，Stage 15 尚未整体完成。
 
+### 12.3 Step 15.3 停售与恢复销售
+
+Step 15.3 只开放固定座位 Activity 场次的 `ON_SALE(1) ↔ STOPPED(0)` 管理流转，不人工操作 `status=2`。事务以 `showtimeId + venueId + ACTIVITY` 锁定 Showtime 行，校验场次尚未开始或结束，并通过带预期旧状态和未来时间条件的 UPDATE 写入；重复目标状态幂等返回。恢复销售额外重新校验当前 Venue、Activity、Hall 关系以及 ShowtimeSeat 总数、可用座位数与 Showtime 库存字段，库存异常失败关闭。
+
+停售与创建订单通过同一 Showtime 行串行：订单扣减 `available_seats` 的原子 SQL 增加 `status=1` 条件。订单更新先获得行锁时，其事务按既有语义完成，停售随后生效；停售先获得行锁并提交时，订单更新影响 0 行，既有严格 affectedRows 检查使整个订单事务回滚。停售事务不接触订单、订单明细、ShowtimeSeat 或 Redis 锁，因而不改变支付、取消、超时、退款、出票、核销和 lockToken 一次消费语义。
+
+Step 15.3 新增 19 项专项测试，固定座位 Activity 管理与订单交叉回归 81 项、全量 605 项均为 0 failure、0 error、0 skipped。真实 MySQL 8.0.17、Redis 7 和随机 HTTP 端口覆盖幂等状态流转、恢复事实校验、停售前 Redis lockToken 拒绝建单但不被删除、停售后已有订单继续取消，以及订单创建与停售并发下“订单完整成立后停售”或“订单事务完整回滚”两种合法终态；无部分订单、部分占座或余票漂移。全量不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`，本 Step 清理联调数据与 Redis 后冻结。
+
 ## 13. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -2351,4 +2359,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.33，阶段 1～14 均已完成并正式冻结。下一阶段尚未指定，只能选择一个明确且独立的方向，不得回改既有冻结业务语义或顺带扩展其他 AI 能力。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.36，阶段 1～14 与 Stage 15 的 Step 15.1～15.3 均已完成并正式冻结。下一 Step 尚未指定，只能选择一个明确且独立的方向，不得回改既有冻结业务语义或顺带扩展其他 AI 能力。

@@ -49,4 +49,20 @@ public class ActivityShowtimeAdminController {
         return Result.ok(activityShowtimeAdminService.createShowtime(
                 UserHolder.getUserId(), venueId, request));
     }
+
+    @PostMapping("/{showtimeId}/stop-sale")
+    @LoginRequired
+    public Result<AdminActivityShowtimeVO> stopSale(
+            @PathVariable Long venueId, @PathVariable Long showtimeId) {
+        return Result.ok(activityShowtimeAdminService.stopSale(
+                UserHolder.getUserId(), venueId, showtimeId));
+    }
+
+    @PostMapping("/{showtimeId}/resume-sale")
+    @LoginRequired
+    public Result<AdminActivityShowtimeVO> resumeSale(
+            @PathVariable Long venueId, @PathVariable Long showtimeId) {
+        return Result.ok(activityShowtimeAdminService.resumeSale(
+                UserHolder.getUserId(), venueId, showtimeId));
+    }
 }

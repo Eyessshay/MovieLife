@@ -26,6 +26,21 @@ public interface ShowtimeMapper extends BaseMapper<Showtime> {
                                                 @Param("startTime") LocalDateTime startTime,
                                                 @Param("endTime") LocalDateTime endTime);
 
+    @Select("SELECT * FROM tb_showtime WHERE id = #{showtimeId} " +
+            "AND venue_id = #{venueId} AND biz_type = 'ACTIVITY' FOR UPDATE")
+    Showtime selectActivityByIdAndVenueForUpdate(@Param("showtimeId") Long showtimeId,
+                                                 @Param("venueId") Long venueId);
+
+    @Update("UPDATE tb_showtime SET status = #{targetStatus} " +
+            "WHERE id = #{showtimeId} AND venue_id = #{venueId} " +
+            "AND biz_type = 'ACTIVITY' AND status = #{expectedStatus} " +
+            "AND start_time > #{now} AND end_time > #{now}")
+    int updateActivitySaleStatus(@Param("showtimeId") Long showtimeId,
+                                 @Param("venueId") Long venueId,
+                                 @Param("expectedStatus") int expectedStatus,
+                                 @Param("targetStatus") int targetStatus,
+                                 @Param("now") LocalDateTime now);
+
     @Select("<script>" +
             "SELECT DISTINCT venue_id FROM tb_showtime " +
             "WHERE biz_type = 'MOVIE' " +
@@ -78,6 +93,7 @@ public interface ShowtimeMapper extends BaseMapper<Showtime> {
     @Update("UPDATE tb_showtime " +
             "SET available_seats = available_seats - #{seatCount} " +
             "WHERE id = #{showtimeId} " +
+            "AND status = 1 " +
             "AND available_seats >= #{seatCount}")
     int decreaseAvailableSeats(@Param("showtimeId") Long showtimeId,
                                @Param("seatCount") Integer seatCount);
