@@ -146,7 +146,7 @@ CREATE TABLE IF NOT EXISTS tb_showtime (
   base_price DECIMAL(10,2) NOT NULL DEFAULT 0.00,
   total_seats INT NOT NULL DEFAULT 0,
   available_seats INT NOT NULL DEFAULT 0,
-  status TINYINT NOT NULL DEFAULT 1 COMMENT '0 stopped, 1 on sale, 2 finished',
+  status TINYINT NOT NULL DEFAULT 1 COMMENT '0 stopped (still reserves hall), 1 on sale, 2 finished',
   create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),

@@ -2,7 +2,7 @@
 
 ## 1. 文档说明
 
-- 版本：v0.36（Step 15.3 固定座位 Activity 场次停售与恢复销售）
+- 版本：v0.37（Stage 15 固定座位 Activity 场次管理冻结）
 - 基础路径：`/api`
 - 数据格式：JSON，字符集 UTF-8
 - 认证方式：登录后通过 `Authorization: Bearer <token>` 传递令牌
@@ -679,6 +679,18 @@ Step 15.2 新增 17 项专项测试；全量 586 项测试全部通过，0 failu
 Step 15.3 新增 19 项专项测试；固定座位 Activity 管理与订单交叉回归 81 项通过；全量 605 项测试均为 0 failure、0 error、0 skipped。隔离 MySQL 8.0.17、Redis 7 和随机 HTTP 端口验证了重复停售/恢复、场馆隔离、时间与状态边界、恢复依赖和库存复核、停售前锁票凭证拒绝建单且自然保留、停售后原未支付订单继续取消，以及创建订单与停售真实并发的两种一致终态。全量不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`；测试数据与 Redis 状态完成清理后，本 Step 正式冻结。
 
 本 Step 不增加 Redis 管理状态，不主动清理停售前的 `lockToken`；停售期间旧 Token 即使尚未自然过期也不能完成新订单。状态变化不触发 Review AI Summary，不修改 Activity 主数据，不实现 `status=2` 人工流转、强制退票、订单迁移、改期、改厅、座位模板同步或 GEO 同步。
+
+#### 3.10.4 Step 15.4 跨链路验收与 Stage 15 冻结
+
+Step 15.4 不新增接口、请求字段、响应字段、业务状态、表、索引或 Redis Key。真实 HTTP 主链路从场馆员工验证码登录开始，依次完成管理列表、创建固定座位 Activity 场次、匿名 Activity 场次查询、Seat Map、用户锁座、创建订单、支付、出票和本场馆员工核销；最终订单为 `PAID`，两张 ShowtimeSeat 均为 `SOLD` 且归属原订单，一张票为 `USED`、另一张为 `VALID`，`available_seats=0`，临时锁在订单提交后清理。
+
+停售分支验证用户先取得 Redis 临时锁后场馆员工停售：停售后新的锁座和原 lockToken 建单均被拒绝，原 Token 不被管理接口删除并按 TTL 自然收敛；停售前已成立的订单仍可取消。恢复销售后重新建单、支付和退款继续使用阶段 8～10 状态机，余票依次收敛为 `2 → 0 → 2`，ShowtimeSeat 与 `available_seats` 始终一致。普通用户、停用员工和其他 Venue 员工不能查询或创建目标场馆管理数据。
+
+同一 Hall 的重叠并发创建最多一个成功；相同 `requestId` 的并发请求返回同一 showtimeId，只产生一条 Showtime 和一组 ShowtimeSeat。Step 15.2 已冻结的批量座位插入失败测试继续证明 Showtime 同事务回滚。创建完成必须满足 `total_seats = available_seats = 有效 Seat 数 = ShowtimeSeat 行数`。
+
+跨链路验收发现订单创建与停售竞争时，订单插入外键的 Showtime 共享锁和停售排他锁可能与随后余票 UPDATE 形成锁升级死锁。必要修复是在订单事务执行任何订单/座位写入前先对目标 Showtime 做 `SELECT ... FOR UPDATE`，与停售统一为 Showtime 行锁优先；随后仍执行既有公开有效性校验、完整 affectedRows 检查和事务回滚。该修复只消除死锁窗口，不改变订单正常或停售竞争场景的输入、输出、幂等、金额、状态与错误语义。
+
+Step 15.4 新增 4 项真实 HTTP 验收测试；Stage 15 与订单交叉专项 101 项、全量 609 项均为 0 failure、0 error、0 skipped。不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。验收前后 AI Summary Task、收藏、GEO member、Review Like 和非锁座 Redis Key 保持不变；测试数据、锁座 Key 和隔离服务完成清理后，Stage 15 正式冻结。
 
 ### 3.11 AI 评价总结
 

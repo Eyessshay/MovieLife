@@ -44,6 +44,8 @@ public class TicketOrderTransactionService {
     @Transactional
     public CreateTicketOrderVO createNewOrder(TicketOrderCreationContext context) {
         validateContext(context);
+        // Keep the same row-lock order as sale-status changes before FK/order writes.
+        showtimeMapper.selectByIdForUpdate(context.getShowtimeId());
         ShowtimeDetailVO showtime = showtimeService.queryShowtimeDetail(context.getShowtimeId());
         if (ACTIVITY_BIZ_TYPE.equals(showtime.getBizType())) {
             showtimeService.querySeatMap(context.getShowtimeId());

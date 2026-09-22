@@ -13,6 +13,9 @@ import java.util.List;
 @Mapper
 public interface ShowtimeMapper extends BaseMapper<Showtime> {
 
+    @Select("SELECT * FROM tb_showtime WHERE id = #{showtimeId} FOR UPDATE")
+    Showtime selectByIdForUpdate(@Param("showtimeId") Long showtimeId);
+
     @Select("SELECT * FROM tb_showtime " +
             "WHERE venue_id = #{venueId} AND create_request_id = #{requestId}")
     Showtime selectByVenueAndCreateRequestId(@Param("venueId") Long venueId,

@@ -85,6 +85,7 @@ class TicketOrderTransactionServiceTest {
         verify(ticketOrderMapper).insert(orderCaptor.capture());
         assertThat(orderCaptor.getValue().getTotalAmount()).isEqualByComparingTo("95.00");
         assertThat(orderCaptor.getValue().getLockToken()).isEqualTo("lock-token");
+        verify(showtimeMapper).selectByIdForUpdate(1001L);
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<TicketOrderItem>> itemsCaptor = ArgumentCaptor.forClass(List.class);
