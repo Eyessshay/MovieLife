@@ -1,0 +1,43 @@
+server:
+  address: 127.0.0.1
+  port: 18081
+
+spring:
+  datasource:
+    url: jdbc:mysql://127.0.0.1:13306/movielife?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: movielife
+    password: ${MYSQL_PASSWORD}
+  redis:
+    host: 127.0.0.1
+    port: 16379
+    database: 0
+
+management:
+  endpoints:
+    enabled-by-default: false
+    web:
+      discovery:
+        enabled: false
+      exposure:
+        include: health
+  endpoint:
+    health:
+      enabled: true
+      show-components: always
+      show-details: never
+  health:
+    defaults:
+      enabled: false
+
+logging:
+  file:
+    name: ${MOVIELIFE_DEMO_LOG_FILE:logs/demo/application.log}
+
+movielife:
+  auth:
+    log-code-enabled: false
+  startup-check:
+    enabled: true
+  ai:
+    review-summary:
+      enabled: false

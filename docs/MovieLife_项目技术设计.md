@@ -2441,6 +2441,36 @@ Step 16.2 不改变应用配置默认值、生产 Java、SQL、Redis Key、公�
 
 冻结验收实际从无 MovieLife 容器、网络和数据卷状态完成首次启动，MySQL 20 张表、3 组关键唯一索引、稳定种子数据与 Redis `PONG` 均通过脚本校验；重复 `start` 保持幂等。普通 `stop` 后重新启动时 MySQL `server_uuid` 不变，Redis 临时持久化标记仍存在且随后已删除。无 `-Force` 的重置被拒绝且容器保持健康；`reset -Force` 只删除 MovieLife 专属资源，验收前已存在的 `redis` 与 `trendradar` 容器状态均未改变。专用非管理员 MySQL 用户完成 Trigger 事务测试，全量 613 项自动化测试为 0 failure、0 error、0 skipped，`mvn clean package` 为 `BUILD SUCCESS`。打包产物连接本 Compose 基础设施完成启动自检，真实 `GET /api/movies?page=1&pageSize=1` 返回 HTTP 200 与业务码 `OK`。凭据扫描未发现供应商 Key，验收产生的应用进程、临时 Redis 标记、MovieLife 容器、网络和数据卷均在冻结前清理。
 
+### 13.4 Step 16.3 应用打包与生命周期脚本
+
+#### 13.4.1 Demo Profile 与构建边界
+
+本 Step 新增独立 `application-demo.yml`，不修改默认开发配置行为。Demo 固定绑定 `127.0.0.1:18081`，连接 Step 16.2 的 MySQL `127.0.0.1:13306` 与 Redis `127.0.0.1:16379`，使用专用 `movielife` 数据库用户；MySQL 密码由脚本从 Git 忽略的本地 Secret 文件读取后只注入子进程环境。Demo 强制保留真实 MySQL 查询与 Redis `PING` 启动检查，验证码日志和 AI Review Summary 均关闭。
+
+日常 `demo-up.ps1` 使用项目 Maven Wrapper 执行跳过测试执行但保留测试编译的 `clean package`，目的是缩短重复演示启动时间；这不替代冻结验收。每个 Step 的正式验收仍必须单独执行不跳过测试的全量 `mvn clean package`。
+
+#### 13.4.2 受限健康检查
+
+项目显式声明 Spring Boot Actuator 依赖，但 Demo Profile 关闭默认全部管理端点，只启用 `/actuator/health`，同时关闭 Actuator 发现页。健康响应只包含 `application`、`mysql`、`redis` 三个组件的 `UP/DOWN` 状态，`show-details=never`。MySQL 使用 `SELECT 1`，Redis 使用 `PING`；异常只映射为 `DOWN`，不返回连接串、用户名、Token、异常消息或堆栈。`/actuator`、`/actuator/env` 等其他路径均不可用。
+
+#### 13.4.3 生命周期与进程所有权
+
+仓库根目录提供三个唯一用户入口，并由 `tools/demo-common.ps1` 复用路径、健康轮询和进程身份校验：
+
+- `demo-up.ps1`：检查 JDK 8、Docker Engine 和应用端口；调用 16.2 `start`；构建 Jar；将 stdout、stderr 与 Spring 日志写入 `logs/demo/`；记录 `.movielife-runtime/demo-app.pid`；持续轮询受限健康端点直至三个组件全部 `UP` 或超时。检测到自身健康进程时幂等返回，不重复构建或启动。
+- `demo-status.ps1`：只读报告 Docker、固定名称 MySQL/Redis 容器、PID 所属应用、健康端点和 `18081` 端口状态，不输出命令行、环境变量或凭据。
+- `demo-down.ps1`：只有 PID 存在且 Win32 进程命令行同时包含冻结 Jar 绝对路径和 `--spring.profiles.active=demo` 时才先正常、必要时强制停止；不按端口或模糊进程名杀进程。应用退出且端口释放后，调用 16.2 普通 `stop` 保留数据。
+
+端口冲突、Docker 不可用、JDK 非 8、Maven Wrapper/Secret/Jar 缺失、构建失败、进程提前退出、健康超时或 PID 身份冲突均必须以非零状态和不含秘密值的明确错误结束。健康等待与停止等待均按状态轮询，不以固定睡眠冒充成功。
+
+#### 13.4.4 验收与冻结
+
+真实验收从无 MovieLife 容器和应用进程状态执行 `demo-up.ps1`，完成基础设施、构建、启动检查和健康轮询；`demo-status.ps1` 显示 MySQL/Redis `HEALTHY`、应用 `UP`、端口 `LISTENING`。重复执行 `demo-up.ps1` 后 PID 不变且只有一个匹配的 `java.exe`。临时占用 `18081` 时脚本明确拒绝且不启动基础设施；使用不可达 Docker Endpoint 时明确报告 Docker Engine 不可用；伪造 PID 指向外部进程时 `demo-down.ps1` 拒绝管理且外部进程保持运行。
+
+受限健康响应真实返回 HTTP 200，仅含 `application/mysql/redis`，Actuator 根路径与环境端点均为 404；应用仅监听 `127.0.0.1:18081`，公开电影列表真实请求返回业务码 `OK`，运行日志不含生成的 MySQL 密码。`demo-down.ps1` 后没有 PID 文件、匹配 Java 进程或 `18081` 监听，两个 MovieLife 容器均停止；最终定向清理后没有 MovieLife 容器、网络或数据卷残留。
+
+新增 Demo 健康 HTTP 测试 2 项，全量自动化测试由 613 项增加到 615 项，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。Step 16.3 不修改 SQL、业务接口、权限、Redis Key、锁座或订单状态机，不实现确定性演示数据、自动业务演示、Postman Collection、前端或 AI 个性化推荐。下一步只能进入独立 Step 16.4。
+
 ## 14. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -2476,4 +2506,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.37，阶段 1～15 与 Stage 16 Step 16.1～16.2 均已完成并正式冻结。Stage 16 只处理交付与演示工程化，下一步只能推进独立 Step 16.3，不得回改既有冻结业务语义或顺带扩展其他 AI 能力。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.37，阶段 1～15 与 Stage 16 Step 16.1～16.3 均已完成并正式冻结。Stage 16 只处理交付与演示工程化，下一步只能推进独立 Step 16.4，不得回改既有冻结业务语义或顺带扩展其他 AI 能力。

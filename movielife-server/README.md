@@ -27,7 +27,28 @@ AI Review Summary 默认关闭。核心登录、发现、锁座和票务演示�
 
 完整环境变量清单、默认值、敏感级别和缺失行为见 `docs/MovieLife_项目技术设计.md` 的 Stage 16.1 章节。
 
-## 本地启动
+## 一键演示
+
+在仓库根目录执行：
+
+```powershell
+.\demo-up.ps1
+```
+
+该命令会检查 JDK 8 和 Docker，幂等启动 Step 16.2 基础设施，通过 Maven Wrapper 构建 Jar，并以专用 `demo` Profile 启动应用。脚本轮询真实健康状态，不使用固定等待时间；启动完成后应用地址为 `http://127.0.0.1:18081`。
+
+状态检查和停止命令：
+
+```powershell
+.\demo-status.ps1
+.\demo-down.ps1
+```
+
+`demo-status.ps1` 检查 Docker、MySQL、Redis、脚本记录的应用进程和 HTTP 端口。`demo-down.ps1` 只停止 PID 文件记录且命令行身份匹配的 MovieLife `demo` 进程，再普通停止两个 MovieLife 容器；日志、Secret 和数据卷保留。重复执行 `demo-up.ps1` 不会创建第二个应用进程。
+
+专用日志位于仓库根目录的 `logs/demo/`，PID 位于 Git 忽略的 `.movielife-runtime/demo-app.pid`。受限健康地址为 `http://127.0.0.1:18081/actuator/health`，只返回 `application`、`mysql`、`redis` 的状态；Actuator 发现页、环境、配置和详情均不开放。
+
+## 手动本地启动
 
 推荐从仓库根目录使用 Step 16.2 冻结的一键基础设施。它只创建 `movielife-*` 专用资源，首次启动自动导入 `../sql/movielife.sql`：
 
@@ -77,4 +98,4 @@ Step 16.1 的最低验收为：
 .\tools\infrastructure.ps1 reset -Force
 ```
 
-`stop` 保留容器、网络、Secret 和数据卷；再次执行 `start` 会使用原数据。`reset -Force` 只删除 Compose 项目 `movielife` 管理的两个容器、独立网络和两个数据卷，不操作开发者已有的 MySQL、Redis 或其他 Docker 资源。重置后再次执行 `start` 会重新导入权威 `sql/movielife.sql`。应用生命周期、确定性演示数据和自动业务演示属于后续 Step 16.3～16.5，本 Step 不提前实现。
+`stop` 保留容器、网络、Secret 和数据卷；再次执行 `start` 会使用原数据。`reset -Force` 只删除 Compose 项目 `movielife` 管理的两个容器、独立网络和两个数据卷，不操作开发者已有的 MySQL、Redis 或其他 Docker 资源。重置后再次执行 `start` 会重新导入权威 `sql/movielife.sql`。确定性演示数据和自动业务演示属于后续 Step 16.4～16.5，本 Step 不提前实现。
