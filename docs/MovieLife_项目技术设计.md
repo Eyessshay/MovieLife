@@ -2334,7 +2334,82 @@ Stage 15 最终闭环使用管理端实际创建的未来固定座位 Activity �
 
 Step 15.4 新增 4 项真实 HTTP 验收测试，Stage 15 与订单交叉专项 101 项、全量 609 项全部通过，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。真实 MySQL 8.0.17、Redis 7 和随机 HTTP 端口证明管理操作不生成 AI Summary Task、收藏、点赞、GEO member 或管理专用 Redis 状态。数据和容器清理完成后，Stage 15 整体冻结。
 
-## 13. 服务端模块建议
+## 13. Stage 16 交付与演示工程化
+
+### 13.1 阶段总体边界
+
+Stage 16 的唯一目标是让陌生开发者在受支持的干净环境中，以可验证、可清理的方式启动 MovieLife 并复现阶段 15 的固定座位 Activity 票务闭环。本阶段不新增前端、AI 个性化推荐、真实短信、真实支付、Kubernetes、云部署或新的业务接口，不修改阶段 1～15 已冻结的 URL、错误码、状态机、权限来源、数据库业务结构及 Redis/MySQL 最终事实边界。
+
+冻结验收环境为 Windows 10/11、PowerShell 5.1+、Java 8、Spring Boot 2.7.18、项目 Maven Wrapper、MySQL 8.0.17、Redis 7 和 `Asia/Shanghai` 时区。其他系统与依赖版本可以自行尝试，但不属于 Stage 16 的交付承诺。Step 16.1 只冻结交付契约和凭据安全；一键基础设施、应用生命周期、确定性演示数据、自动演示和最终交付文档分别留给 Step 16.2～16.6。
+
+### 13.2 Step 16.1 交付契约与凭据安全
+
+#### 13.2.1 配置与缺失行为
+
+环境变量按“公开配置、操作敏感、秘密”分级。秘密值不得进入 Git、日志、异常、命令示例、测试报告或交接文档。`MYSQL_URL` 不得内嵌用户名或密码；连接凭据必须使用独立变量。`.env.example` 只提供不可用占位值，真实 `.env` 保持 Git 忽略，且 Spring Boot 不承诺自动加载该文件。
+
+| 环境变量 | 必填条件 | 默认值 | 敏感级别 | 安全示例 | 缺失行为 |
+| --- | --- | --- | --- | --- | --- |
+| `MYSQL_PASSWORD` | 始终必填 | 无 | 秘密 | `<local-mysql-password>` | 配置解析或数据库连接失败，应用不得完成启动 |
+| `MYSQL_URL` | 否 | `jdbc:mysql://localhost:3306/movielife...` | 公开配置；禁止内嵌凭据 | `jdbc:mysql://localhost:3306/movielife?...` | 使用默认本机连接串 |
+| `MYSQL_USERNAME` | 否 | `root` | 公开配置 | `root` | 使用默认用户名 |
+| `REDIS_HOST` | 否 | `localhost` | 公开配置 | `localhost` | 使用默认主机 |
+| `REDIS_PORT` | 否 | `6379` | 公开配置 | `6379` | 使用默认端口 |
+| `REDIS_DATABASE` | 否 | `0` | 公开配置 | `0` | 使用默认逻辑库 |
+| `SPRING_REDIS_PASSWORD` | Redis启用认证时必填 | 未设置 | 秘密 | `<local-redis-password>` | 不设置 Redis 密码属性，按无密码方式连接 |
+| `SERVER_PORT` | 否 | `8081` | 公开配置 | `8081` | 使用默认端口 |
+| `AUTH_LOG_CODE_ENABLED` | 否 | `false` | 操作敏感 | `false` | 不在日志输出模拟验证码 |
+| `STARTUP_CHECK_ENABLED` | 否 | `true` | 操作敏感 | `true` | 启动时真实检查 MySQL 与 Redis |
+| `AI_REVIEW_SUMMARY_ENABLED` | 否 | `false` | 公开配置 | `false` | AI Summary 关闭，核心票务能力正常运行 |
+| `AI_REVIEW_SUMMARY_ENDPOINT` | AI开启时必填 | 空 | 公开配置 | `https://provider.example/v1/chat/completions` | AI开启时拒绝启动 |
+| `AI_REVIEW_SUMMARY_API_KEY` | AI开启时必填 | 空 | 秘密 | `<replace-with-provider-key>` | AI开启时拒绝启动 |
+| `AI_REVIEW_SUMMARY_MODEL` | AI开启时必填 | 空 | 公开配置 | `<provider-model>` | AI开启时拒绝启动 |
+| `AI_REVIEW_SUMMARY_CONNECT_TIMEOUT` | 否 | `3s` | 公开配置 | `3s` | 使用默认连接超时 |
+| `AI_REVIEW_SUMMARY_READ_TIMEOUT` | 否 | `45s` | 公开配置 | `45s` | 使用默认读取超时 |
+| `AI_REVIEW_SUMMARY_MAX_RESPONSE_BYTES` | 否 | `16384` | 公开配置 | `16384` | 使用默认响应上限 |
+| `AI_REVIEW_SUMMARY_MIN_REVIEWS` | 否 | `3` | 公开配置 | `3` | 使用默认最低评价数 |
+| `AI_REVIEW_SUMMARY_MAX_REVIEWS` | 否 | `100` | 公开配置 | `100` | 使用默认快照评价数上限 |
+| `AI_REVIEW_SUMMARY_MAX_REVIEW_CHARACTERS` | 否 | `1000` | 公开配置 | `1000` | 使用默认单条正文上限 |
+| `AI_REVIEW_SUMMARY_MAX_INPUT_CHARACTERS` | 否 | `20000` | 公开配置 | `20000` | 使用默认总输入上限 |
+| `AI_REVIEW_SUMMARY_MAX_ATTEMPTS` | 否 | `3` | 公开配置 | `3` | 使用默认最大尝试次数 |
+| `AI_REVIEW_SUMMARY_LEASE_DURATION` | 否 | `2m` | 公开配置 | `2m` | 使用默认任务租约 |
+| `AI_REVIEW_SUMMARY_PENDING_CLAIM_MIN_IDLE` | 否 | `2m` | 公开配置 | `2m` | 使用默认 Pending 接管阈值 |
+| `AI_REVIEW_SUMMARY_STREAM_BATCH_SIZE` | 否 | `10` | 公开配置 | `10` | 使用默认消费批量 |
+| `AI_REVIEW_SUMMARY_RECOVERY_BATCH_SIZE` | 否 | `100` | 公开配置 | `100` | 使用默认恢复批量 |
+| `AI_REVIEW_SUMMARY_WORKER_FIXED_DELAY_MS` | 否 | `1000` | 公开配置 | `1000` | 使用默认 Worker 周期 |
+| `AI_REVIEW_SUMMARY_WORKER_INITIAL_DELAY_MS` | 否 | `5000` | 公开配置 | `5000` | 使用默认 Worker 初始延迟 |
+| `AI_REVIEW_SUMMARY_PENDING_RECOVERY_FIXED_DELAY_MS` | 否 | `5000` | 公开配置 | `5000` | 使用默认 Pending 恢复周期 |
+| `AI_REVIEW_SUMMARY_PENDING_RECOVERY_INITIAL_DELAY_MS` | 否 | `10000` | 公开配置 | `10000` | 使用默认 Pending 恢复初始延迟 |
+| `AI_REVIEW_SUMMARY_RECONCILIATION_FIXED_DELAY_MS` | 否 | `30000` | 公开配置 | `30000` | 使用默认对账周期 |
+| `AI_REVIEW_SUMMARY_RECONCILIATION_INITIAL_DELAY_MS` | 否 | `15000` | 公开配置 | `15000` | 使用默认对账初始延迟 |
+
+#### 13.2.2 AI 安全启停契约
+
+`AI_REVIEW_SUMMARY_ENABLED=false` 是交付默认值。此时 Endpoint、API Key 和模型名可以全部缺失，登录、Movie/Activity 查询、锁座、订单、支付、出票、退款、核销和场次管理必须正常运行。显式启用后，应用初始化阶段必须校验 Endpoint 为带主机名的 HTTP/HTTPS 绝对地址，并要求 API Key 与模型名非空；任一项缺失或非法时拒绝启动。错误只列出缺失或非法的环境变量名称，禁止拼接配置值，因此不会把 API Key 带入日志。
+
+该启动保护只收紧部署配置，不调整阶段 14 已冻结的 AI Summary 任务、重试、状态映射、Stream、缓存或公开查询语义。测试中启用 AI 时只能使用本地 Stub 地址和明确的测试占位凭据，不能读取开发者 `.env` 或调用真实供应商。
+
+#### 13.2.3 凭据扫描与处置边界
+
+仓库提供 `tools/security/scan-secrets.ps1`，只输出命中文件路径和提交标识，不打印匹配行或秘密值。冻结前必须扫描当前 Git 跟踪文件、全部可达提交和当前工作树。若历史发现真实凭据，先撤销供应商凭据，再单独评估历史重写；未经明确确认不得执行 force push 或历史改写。
+
+Step 16.1 检查确认真实供应商 Key 只存在于被 `.gitignore` 排除的本地 `.env`，Git 当前版本和全部提交历史均未命中该类凭据，因此不需要重写历史。本地旧 `.env` 已删除。用户确认该 Key 不属于其供应商账号，项目无法也不得代替未知所有者撤销；它被视为来源不明、已经泄露且永久不可用的凭据，后续不得恢复或继续调用。Stage 16.1 不强制创建替代 Key；只有用户未来主动启用 AI 时，才能在本人账号创建新 Key，并且只保存到未跟踪本地配置或安全凭据存储中。
+
+#### 13.2.4 启动、验收与后续边界
+
+本 Step 支持的手工启动方式仍为：按权威 `sql/movielife.sql` 准备 MySQL 8.0.17、启动 Redis 7、通过进程环境注入 `MYSQL_PASSWORD`，再使用 `mvnw.cmd spring-boot:run`。应用必须保留真实 MySQL 查询和 Redis `PING` 启动检查。完整验收包括：AI关闭的真实基础设施启动与公开 HTTP 请求、AI开启但配置不完整的安全失败、凭据扫描、专项测试、原有全量测试以及不跳过测试的 `mvn clean package`。
+
+Step 16.1 不新增 Docker Compose、应用启停脚本、健康检查接口、确定性演示数据、Postman Collection 或自动业务演示；这些能力必须在后续 Step 重新设计、实现、验收并冻结。
+
+#### 13.2.5 验收与冻结
+
+凭据扫描工具已验证当前工作树、Git 跟踪文件和全部可达提交均不存在真实供应商 Key；`.env` 继续由仓库规则忽略，本地旧文件已经删除，安全的 `.env.example` 只包含占位值。AI 默认关闭时，应用使用隔离 MySQL 8.0.17、Redis 7 和随机 HTTP 端口完成真实启动检查，公开 Movie HTTP 请求返回 200；AI 显式开启但缺失 Endpoint、API Key 与模型名时，完整应用在启动阶段失败，日志只包含三个变量名，不包含凭据值。
+
+新增配置校验专项 4 项，与真实 HTTP Adapter 原有 5 项合计 9 项全部通过。全量自动化测试由 609 项增加到 613 项，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。测试结束时隔离 Redis 只包含按既有初始化语义生成的 `venue:geo:上海:CINEMA` 与 `venue:geo:上海:THEATER`，没有锁座、登录、AI Stream、AI Summary Cache 或其他临时 Key；隔离 MySQL、Redis、应用进程和容器均已删除，不影响本机既有 Redis 容器。
+
+Step 16.1 至此冻结。下一步只能进入 Step 16.2 可复现基础设施设计与实现，不得提前加入应用生命周期脚本、演示数据、自动业务演示、前端或 AI 个性化推荐。
+
+## 14. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
 
@@ -2354,7 +2429,7 @@ ai         评价总结的异步生成、持久化和读取
 common     统一响应、异常、鉴权、限流、幂等
 ```
 
-## 14. 关键非功能要求
+## 15. 关键非功能要求
 
 - 所有写接口校验当前用户和资源归属。
 - 订单、支付、锁座操作必须支持幂等。
@@ -2369,4 +2444,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.37，阶段 1～15 均已完成并正式冻结。下一阶段尚未指定，只能选择一个明确且独立的方向，不得回改既有冻结业务语义或顺带扩展其他 AI 能力。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.37，阶段 1～15 与 Stage 16 Step 16.1 均已完成并正式冻结。Stage 16 只处理交付与演示工程化，下一步只能推进 Step 16.2，不得回改既有冻结业务语义或顺带扩展其他 AI 能力。

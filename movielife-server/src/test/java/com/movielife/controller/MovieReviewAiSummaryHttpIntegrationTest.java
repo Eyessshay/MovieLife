@@ -38,6 +38,9 @@ import static org.mockito.Mockito.when;
         properties = {
                 "movielife.startup-check.enabled=false",
                 "movielife.ai.review-summary.enabled=true",
+                "movielife.ai.review-summary.endpoint=http://127.0.0.1:1/v1/chat/completions",
+                "movielife.ai.review-summary.api-key=test-only-api-key",
+                "movielife.ai.review-summary.model=test-model",
                 "movielife.ai.review-summary.worker-initial-delay-ms=3600000",
                 "movielife.ai.review-summary.pending-recovery-initial-delay-ms=3600000",
                 "movielife.ai.review-summary.reconciliation-initial-delay-ms=3600000"
