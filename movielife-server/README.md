@@ -35,7 +35,7 @@ AI Review Summary 默认关闭。核心登录、发现、锁座和票务演示�
 .\demo-up.ps1
 ```
 
-该命令会检查 JDK 8 和 Docker，幂等启动 Step 16.2 基础设施，通过 Maven Wrapper 构建 Jar，并以专用 `demo` Profile 启动应用。脚本轮询真实健康状态，不使用固定等待时间；启动完成后应用地址为 `http://127.0.0.1:18081`。
+该命令会检查 JDK 8 和 Docker，幂等启动 Step 16.2 基础设施，安装并核验 Step 16.4 确定性演示数据，通过 Maven Wrapper 构建 Jar，并以专用 `demo` Profile 启动应用。脚本轮询真实健康状态，不使用固定等待时间；启动完成后应用地址为 `http://127.0.0.1:18081`。
 
 状态检查和停止命令：
 
@@ -45,6 +45,16 @@ AI Review Summary 默认关闭。核心登录、发现、锁座和票务演示�
 ```
 
 `demo-status.ps1` 检查 Docker、MySQL、Redis、脚本记录的应用进程和 HTTP 端口。`demo-down.ps1` 只停止 PID 文件记录且命令行身份匹配的 MovieLife `demo` 进程，再普通停止两个 MovieLife 容器；日志、Secret 和数据卷保留。重复执行 `demo-up.ps1` 不会创建第二个应用进程。
+
+确定性数据也可以独立安装、检查和安全重置：
+
+```powershell
+.\demo-data-install.ps1
+.\demo-data-check.ps1
+.\demo-data-reset.ps1 -Force
+```
+
+安装与重置要求应用停止，重置还要求显式 `-Force`。它们只管理 `1604000000..1604999999` 保留 ID 段以及演示场馆拥有的场次/订单闭包，并精确清理关联 Redis Key；不清库、不截断表，也不操作非演示数据。固定角色、资源 ID、动态时间和清理边界见 `demo/README.md`。
 
 专用日志位于仓库根目录的 `logs/demo/`，PID 位于 Git 忽略的 `.movielife-runtime/demo-app.pid`。受限健康地址为 `http://127.0.0.1:18081/actuator/health`，只返回 `application`、`mysql`、`redis` 的状态；Actuator 发现页、环境、配置和详情均不开放。
 
@@ -98,4 +108,4 @@ Step 16.1 的最低验收为：
 .\tools\infrastructure.ps1 reset -Force
 ```
 
-`stop` 保留容器、网络、Secret 和数据卷；再次执行 `start` 会使用原数据。`reset -Force` 只删除 Compose 项目 `movielife` 管理的两个容器、独立网络和两个数据卷，不操作开发者已有的 MySQL、Redis 或其他 Docker 资源。重置后再次执行 `start` 会重新导入权威 `sql/movielife.sql`。确定性演示数据和自动业务演示属于后续 Step 16.4～16.5，本 Step 不提前实现。
+`stop` 保留容器、网络、Secret 和数据卷；再次执行 `start` 会使用原数据。`reset -Force` 只删除 Compose 项目 `movielife` 管理的两个容器、独立网络和两个数据卷，不操作开发者已有的 MySQL、Redis 或其他 Docker 资源。重置后再次执行 `start` 会重新导入权威 `sql/movielife.sql`。确定性演示数据由 Step 16.4 独立脚本管理；自动业务演示仍属于后续 Step 16.5，本 Step 不提前实现。

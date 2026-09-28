@@ -2471,6 +2471,34 @@ Step 16.2 不改变应用配置默认值、生产 Java、SQL、Redis Key、公�
 
 新增 Demo 健康 HTTP 测试 2 项，全量自动化测试由 613 项增加到 615 项，0 failure、0 error、0 skipped；不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。Step 16.3 不修改 SQL、业务接口、权限、Redis Key、锁座或订单状态机，不实现确定性演示数据、自动业务演示、Postman Collection、前端或 AI 个性化推荐。下一步只能进入独立 Step 16.4。
 
+### 13.5 Step 16.4 确定性演示数据与安全重置
+
+#### 13.5.1 数据集与所有权边界
+
+Step 16.4 的 SQL 位于 `demo/sql/`，与权威 `sql/movielife.sql` 及正式 Migration 完全分离，不修改阶段 1～15 表结构、索引或业务状态机。所有预置主键使用保留区间 `1604000000..1604999999`，名称带 `[DEMO-16.4]`；保留 Venue 及其动态创建的 Showtime、ShowtimeSeat 和订单子记录属于演示闭包。重置不得使用 `DROP DATABASE`、`TRUNCATE`、关闭外键检查或无条件全表删除。
+
+固定数据包含普通购票用户、目标场馆有效员工、其他场馆员工、目标场馆停用员工，两家 Venue、目标 Venue 的两个 Hall 与各 6 个有效 Seat，一个在售 Activity，以及一个带 3 条评价和已发布展示摘要的 Movie。目标 Venue 的星光厅预置一个固定座位 Activity 场次；创排厅保持无未来排期，用于调用阶段 15 管理接口真实创建场次。预置数据不包含订单、票码、支付、核销或 Redis 锁座结果。
+
+#### 13.5.2 动态时间与幂等安装
+
+`demo/sql/install.sql` 在同一事务内以 MySQL 当前日期计算“第 2 天 19:30～21:30”，保证每次重置后的场次处于未来。安装使用固定主键和唯一业务标识执行 Upsert，随后由 `demo/sql/check.sql` 核验角色隔离、未来在售场次、空闲创建厅、评价摘要及库存等式。若演示 Venue 已产生订单，安装入口拒绝覆盖并要求先重置，避免把真实 API 形成的 ShowtimeSeat 或订单状态伪装回初始值。
+
+根目录 `demo-data-install.ps1`、`demo-data-check.ps1` 和 `demo-data-reset.ps1 -Force` 是人工入口，内部统一调用 `tools/demo-data.ps1`。`demo-up.ps1` 在应用构建和启动前自动完成安装与检查，因此每次从已停止状态启动都得到同一角色和资源契约。数据变更入口要求 Demo 应用停止，检查入口保持只读。
+
+#### 13.5.3 Redis 与 MySQL 安全重置
+
+重置先在 MySQL 删除前读取演示 Venue 的全部 Showtime ID。Redis 清理按这些 ID 精确定位 `seat:lock:{showtimeId}:*`，由座位锁值反查对应 Token Key，并检查剩余 Token 元数据的 `showtimeId/userId`；登录 Token 只在其值属于演示用户保留段时删除。固定登录验证码/限流、详情缓存、评价点赞、Feed、AI Summary Cache 使用明确 ID 删除，Venue GEO 只对共享 `venue:geo:上海:THEATER` 执行演示 Venue 成员 `ZREM`，不删除整个 Key。无法证明属于演示数据的未知 Key 必须保留。
+
+MySQL 在单事务内先快照演示 Showtime 和订单 ID，再依次删除订单项、场次座位、订单、场次、AI 摘要任务/版本、演示用户关联数据、员工关系、Seat、Hall、Activity、Movie、Venue 和 User。外键检查始终开启；若存在超出演示闭包的引用，重置明确失败而不是破坏非演示数据。重置必须显式传入 `-Force`，并在记录的 Demo 应用仍运行时拒绝执行。
+
+#### 13.5.4 验收与冻结
+
+冻结验收必须覆盖：连续两次安装均成功；未来场次、员工权限隔离、两个 Hall 的有效 Seat、ShowtimeSeat 数量及 `total_seats = available_seats` 一致；Movie AI Summary 在 AI 默认关闭时仍可从已发布 MySQL 事实读取；目标员工管理 HTTP 为成功，普通用户、其他 Venue 员工和停用员工均被拒绝；普通用户通过真实 HTTP 产生的登录态和临时锁座在重置后精确消失。另以区间外 MySQL/Redis 哨兵证明非演示数据保持不变，并验证无 `-Force` 与运行中重置均拒绝执行。
+
+既有 AI Summary 持久化测试的结果计数必须限定到测试自身的 `targetType + targetId`，不得假设整张摘要表为空；该测试隔离修正不改变生产代码、持久化语义或状态机，并保证全量测试可在合法 Demo 摘要同时存在时通过。
+
+最后继续执行凭据扫描、全量自动化测试及不跳过测试的 `mvn clean package`。Step 16.4 不实现自动业务演示、Postman Collection、前端、部署或 AI 个性化推荐；完成真实联调、构建与 Git 提交后冻结，下一步只能进入独立 Step 16.5。
+
 ## 14. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -2506,4 +2534,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.37，阶段 1～15 与 Stage 16 Step 16.1～16.3 均已完成并正式冻结。Stage 16 只处理交付与演示工程化，下一步只能推进独立 Step 16.4，不得回改既有冻结业务语义或顺带扩展其他 AI 能力。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.37，阶段 1～15 与 Stage 16 Step 16.1～16.4 均已完成并正式冻结。Stage 16 只处理交付与演示工程化，下一步只能推进独立 Step 16.5，不得回改既有冻结业务语义或顺带扩展其他 AI 能力。

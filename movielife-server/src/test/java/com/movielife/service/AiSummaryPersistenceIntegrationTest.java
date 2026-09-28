@@ -1,5 +1,6 @@
 package com.movielife.service;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.movielife.ai.AiSummaryPublication;
 import com.movielife.entity.AiReviewSummary;
 import com.movielife.entity.AiSummaryTask;
@@ -139,7 +140,7 @@ class AiSummaryPersistenceIntegrationTest {
                 "worker-b", now.plusSeconds(5));
 
         assertThat(second.getId()).isEqualTo(first.getId());
-        assertThat(summaryMapper.selectCount(null)).isEqualTo(1L);
+        assertThat(summaryCount(AiSummaryTargetType.MOVIE, targetId)).isEqualTo(1L);
         AiSummaryTask task = service.findTask(AiSummaryTargetType.MOVIE, targetId);
         assertThat(task.getStatus()).isEqualTo("SUCCEEDED");
         assertThat(task.getProcessedVersion()).isEqualTo(2L);
@@ -203,7 +204,7 @@ class AiSummaryPersistenceIntegrationTest {
                 .isInstanceOf(IllegalStateException.class);
         assertThatThrownBy(() -> service.publish(publication, "worker-a", now.plusMinutes(3)))
                 .isInstanceOf(IllegalStateException.class);
-        assertThat(summaryMapper.selectCount(null)).isZero();
+        assertThat(summaryCount(AiSummaryTargetType.MOVIE, targetId)).isZero();
     }
 
     @Test
@@ -219,6 +220,12 @@ class AiSummaryPersistenceIntegrationTest {
                 now.plusSeconds(2))).isInstanceOf(IllegalArgumentException.class);
         assertThat(taskMapper.selectByTarget("MOVIE", targetId).getStatus())
                 .isEqualTo("PROCESSING");
+    }
+
+    private long summaryCount(AiSummaryTargetType targetType, long targetId) {
+        return summaryMapper.selectCount(new LambdaQueryWrapper<AiReviewSummary>()
+                .eq(AiReviewSummary::getTargetType, targetType.name())
+                .eq(AiReviewSummary::getTargetId, targetId));
     }
 
     private AiSummaryPublication publication(AiSummaryTargetType targetType,

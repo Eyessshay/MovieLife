@@ -28,6 +28,11 @@ try {
         throw "MovieLife MySQL password file is missing: $DemoPasswordFile"
     }
 
+    & (Join-Path $PSScriptRoot 'tools\demo-data.ps1') install
+    if ($LASTEXITCODE -ne 0) {
+        throw 'MovieLife deterministic demo data installation failed.'
+    }
+
     $mavenWrapper = Join-Path $DemoServerDirectory 'mvnw.cmd'
     if (-not (Test-Path -LiteralPath $mavenWrapper)) {
         throw "Maven Wrapper is missing: $mavenWrapper"
