@@ -7,3 +7,4 @@ logs/
 
 application-local.yml
 .env
+/.movielife-runtime/

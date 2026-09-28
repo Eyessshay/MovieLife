@@ -2409,6 +2409,38 @@ Step 16.1 不新增 Docker Compose、应用启停脚本、健康检查接口、�
 
 Step 16.1 至此冻结。下一步只能进入 Step 16.2 可复现基础设施设计与实现，不得提前加入应用生命周期脚本、演示数据、自动业务演示、前端或 AI 个性化推荐。
 
+### 13.3 Step 16.2 可复现基础设施
+
+#### 13.3.1 交付边界与资源命名
+
+本 Step 只交付 MySQL 8.0.17 与 Redis 7.2.5 的本地容器编排，不实现应用进程启停、业务健康接口、额外演示数据、自动 HTTP 演示、Postman Collection、前端或 AI 个性化推荐。权威数据库结构和种子数据仍唯一来自 `sql/movielife.sql`，不得为了容器初始化修改阶段 1～15 的业务表、索引、约束或状态语义。
+
+Compose 项目名固定为 `movielife`，容器固定为 `movielife-mysql`、`movielife-redis`，桥接网络固定为 `movielife-network`，数据卷固定为 `movielife-mysql-data`、`movielife-redis-data`。宿主机仅在回环地址暴露 MySQL `127.0.0.1:13306` 和 Redis `127.0.0.1:16379`，不占用应用原默认端口，也不会连接或清理开发者已有的 `3306`、`6379` 服务。
+
+#### 13.3.2 初始化、凭据与健康契约
+
+MySQL 数据卷第一次创建时，由官方镜像初始化流程只读挂载并执行 `sql/movielife.sql`；已有数据卷再次启动时不重复初始化。容器开启 `log_bin_trust_function_creators=1`，只用于允许现有事务自动化测试以非管理员应用用户临时创建 Trigger，不授予 `SUPER` 权限，也不改变权威 SQL。Compose 文件不保存真实密码或可用固定密码，首次 `start` 由 PowerShell 使用密码学安全随机数分别生成 Root 和应用用户密码，保存到 Git 忽略的 `.movielife-runtime/`，并通过 Compose Secret 文件挂载。脚本和文档不打印密码，应用用户固定为 `movielife`。Redis 不设置密码，只绑定回环地址，并开启 AOF `everysec` 持久化；该约定只适用于受控本地交付环境，不是公网部署方案。
+
+MySQL 健康检查使用容器内 `mysqladmin ping`，Redis 健康检查使用 `redis-cli PING`。`start` 必须等待两者健康后，再验证 MovieLife 数据库包含 20 张表、阶段 15 相关关键唯一索引、稳定种子数据以及 Redis `PONG`，任一条件不满足即以非零状态失败。
+
+#### 13.3.3 生命周期与清理契约
+
+统一入口为仓库根目录的 `tools/infrastructure.ps1`：
+
+- `start`：创建缺失 Secret，以固定 Compose 配置幂等执行 `up --detach --wait` 并自动验证。
+- `status`：只显示本项目两个容器的 Compose 状态和健康状态。
+- `verify`：只读核验 MySQL 表、关键索引、种子数据及 Redis `PING`。
+- `stop`：普通停止两个容器，保留容器、独立网络、本地 Secret 和数据卷。
+- `reset -Force`：显式破坏性演示重置，只对固定项目执行 `down --volumes --remove-orphans`；删除本项目容器、网络和数据卷，保留本地 Secret，不扫描或删除任何其他容器和卷。省略 `-Force` 必须拒绝执行。
+
+#### 13.3.4 验收与冻结
+
+Step 16.2 必须从本项目无容器、无数据卷状态执行 `start`，确认 SQL 初始化、20 张表、关键索引、种子数据和 Redis `PONG`；再次执行 `start` 必须成功且不重复创建资源；普通 `stop` 后再次 `start` 必须保持 MySQL 实例身份与持久数据，并继续通过验证；`reset -Force` 前后必须证明非 MovieLife 容器不受影响，MovieLife 专用容器、网络和数据卷被删除。最后继续执行凭据扫描、全量测试和不跳过测试的 `mvn clean package`。
+
+Step 16.2 不改变应用配置默认值、生产 Java、SQL、Redis Key、公开 API、权限、锁座或订单状态机。完成上述自动化、真实 Docker 联调、构建与 Git 提交后方可冻结；下一步只能进入独立 Step 16.3，不得提前实现其能力。
+
+冻结验收实际从无 MovieLife 容器、网络和数据卷状态完成首次启动，MySQL 20 张表、3 组关键唯一索引、稳定种子数据与 Redis `PONG` 均通过脚本校验；重复 `start` 保持幂等。普通 `stop` 后重新启动时 MySQL `server_uuid` 不变，Redis 临时持久化标记仍存在且随后已删除。无 `-Force` 的重置被拒绝且容器保持健康；`reset -Force` 只删除 MovieLife 专属资源，验收前已存在的 `redis` 与 `trendradar` 容器状态均未改变。专用非管理员 MySQL 用户完成 Trigger 事务测试，全量 613 项自动化测试为 0 failure、0 error、0 skipped，`mvn clean package` 为 `BUILD SUCCESS`。打包产物连接本 Compose 基础设施完成启动自检，真实 `GET /api/movies?page=1&pageSize=1` 返回 HTTP 200 与业务码 `OK`。凭据扫描未发现供应商 Key，验收产生的应用进程、临时 Redis 标记、MovieLife 容器、网络和数据卷均在冻结前清理。
+
 ## 14. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -2444,4 +2476,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.37，阶段 1～15 与 Stage 16 Step 16.1 均已完成并正式冻结。Stage 16 只处理交付与演示工程化，下一步只能推进 Step 16.2，不得回改既有冻结业务语义或顺带扩展其他 AI 能力。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.37，阶段 1～15 与 Stage 16 Step 16.1～16.2 均已完成并正式冻结。Stage 16 只处理交付与演示工程化，下一步只能推进独立 Step 16.3，不得回改既有冻结业务语义或顺带扩展其他 AI 能力。

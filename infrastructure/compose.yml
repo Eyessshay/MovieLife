@@ -1,0 +1,61 @@
+services:
+  mysql:
+    image: mysql:8.0.17
+    container_name: movielife-mysql
+    command: ["--log-bin-trust-function-creators=1"]
+    environment:
+      MYSQL_DATABASE: movielife
+      MYSQL_USER: movielife
+      MYSQL_PASSWORD_FILE: /run/secrets/mysql_app_password
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/mysql_root_password
+      TZ: Asia/Shanghai
+    ports:
+      - "127.0.0.1:13306:3306"
+    volumes:
+      - movielife-mysql-data:/var/lib/mysql
+      - ../sql/movielife.sql:/docker-entrypoint-initdb.d/001-movielife.sql:ro
+    secrets:
+      - mysql_app_password
+      - mysql_root_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "--host=127.0.0.1", "--silent"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    networks:
+      - movielife-network
+
+  redis:
+    image: redis:7.2.5-alpine
+    container_name: movielife-redis
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    ports:
+      - "127.0.0.1:16379:6379"
+    volumes:
+      - movielife-redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "PING"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+    networks:
+      - movielife-network
+
+secrets:
+  mysql_app_password:
+    file: ../.movielife-runtime/mysql-app-password.txt
+  mysql_root_password:
+    file: ../.movielife-runtime/mysql-root-password.txt
+
+volumes:
+  movielife-mysql-data:
+    name: movielife-mysql-data
+  movielife-redis-data:
+    name: movielife-redis-data
+
+networks:
+  movielife-network:
+    name: movielife-network
+    driver: bridge

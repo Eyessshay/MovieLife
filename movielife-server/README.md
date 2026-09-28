@@ -7,6 +7,7 @@ Stage 16 只处理交付与演示工程化，不改变既有业务接口、状�
 ## 支持环境
 
 - Windows 10/11 与 PowerShell 5.1 或更高版本
+- Docker Desktop 与 Docker Compose v2
 - JDK 8
 - 项目自带 Maven Wrapper
 - MySQL 8.0.17
@@ -28,10 +29,21 @@ AI Review Summary 默认关闭。核心登录、发现、锁座和票务演示�
 
 ## 本地启动
 
-先导入 `../sql/movielife.sql`，并启动 MySQL 8.0.17 与 Redis 7。然后在当前 PowerShell 会话中设置最少配置：
+推荐从仓库根目录使用 Step 16.2 冻结的一键基础设施。它只创建 `movielife-*` 专用资源，首次启动自动导入 `../sql/movielife.sql`：
 
 ```powershell
-$env:MYSQL_PASSWORD = '<local-mysql-password>'
+.\tools\infrastructure.ps1 start
+```
+
+随后在当前 PowerShell 会话中设置应用连接。MySQL 密码从 Git 忽略的本地 Secret 文件读取，不会输出到终端：
+
+```powershell
+Set-Location .\movielife-server
+$env:MYSQL_URL = 'jdbc:mysql://localhost:13306/movielife?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true'
+$env:MYSQL_USERNAME = 'movielife'
+$env:MYSQL_PASSWORD = (Get-Content ..\.movielife-runtime\mysql-app-password.txt -Raw).Trim()
+$env:REDIS_HOST = 'localhost'
+$env:REDIS_PORT = '16379'
 $env:AI_REVIEW_SUMMARY_ENABLED = 'false'
 .\mvnw.cmd spring-boot:run
 ```
@@ -56,4 +68,13 @@ Step 16.1 的最低验收为：
 4. Git 跟踪文件和全部历史不包含真实供应商 Key。
 5. 全量测试与不跳过测试的 `mvn clean package` 成功。
 
-一键基础设施、应用生命周期脚本、确定性演示数据和自动业务演示属于后续 Step 16.2～16.5，本 Step 不提前实现。
+基础设施状态、验证、普通停止和演示重置命令如下：
+
+```powershell
+.\tools\infrastructure.ps1 status
+.\tools\infrastructure.ps1 verify
+.\tools\infrastructure.ps1 stop
+.\tools\infrastructure.ps1 reset -Force
+```
+
+`stop` 保留容器、网络、Secret 和数据卷；再次执行 `start` 会使用原数据。`reset -Force` 只删除 Compose 项目 `movielife` 管理的两个容器、独立网络和两个数据卷，不操作开发者已有的 MySQL、Redis 或其他 Docker 资源。重置后再次执行 `start` 会重新导入权威 `sql/movielife.sql`。应用生命周期、确定性演示数据和自动业务演示属于后续 Step 16.3～16.5，本 Step 不提前实现。
