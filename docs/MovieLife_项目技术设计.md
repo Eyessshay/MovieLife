@@ -2525,6 +2525,32 @@ MySQL 只在流程结束后执行只读验收查询：主演示订单为 `PAID`�
 
 Step 16.5 不新增或修改业务 API、SQL Schema、Redis Key 语义、支付实现、外部 AI 调用、前端、部署或 Postman Collection。完成真实联调、构建与 Git 提交后冻结，下一步只能进入独立 Step 16.6 最终交付文档与验收清单。
 
+### 13.7 Step 16.6 文档、最终验收与冻结
+
+#### 13.7.1 文档交付契约
+
+`movielife-server/README.md` 是陌生使用者的主入口，必须独立说明项目定位与完成范围、架构及 MySQL/Redis 职责、支持环境、五分钟启动、安全配置、演示账号、自动演示、测试构建、故障排查、停止清理、阶段冻结状态和暂不支持能力。所有命令默认从仓库根目录执行，必须使用相对路径、不可用占位符或脚本生成的本地 Secret，不得写入本机绝对路径、真实密码、临时 Token 或票码。
+
+README 必须明确本项目当前只有后端 API，根路径 404 不代表启动失败；健康事实由受限 `/actuator/health`、生命周期状态脚本和自动演示报告共同提供。针对 Windows 执行策略，文档提供仅对新进程生效的 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File` 入口，不要求用户降低全局安全策略。
+
+#### 13.7.2 最终验收顺序
+
+冻结验收必须从无 MovieLife 应用进程、专用容器、网络和数据卷的接近干净状态开始。依次核对 Git 工作树与提交、由脚本创建 Git 忽略的安全 Secret、执行一键启动、安装确定性数据、完成 32 项正式 HTTP 业务检查、验证 MySQL/Redis 最终事实，再停止应用并保留专用基础设施用于测试。
+
+测试阶段先运行 Stage 16 新增的 4 项 AI 配置校验与 2 项 Demo 健康测试，再运行包含阶段 1～15 原有 609 项的完整测试集，最后执行不跳过测试的 `mvn clean package`。不得通过排除失败测试、降低测试数量或关闭启动检查伪造通过。验收结束后必须安全删除演示数据与临时 Key，并只清理 MovieLife 专用容器、网络和数据卷。
+
+#### 13.7.3 冻结边界
+
+最终证据写入 `docs/stage16_final_acceptance.md`，下一对话上下文写入 `docs/next_conversation_context_stage16.md`。Git Tag 不替代冻结提交，也不在本 Step 自动创建。Stage 16.6 只完善交付文档和执行最终验收，不新增生产业务代码、API、SQL Schema、Redis Key、前端、云部署或 AI 个性化推荐。
+
+#### 13.7.4 验收与冻结
+
+最终验收先删除既有 MovieLife 演示数据、应用、专用容器、网络、数据卷和两个项目生成 Secret，再从全部运行资源为零的状态按 README 原样执行一键入口。脚本重新生成 Git 忽略的随机 Secret，完成 MySQL Schema、索引、种子与动态未来数据初始化，应用健康组件严格为 `application/mysql/redis`，并通过 `[00]`～`[32]` 全部正式 HTTP 与事实检查。独立复核得到订单 `PAID/CANCELED/REFUNDED`、主演示库存 `6:4`、分支库存 `6:6`、一张 USED 与一张 VALID 票，Redis `seat:lock:*` 为零，脱敏报告未命中完整手机号或长 Token/票码。
+
+Stage 16 专项 6 项全部通过；随后不排除任何测试的 `mvnw.cmd test` 为 615 项、0 failure、0 error、0 skipped，覆盖阶段 1～15 原有 609 项和本阶段新增 6 项。不跳过测试的 `mvnw.cmd clean package` 再次执行 615 项并为 `BUILD SUCCESS`。凭据工具扫描当前跟踪文件、全部可达 Git 历史和工作树均无供应商 Key 命中。
+
+验收结束后按文档顺序安全删除演示数据和临时 Redis Key，再删除 MovieLife 应用、PID、端口、两个专用容器、独立网络和两个数据卷；最终计数均为零。验收前存在的非 MovieLife `redis` 与 `trendradar` 容器保持原状态。Stage 16 至此整体冻结；不自动创建 Git Tag，下一阶段尚未指定。
+
 ## 14. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -2560,4 +2586,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.37，阶段 1～15 与 Stage 16 Step 16.1～16.5 均已完成并正式冻结。Stage 16 只处理交付与演示工程化，下一步只能推进独立 Step 16.6，不得回改既有冻结业务语义或顺带扩展其他 AI 能力。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.37，阶段 1～15 与 Stage 16 Step 16.1～16.6 均已完成并正式冻结。Stage 16 只处理交付与演示工程化；下一阶段尚未指定，不得回改既有冻结业务语义或顺带扩展 AI 个性化推荐等新能力。
