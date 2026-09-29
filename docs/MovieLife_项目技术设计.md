@@ -2499,6 +2499,32 @@ MySQL 在单事务内先快照演示 Showtime 和订单 ID，再依次删除订�
 
 最后继续执行凭据扫描、全量自动化测试及不跳过测试的 `mvn clean package`。Step 16.4 不实现自动业务演示、Postman Collection、前端、部署或 AI 个性化推荐；完成真实联调、构建与 Git 提交后冻结，下一步只能进入独立 Step 16.5。
 
+### 13.6 Step 16.5 自动化业务演示
+
+#### 13.6.1 入口与基线契约
+
+根目录 `demo-run.ps1` 是自动业务演示的唯一主入口。默认模式复用健康的 Demo 应用，并要求 Step 16.4 数据仍处于无交易的确定性基线；基线已发生交易时必须明确失败并提示 `demo-run.ps1 -Reset`，不得暗中删除数据。`-Reset` 先只停止脚本 PID 文件记录且身份匹配的应用进程，再调用 Step 16.4 安全重置，随后通过既有 `demo-up.ps1` 重建运行态。它不操作其他 Java 进程、非 MovieLife 容器或区间外数据。
+
+实际业务编排位于 `tools/demo-business.ps1`，兼容 Windows PowerShell 5.1。验证码仍由 `/api/user/code` 正式接口产生；脚本只读取本地 Redis 中的六位验证码作为本地短信投递通道，不直接生成或写入验证码。除此以外，场次、锁座、订单、支付、出票、核销、停售、恢复、取消和退款全部只通过正式 HTTP 接口完成，Token、订单 ID、`lockToken` 和票码由响应自动串联。
+
+#### 13.6.2 主链路与失败分支
+
+主链路固定覆盖目标 Venue 有效员工登录、管理列表、创建固定座位 Activity 场次、匿名 Activity 与场次发现、Seat Map、普通用户登录和双座锁定、订单创建、支付、出票及本场馆员工核销。另一 Venue 员工使用同一真实票码核销必须得到 HTTP 403 与 `TICKET_VERIFY_FORBIDDEN`，随后目标员工核销成功。
+
+独立分支场次先建立临时锁再停售，验证停售后新锁座及旧 `lockToken` 下单均得到 HTTP 404 与 `SHOWTIME_NOT_FOUND`；旧锁仅通过正式释放接口清理。恢复后创建未支付订单，再次停售并验证该既有订单可取消；再次恢复后重新锁座、下单、支付和退款。演示不伪造已支付订单、票码、锁座结果或 AI 外部响应，也不改变阶段 1～15 状态机。
+
+#### 13.6.3 最终事实、隔离与脱敏
+
+MySQL 只在流程结束后执行只读验收查询：主演示订单为 `PAID`，两张票分别为 `USED` 与 `VALID`，对应两个 ShowtimeSeat 为已售且 `available_seats=4`；分支订单分别收敛为 `CANCELED` 与 `REFUNDED`，六个场次座位全部恢复可售且 `available_seats=6`。Redis 最终只读扫描必须确认不存在 `seat:lock:*`。演示前后还通过正式 HTTP 比较 AI Summary、收藏、Review Like 与 Venue GEO 响应，并在最终查询中复核相关持久化事实未改变。
+
+终端按步骤输出简短结果；任一步失败都必须报告环节、HTTP 状态、业务错误码和受控错误消息。成功或失败报告均写入 Git 忽略的 `logs/demo/reports/`。手机号只保留前三后四，Token、`lockToken` 和票码只保留首尾四位，验证码不进入报告；日志和异常不得输出完整凭据。PowerShell 脚本是主交付方式，Postman Collection 不作为必要依赖。
+
+#### 13.6.4 冻结验收
+
+冻结验收已从 Step 16.4 基线连续完成两轮 32 项真实 HTTP/事实检查，第二轮显式走 `-Reset`；两轮均无人工复制标识，订单/票/库存收敛且 Redis 锁座 Key 为零，两份报告均未命中完整手机号、Token 或票码。脚本语法、Windows PowerShell 5.1 源码兼容、凭据和差异检查均通过；全量 615 项测试为 0 failure、0 error、0 skipped，不跳过测试的 `mvn clean package` 为 `BUILD SUCCESS`。演示结束后停止应用，安全删除演示数据，再只清理 MovieLife 专用容器、网络和数据卷。
+
+Step 16.5 不新增或修改业务 API、SQL Schema、Redis Key 语义、支付实现、外部 AI 调用、前端、部署或 Postman Collection。完成真实联调、构建与 Git 提交后冻结，下一步只能进入独立 Step 16.6 最终交付文档与验收清单。
+
 ## 14. 服务端模块建议
 
 `movielife-server/` 预留为后端工程，建议按以下领域拆分：
@@ -2534,4 +2560,4 @@ common     统一响应、异常、鉴权、限流、幂等
 
 电影表的 `actors` 第一版继续使用 `TEXT` 保存逗号分隔字符串，由 Service/Converter 拆分为 `MovieDetailVO.actors: List<String>`，不在数据库层提前引入 JSON 改造。
 
-详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.37，阶段 1～15 与 Stage 16 Step 16.1～16.4 均已完成并正式冻结。Stage 16 只处理交付与演示工程化，下一步只能推进独立 Step 16.5，不得回改既有冻结业务语义或顺带扩展其他 AI 能力。
+详细接口以 [API接口设计.md](API接口设计.md) 为准；当前 API 文档为 v0.37，阶段 1～15 与 Stage 16 Step 16.1～16.5 均已完成并正式冻结。Stage 16 只处理交付与演示工程化，下一步只能推进独立 Step 16.6，不得回改既有冻结业务语义或顺带扩展其他 AI 能力。

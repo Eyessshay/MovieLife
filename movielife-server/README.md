@@ -32,10 +32,18 @@ AI Review Summary 默认关闭。核心登录、发现、锁座和票务演示�
 在仓库根目录执行：
 
 ```powershell
-.\demo-up.ps1
+.\demo-run.ps1
 ```
 
-该命令会检查 JDK 8 和 Docker，幂等启动 Step 16.2 基础设施，安装并核验 Step 16.4 确定性演示数据，通过 Maven Wrapper 构建 Jar，并以专用 `demo` Profile 启动应用。脚本轮询真实健康状态，不使用固定等待时间；启动完成后应用地址为 `http://127.0.0.1:18081`。
+该命令会检查 JDK 8 和 Docker，幂等启动 Step 16.2 基础设施，安装并核验 Step 16.4 确定性演示数据，通过 Maven Wrapper 构建并以专用 `demo` Profile 启动应用，再自动完成 Step 16.5 的 32 项业务检查。脚本轮询真实健康状态，不使用固定等待时间；Token、订单 ID 和票码均自动传递。
+
+已经运行过业务演示时，使用显式安全重置恢复确定性基线并再次运行：
+
+```powershell
+.\demo-run.ps1 -Reset
+```
+
+终端会逐步输出业务结果，脱敏报告保存到 `logs/demo/reports/`。主演示、停售/取消/退款分支、最终事实核验和脱敏规则见 `demo/AUTOMATED_DEMO.md`。只需启动应用而不执行业务演示时，仍可使用 `demo-up.ps1`。
 
 状态检查和停止命令：
 
@@ -108,4 +116,4 @@ Step 16.1 的最低验收为：
 .\tools\infrastructure.ps1 reset -Force
 ```
 
-`stop` 保留容器、网络、Secret 和数据卷；再次执行 `start` 会使用原数据。`reset -Force` 只删除 Compose 项目 `movielife` 管理的两个容器、独立网络和两个数据卷，不操作开发者已有的 MySQL、Redis 或其他 Docker 资源。重置后再次执行 `start` 会重新导入权威 `sql/movielife.sql`。确定性演示数据由 Step 16.4 独立脚本管理；自动业务演示仍属于后续 Step 16.5，本 Step 不提前实现。
+`stop` 保留容器、网络、Secret 和数据卷；再次执行 `start` 会使用原数据。`reset -Force` 只删除 Compose 项目 `movielife` 管理的两个容器、独立网络和两个数据卷，不操作开发者已有的 MySQL、Redis 或其他 Docker 资源。重置后再次执行 `start` 会重新导入权威 `sql/movielife.sql`。确定性演示数据由 Step 16.4 独立脚本管理；Step 16.5 自动业务演示使用 `demo-run.ps1`，不以基础设施重置替代数据级安全重置。
