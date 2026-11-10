@@ -94,8 +94,36 @@ public class ActivityServiceImpl implements ActivityService {
         return new PageVO<>(items, page.getTotal(), query.getPage(), query.getPageSize());
     }
 
+
+    /*
+
+第一层：数据从哪里来？
+负责查数据
+- queryGeoCandidates()：附近场馆候选。
+- venueMapper.selectBatchIds()：场馆详情。
+- showtimeMapper.selectFutureActivityShowtimesByVenueIds()：未来场次。
+- activityMapper.selectBatchIds()、hallMapper.selectBatchIds()：活动和影厅详情。
+
+
+第二层：数据怎么筛选和组合？
+负责业务处理
+- 验证场馆是否有效。
+- 验证场次关联是否正确。
+- 筛选启用状态和活动类型。
+- 每个活动只保留一个最佳场次。
+
+
+第三层：最终怎么返回？
+负责结果整理
+- 按距离、开始时间、活动 ID 排序。
+- 计算分页范围。
+- 转换为 ActivityNearbyVO。
+- 填充收藏状态。
+
+     */
     @Override
     public List<ActivityNearbyVO> queryNearbyActivities(ActivityNearbyQueryDTO query) {
+        //1.接收查询条件
         if (query == null) {
             throw new BusinessException(ErrorCode.INVALID_PARAM);
         }
@@ -109,12 +137,17 @@ public class ActivityServiceImpl implements ActivityService {
                 ? java.util.Arrays.asList(VenueType.values())
                 : Collections.singletonList(query.getVenueType());
 
+        //2.查询附近场馆
+        //2.1 redis GEO
         List<NearbyVenueCandidate> geoCandidates = queryGeoCandidates(
                 query, city, venueTypes, candidateLimit);
         if (geoCandidates.isEmpty()) {
             return Collections.emptyList();
         }
 
+        //2.2 批量查询并转换为Map ：先一次性查询需要的数据，再通过 Map 关联，避免在循环中反复查询数据库
+        //2.3 venueMap.get(candidate.getVenueId() 遍历Map找对象
+        //2.4 筛选有效场馆
         Map<Long, Venue> venueMap = indexVenues(venueMapper.selectBatchIds(
                 geoCandidates.stream().map(NearbyVenueCandidate::getVenueId)
                         .collect(Collectors.toList())));
@@ -122,15 +155,19 @@ public class ActivityServiceImpl implements ActivityService {
                 .filter(candidate -> isValidNearbyVenue(
                         candidate, venueMap.get(candidate.getVenueId()), city))
                 .collect(Collectors.toList());
+        //2.5 排序
         validCandidates.sort(Comparator.comparingDouble(NearbyVenueCandidate::getDistance)
                 .thenComparing(NearbyVenueCandidate::getVenueId));
         if (validCandidates.isEmpty()) {
             return Collections.emptyList();
         }
 
+        //3.查询未来场次
+        //3.1 从有效场馆提取id
         List<Long> validVenueIds = validCandidates.stream()
                 .map(NearbyVenueCandidate::getVenueId)
                 .collect(Collectors.toList());
+        //3.2 查询未来活动场次
         List<Showtime> showtimes = showtimeMapper
                 .selectFutureActivityShowtimesByVenueIds(validVenueIds);
         if (showtimes.isEmpty()) {
@@ -138,6 +175,7 @@ public class ActivityServiceImpl implements ActivityService {
         }
         showtimes.forEach(this::validateNearbyShowtime);
 
+        //4.批量加载关联数据
         Map<Long, NearbyVenueCandidate> candidateMap = validCandidates.stream()
                 .collect(Collectors.toMap(
                         NearbyVenueCandidate::getVenueId,
@@ -153,6 +191,8 @@ public class ActivityServiceImpl implements ActivityService {
         Map<Long, Activity> activityMap = indexActivities(activityMapper.selectBatchIds(activityIds));
         Map<Long, Hall> hallMap = indexHalls(hallMapper.selectBatchIds(hallIds));
 
+
+        //5.遍历场次，筛选活动并挑选最佳场次
         Map<Long, NearbyActivityChoice> choices = new HashMap<>();
         for (Showtime showtime : showtimes) {
             NearbyVenueCandidate candidate = candidateMap.get(showtime.getVenueId());
@@ -169,6 +209,7 @@ public class ActivityServiceImpl implements ActivityService {
                 continue;
             }
 
+            //比较同一活动对应的不同场次候选，选择一个最佳场次
             NearbyActivityChoice choice = new NearbyActivityChoice(
                     activity, venue, showtime, candidate.getDistance());
             NearbyActivityChoice current = choices.get(activity.getId());

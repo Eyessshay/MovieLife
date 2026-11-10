@@ -47,6 +47,7 @@ public class MovieServiceImpl implements MovieService {
 
     @Override
     public PageVO<MovieListItemVO> queryMovies(MovieQueryDTO query) {
+        // ① 构造查询条件
         LambdaQueryWrapper<Movie> wrapper = new LambdaQueryWrapper<>();
         wrapper.like(StringUtils.hasText(query.getKeyword()), Movie::getTitle, query.getKeyword())
                 .eq(query.getStatus() != null, Movie::getStatus,
@@ -55,12 +56,14 @@ public class MovieServiceImpl implements MovieService {
                 .eq(StringUtils.hasText(query.getRegion()), Movie::getRegion, query.getRegion())
                 .orderByDesc(Movie::getReleaseDate)
                 .orderByDesc(Movie::getId);
-
+        // ② 执行分页查询
         Page<Movie> moviePage = movieMapper.selectPage(
                 new Page<>(query.getPage(), query.getPageSize()),
                 wrapper
         );
+        // 单独查询收藏情况
         Set<Long> collectedIds = findCollectedMovieIds(moviePage.getRecords());
+        // 类型转换，添加收藏状态
         List<MovieListItemVO> items = moviePage.getRecords().stream()
                 .map(movie -> toListVO(movie, collectedIds.contains(movie.getId())))
                 .collect(Collectors.toList());
